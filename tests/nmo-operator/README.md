@@ -164,3 +164,17 @@ string-typed `spec.reason` field.
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="Reject NodeMaintenance with malformed field data" ./tests/nmo-operator/...`
 - **Pass criteria**: Creating a NodeMaintenance CR with an integer `spec.reason` fails with an error containing `must be of type string: "integer"` and the CR is not created; creating a NodeMaintenance CR with a malformed `metadata.name` fails with an error containing `must start and end with an alphanumeric character`
+
+### 13. Reject Second Control-Plane Maintenance That Violates etcd Quorum ([OCP-46790](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-46790))
+
+Places one control-plane node into maintenance, then verifies the NMO admission
+webhook rejects a NodeMaintenance for a second control-plane node because it would
+violate etcd quorum. Skips on clusters that cannot exercise a single-disruption
+etcd quorum: SNO, fewer than 3 control-plane nodes, or an etcd PDB that does not
+tolerate exactly one disruption (e.g. a 5-member control plane).
+
+- **Operators**: NMO v0.17.0+
+- **Cluster**: MNO with a 3-member etcd control plane (etcd PDB DisruptionsAllowed=1); skipped otherwise
+- **Environment**: Connected or disconnected
+- **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="Rejects a second control-plane NodeMaintenance" ./tests/nmo-operator/...`
+- **Pass criteria**: The NodeMaintenance validating webhook is present (a ValidatingWebhookConfiguration intercepts nodemaintenances); at start the etcd guard PodDisruptionBudget in openshift-etcd reports DisruptionsAllowed=1 and is logged; the first control-plane NodeMaintenance reaches Succeeded phase; the first node is cordoned (Unschedulable=true) with the medik8s.io/drain NoSchedule taint; DrainProgress=100 and PendingPods empty; the etcd PDB then reports DisruptionsAllowed=0; the second control-plane node's etcd guard pod is confirmed Ready; creating a NodeMaintenance for that second, distinct control-plane node is rejected with an error containing "will violate etcd quorum"; the second control-plane node remains schedulable (Unschedulable=false); on teardown both NodeMaintenance CRs are deleted and both nodes return to Ready and uncordoned
