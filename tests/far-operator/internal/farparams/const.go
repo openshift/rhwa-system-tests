@@ -87,7 +87,7 @@ const (
 	// DefaultPollInterval to reduce List pressure on the shared rate-limited client.
 	EventVerifyInterval = 10 * time.Second
 
-	// RemediationCRDeletionTimeout is how long to wait for a FAR/FART CR to be fully deleted.
+	// RemediationCRDeletionTimeout is how long to wait for a FAR or FAR template CR to be fully deleted.
 	RemediationCRDeletionTimeout = 2 * time.Minute
 
 	// ControllerLeaseName is the FAR leader election lease name (LeaderElectionID in cmd/main.go).
@@ -119,11 +119,11 @@ const (
 	// WorkloadPodReadyTimeout is how long to wait for a test workload pod to reach Running.
 	WorkloadPodReadyTimeout = 2 * time.Minute
 
-	// FARCRRetryCount is the retry count for FAR/FART CR spec (matches upstream default).
+	// FARCRRetryCount is the retry count for FAR and FAR template CR specs (matches upstream default).
 	FARCRRetryCount = 10
-	// FARCRRetryInterval is the retry interval for FAR/FART CR spec.
+	// FARCRRetryInterval is the retry interval for FAR and FAR template CR specs.
 	FARCRRetryInterval = "20s"
-	// FARCRTimeout is the fence agent command timeout for FAR/FART CR spec.
+	// FARCRTimeout is the fence agent command timeout for FAR and FAR template CR specs.
 	FARCRTimeout = "60s"
 	// FARCRRemediationStrategy is the default remediation strategy for FAR CRs.
 	FARCRRemediationStrategy = "OutOfServiceTaint"
@@ -186,6 +186,27 @@ const (
 	// worker must exist for it to reschedule onto while the target reboots. The timed-out
 	// spec needs only ExpectedReplicas nodes; this gate is driven by must-gather.
 	MinWorkersForObservabilityTests = int(ExpectedReplicas) + 1
+
+	// NodeNotReadyTimeout is how long to wait for a node to become NotReady after kubelet stop.
+	NodeNotReadyTimeout = 5 * time.Minute
+	// SSHTimeout is the timeout for SSH-based node operations.
+	SSHTimeout = 30 * time.Second
+	// NHCEnabledTimeout is how long to wait for a test NodeHealthCheck to become enabled.
+	NHCEnabledTimeout = 2 * time.Minute
+	// ControllerLogsTimeout is the deadline for collecting controller logs.
+	ControllerLogsTimeout = 1 * time.Minute
+	// ControllerRBACTimeout is the deadline for collecting controller RBAC diagnostics.
+	ControllerRBACTimeout = 15 * time.Second
+	// NHCInteropLabelKey scopes the NHC selector to the target node.
+	NHCInteropLabelKey = "e2e.medik8s.io/far-nhc-target"
+	// NHCDetectionTimeout is how long to wait for NHC to create a FAR CR.
+	NHCDetectionTimeout = 5 * time.Minute
+	// NHCRecoveryTimeout is how long to wait for NHC to clear unhealthy state.
+	NHCRecoveryTimeout = 5 * time.Minute
+	// NHCUnhealthyDuration is the duration before NHC triggers remediation.
+	NHCUnhealthyDuration = "30s"
+	// NHCEnabledPhase is the phase reported when NHC watches selected nodes.
+	NHCEnabledPhase = "Enabled"
 )
 
 // WorkloadTestImage is the container image used for test workload pods.

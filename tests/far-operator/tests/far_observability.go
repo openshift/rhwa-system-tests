@@ -13,7 +13,6 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -106,26 +105,7 @@ var _ = Describe("FAR Observability Tests",
 			GinkgoWriter.Printf("FAR leader is on node: %s\n", leaderNode)
 
 			By("Reading AWS credentials and creating shared Secret")
-
-			awsAccessKey, awsSecretKey, err := farutils.GetAWSCredentials(
-				ctx, APIClient, medik8sparams.OperatorNs)
-			Expect(err).ToNot(HaveOccurred())
-
-			credentialsSecret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      farparams.SharedCredentialsSecretName,
-					Namespace: medik8sparams.OperatorNs,
-				},
-				StringData: map[string]string{
-					"--access-key": awsAccessKey,
-					"--secret-key": awsSecretKey,
-				},
-			}
-
-			err = APIClient.Create(ctx, credentialsSecret)
-			if err != nil && !k8serrors.IsAlreadyExists(err) {
-				Expect(err).ToNot(HaveOccurred())
-			}
+			createCredentialsSecret(ctx, APIClient)
 
 			By("Building shared and node parameters for fence agent")
 
@@ -388,7 +368,8 @@ var _ = Describe("FAR Observability Tests",
 
 					DeferCleanup(func() {
 						By("Deleting timed-out FAR CR " + farCRName)
-						deleteRemediationCR(ctx, APIClient, farGVK, farCRName)
+						Expect(deleteRemediationCR(ctx, APIClient, farGVK, farCRName)).To(Succeed(),
+							"Failed to delete timed-out FAR CR %s", farCRName)
 					})
 
 					waitDuration := time.Duration(retryCount) * (retryIntervalDuration + farparams.TimedOutRetryBuffer)
