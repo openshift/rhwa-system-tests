@@ -109,7 +109,6 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/klauspost/compress v1.18.4
 	github.com/medik8s/common v1.17.0
-	github.com/medik8s/node-maintenance-operator v0.21.0
 	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.40.0
 	github.com/openshift-kni/k8sreporter v1.0.7
