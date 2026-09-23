@@ -2,18 +2,34 @@ package inittools
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"github.com/go-logr/logr"
 	"github.com/medik8s/system-tests/tests/internal/config"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/clients"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+)
+
+// Event-verification polling (helpers.WaitForEvents) can exhaust client-go's
+// default client-side rate limiter (QPS 5 / Burst 10) under heavy suites,
+// surfacing as "client rate limiter Wait returned an error: context deadline
+// exceeded". EventsClient below is built with higher limits for those callers.
+const (
+	eventsClientQPS   = 50
+	eventsClientBurst = 100
 )
 
 var (
 	// APIClient provides access to cluster.
 	APIClient *clients.Settings
+	// EventsClient is a high-QPS clientset for event verification and other
+	// poll-heavy reads that the default-throttled APIClient.K8sClient starves.
+	// It is nil when APIClient is nil (e.g. dry-run).
+	EventsClient kubernetes.Interface
 	// GeneralConfig provides access to general configuration parameters.
 	GeneralConfig *config.GeneralConfig
 )
@@ -45,4 +61,22 @@ func init() {
 
 		klog.Exitf("can not load ApiClient. Please check your KUBECONFIG env var")
 	}
+
+	var eventsErr error
+	if EventsClient, eventsErr = newEventsClient(APIClient.Config); eventsErr != nil {
+		klog.Exitf("can not build high-QPS events client: %v", eventsErr)
+	}
+}
+
+// newEventsClient builds a clientset from a copy of cfg with raised QPS/Burst.
+func newEventsClient(cfg *rest.Config) (kubernetes.Interface, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("REST config is nil")
+	}
+
+	throttled := rest.CopyConfig(cfg)
+	throttled.QPS = eventsClientQPS
+	throttled.Burst = eventsClientBurst
+
+	return kubernetes.NewForConfig(throttled)
 }
