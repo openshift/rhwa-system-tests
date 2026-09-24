@@ -108,7 +108,12 @@ var _ = Describe(
 
 			Expect(workerNodes).ToNot(BeEmpty(), "No schedulable worker nodes found")
 
-			targetNodeName = workerNodes[0]
+			// Inject storage faults on a node that does not run the SBR controller: blocking
+			// CephFS on the controller's own node prevents the SBRStorageUnhealthy condition
+			// from being reported, so the test would time out waiting for it.
+			targetNodeName = pickTargetWorkerNode()
+			Expect(targetNodeName).ToNot(BeEmpty(),
+				"No schedulable worker node without an SBR controller pod found")
 			injectorPodName = "sbr-detect-only-injector-" + strings.Map(func(r rune) rune {
 				if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
 					return r
@@ -191,9 +196,14 @@ var _ = Describe(
 
 			By("Creating StorageBasedRemediationConfig with detectOnlyMode: Enabled")
 
+			// Minimum sbrTimeoutSeconds (heartbeat = timeout/2) so a peer marks the
+			// storage-isolated node SBRStorageUnhealthy=True after ~MaxConsecutiveFailures
+			// heartbeats well within StorageInjectionTimeout. The default (30s) leaves too
+			// thin a margin under the injection wait and makes the test flaky.
 			detectOnlySBRC = buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{
 				"detectOnlyMode":     "Enabled",
 				"sharedStorageClass": rwxStorageClass,
+				"sbrTimeoutSeconds":  int64(sbrparams.SBRCTimeoutSecondsMin),
 			})
 
 			createErr := APIClient.Create(context.TODO(), detectOnlySBRC)
@@ -531,7 +541,7 @@ var _ = Describe(
 				By(fmt.Sprintf("Creating privileged injector pod on target node %q", targetNodeName))
 
 				injectorPod, createErr := pod.NewBuilder(
-					APIClient, injectorPodName, medik8sparams.OperatorNs, sbrparams.WatchdogDebugImage).
+					APIClient, injectorPodName, medik8sparams.OperatorNs, sbrparams.InjectorImage).
 					DefineOnNode(targetNodeName).
 					WithHostPid(true).
 					WithPrivilegedFlag().

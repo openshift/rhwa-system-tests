@@ -159,8 +159,13 @@ var _ = Describe(
 			By(fmt.Sprintf("Creating StorageBasedRemediationConfig %q with sharedStorageClass %q",
 				sbrparams.SBRCTransientTestName, storageClassName))
 
+			// Minimum sbrTimeoutSeconds (heartbeat = timeout/2) so a peer marks the
+			// storage-isolated node SBRStorageUnhealthy=True after ~MaxConsecutiveFailures
+			// heartbeats well within StorageInjectionTimeout. The default (30s) leaves too
+			// thin a margin under the injection wait and makes the test flaky.
 			transientSBRC = buildSBRC(sbrparams.SBRCTransientTestName, map[string]interface{}{
 				"sharedStorageClass": storageClassName,
+				"sbrTimeoutSeconds":  int64(sbrparams.SBRCTimeoutSecondsMin),
 			})
 
 			createErr := APIClient.Create(context.TODO(), transientSBRC)
@@ -276,7 +281,7 @@ func verifyTransientStorageSelfHealing(targetNodeName *string, injectorPod **pod
 
 	built, createErr := pod.NewBuilder(
 		APIClient, sbrparams.TransientInjectorPodName, medik8sparams.OperatorNs,
-		sbrparams.WatchdogDebugImage,
+		sbrparams.InjectorImage,
 	).
 		DefineOnNode(*targetNodeName).
 		WithHostPid(true).
