@@ -142,5 +142,10 @@ var _ = Describe("SBR Upgrade Operator", Serial, Ordered,
 				"uid": uid, "spec": spec,
 			})
 			GinkgoWriter.Printf("SBR config after operator upgrade: uid=%s spec=%v\n", uid, spec)
+
+			By("Step 4: Validate upgraded SBR via real remediation cycle")
+
+			err = upgradeRunSBRRemediationCycle(ctx, owned)
+			Expect(err).NotTo(HaveOccurred(), "SBR remediation failed after upgrade")
 		})
 	})
