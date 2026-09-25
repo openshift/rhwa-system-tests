@@ -4,7 +4,8 @@
 
 The `tier:upgrade-operator` scenario discovers and installs downstream SNR and NHC
 baselines, upgrades NHC to the supplied candidate, and checks the new CSV,
-manager image, preserved NHC UID/full spec, and a fresh controller response.
+manager image, preserved NHC UID/full spec, a fresh controller response, and
+one complete NHC/SNR remediation by the upgraded candidate.
 The independently selectable `tier:fresh-install` scenario starts clean,
 installs the same SNR prerequisite and candidate NHC bundle, and verifies the
 candidate version, image, pods, configuration response, and cleanup.
@@ -25,14 +26,18 @@ namespace, and retains shared CRDs. This is deliberately unsuitable for a
 shared operator namespace. The second run must pass the same clean preflight.
 
 The NHC selector requires the same label both to exist and not exist, so no
-current or future node can match. A pause request supplies a second guard.
+current or future node can match during the configuration-preservation checks.
+A pause request supplies a second guard.
 Both the downstream baseline and PR #430 validate this selector with
 `LabelSelectorAsSelector`; their controllers select only matching nodes and
 write `Paused` plus the exact pause request in `status.reason`. After old
 controller pods are gone, the test
 changes that token, waits for the exact new reason, restores the original
 token, and waits again. A persisted status or an invented observedGeneration
-field cannot satisfy this check. No node/kubelet action is performed.
+field cannot satisfy this check. After those checks, the upgrade scenario
+targets one worker, stops its kubelet, and requires SNR to reboot it and return
+it to Ready. This requires at least two worker nodes and either cluster SSH
+credentials or `MEDIK8S_KUBELET_STOP_OCDEBUG=true` on a disposable cluster.
 
 ### Local image preparation
 

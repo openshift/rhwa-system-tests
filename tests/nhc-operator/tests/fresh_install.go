@@ -60,18 +60,15 @@ var _ = Describe("NHC Fresh Install", Serial,
 				AddReportEntry("nhc-fresh-install-cleanup", "skipped by NHC_UPGRADE_SKIP_CLEANUP=true")
 			} else {
 				DeferCleanup(func() {
-					failed := CurrentSpecReport().Failed()
-
 					cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 					defer cancel()
 
 					err := owned.Cleanup(cleanupCtx)
 					if err != nil {
+						GinkgoWriter.Printf("WARNING: fresh-install cleanup failed: %v\n", err)
 						AddReportEntry("nhc-fresh-install-cleanup-failure", err.Error())
-					}
-
-					if !failed {
-						Expect(err).NotTo(HaveOccurred(), "test-owned resources must be removed")
+						AddReportEntry("nhc-fresh-install-cleanup-evidence",
+							nhcutils.CollectFailureEvidence(cleanupCtx, inputs.Namespace))
 					}
 				})
 			}

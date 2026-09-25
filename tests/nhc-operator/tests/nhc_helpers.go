@@ -106,12 +106,24 @@ func buildNHCForWorkers(name string) *unstructured.Unstructured {
 // by hostname label. Uses minHealthy=0 because a single-node selector with
 // minHealthy=1 blocks remediation entirely (0/1 healthy < 1 required).
 func buildNHCWithHostnameSelector(name, hostname string) *unstructured.Unstructured {
+	return buildNHCWithHostnameSelectorAndTemplate(name, hostname, nhcparams.SNRTemplateName)
+}
+
+// buildNHCWithHostnameSelectorAndTemplate builds a single-node NHC CR using
+// the named SNR template.
+func buildNHCWithHostnameSelectorAndTemplate(name, hostname, templateName string) *unstructured.Unstructured {
 	nhc := buildNHC(name, "", "", map[string]interface{}{
 		"kubernetes.io/hostname": hostname,
 	})
 
 	// Override minHealthy for single-node selector.
 	nhcSpec(nhc)["minHealthy"] = int64(0)
+	nhcSpec(nhc)["remediationTemplate"] = map[string]interface{}{
+		"apiVersion": nhcparams.SNRCRDGroup + "/" + nhcparams.SNRCRDVersion,
+		"kind":       nhcparams.SNRTemplateKind,
+		"name":       templateName,
+		"namespace":  medik8sparams.OperatorNs,
+	}
 
 	return nhc
 }

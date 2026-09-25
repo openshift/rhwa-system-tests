@@ -14,6 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/olm"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -46,6 +47,24 @@ func waitForSNRTemplate(ctx context.Context, name string) error {
 			err := APIClient.Get(ctx, client.ObjectKeyFromObject(object), object)
 
 			return err == nil, client.IgnoreNotFound(err)
+		})
+}
+
+func waitForSNRNodeAgents(ctx context.Context) error {
+	return wait.PollUntilContextTimeout(
+		ctx, nhcparams.DefaultPollInterval, medik8sparams.OperatorUpgradeTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			daemonSet := &appsv1.DaemonSet{}
+			if err := APIClient.Get(ctx, client.ObjectKey{
+				Name: nhcparams.SNRDaemonSetName, Namespace: medik8sparams.OperatorNs,
+			}, daemonSet); err != nil {
+				return false, client.IgnoreNotFound(err)
+			}
+
+			desired := daemonSet.Status.DesiredNumberScheduled
+
+			return desired > 0 && daemonSet.Status.NumberReady == desired &&
+				daemonSet.Status.UpdatedNumberScheduled == desired, nil
 		})
 }
 

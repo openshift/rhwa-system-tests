@@ -4,8 +4,10 @@ package tests
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"time"
 
+	"github.com/medik8s/system-tests/tests/internal/helpers"
 	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
@@ -22,14 +24,16 @@ import (
 
 var _ = Describe("NHC Upgrade Operator", Serial, Ordered,
 	Label(labels.OperatorNHC, nhcparams.Label, labels.TierUpgradeOperator,
-		labels.DisruptionNonDestructive, labels.PlatformAny, labels.ComponentOLM), func() {
+		labels.DisruptionDestructive, labels.PlatformAny, labels.ComponentOLM,
+		labels.ComponentRemediation), func() {
 		var (
-			ctx        context.Context
-			inputs     nhcparams.UpgradeOperatorInputs
-			oldCSV     *olm.ClusterServiceVersionBuilder
-			configUID  string
-			configSpec map[string]interface{}
-			owned      *nhcutils.OwnedRun
+			ctx               context.Context
+			inputs            nhcparams.UpgradeOperatorInputs
+			oldCSV            *olm.ClusterServiceVersionBuilder
+			configUID         string
+			configSpec        map[string]interface{}
+			owned             *nhcutils.OwnedRun
+			currentTargetNode string
 		)
 
 		BeforeAll(func() {
@@ -78,12 +82,41 @@ var _ = Describe("NHC Upgrade Operator", Serial, Ordered,
 		})
 
 		JustAfterEach(func() {
+			cleanupNHCCR(ctx, nhcparams.ClusterUpgradeTestName)
+
+			if currentTargetNode != "" {
+				nodeName := currentTargetNode
+				currentTargetNode = ""
+
+				cleanupSNRCR(ctx, nodeName)
+
+				if isSSHAvailable() {
+					if err := startKubeletForRemediation(ctx, nodeName); err != nil {
+						GinkgoWriter.Printf("WARNING: SSH kubelet restart failed for %s: %v\n", nodeName, err)
+						AddReportEntry("ssh-kubelet-restart-failed", fmt.Sprintf("node %s: %v", nodeName, err))
+					}
+				}
+
+				if err := helpers.WaitForNodeReady(ctx, APIClient, nodeName,
+					nhcparams.DefaultPollInterval, nhcparams.NodeReadyTimeout, GinkgoWriter.Printf); err != nil {
+					GinkgoWriter.Printf("WARNING: node %s did not recover: %v\n", nodeName, err)
+					AddReportEntry("upgrade-recovery-failed", fmt.Sprintf("node %s: %v", nodeName, err))
+				}
+
+				if medik8sparams.KubeletStopViaOCDebug {
+					if err := helpers.RemoveKubeletStopGuard(
+						ctx, nodeName, nhcparams.OCDebugKubeletStopTimeout); err != nil {
+						GinkgoWriter.Printf("WARNING: failed to remove kubelet-stop guard on %s: %v\n", nodeName, err)
+					}
+				}
+			}
+
 			if CurrentSpecReport().Failed() && ctx != nil && inputs.Namespace != "" {
 				AddReportEntry("nhc-upgrade-failure-evidence", nhcutils.CollectFailureEvidence(ctx, inputs.Namespace))
 			}
 		})
 
-		It("installs a baseline bundle and upgrades its preserved configuration", reportxml.ID("REPLACE_WITH_POLARION_ID"), func() {
+		It("upgrades its preserved configuration and completes candidate remediation", reportxml.ID("REPLACE_WITH_POLARION_ID"), func() {
 			Expect(owned.CreateNamespace(ctx)).To(Succeed())
 			By("installing the pinned SNR prerequisite and its remediation template")
 
@@ -94,6 +127,7 @@ var _ = Describe("NHC Upgrade Operator", Serial, Ordered,
 			Expect(waitForUpgradeAPI(ctx, upgradeTemplate(inputs.Namespace))).To(Succeed())
 			Expect(owned.Create(ctx, buildSNRT(nhcparams.NHCUpgradeTemplateName))).To(Succeed())
 			Expect(waitForSNRTemplate(ctx, nhcparams.NHCUpgradeTemplateName)).To(Succeed())
+			Expect(waitForSNRNodeAgents(ctx)).To(Succeed(), "SNR node agents were not ready")
 			By("installing the resolved downstream NHC baseline bundle")
 
 			owned.Packages = append(owned.Packages, inputs.Package)
@@ -148,5 +182,13 @@ var _ = Describe("NHC Upgrade Operator", Serial, Ordered,
 				"uid": uid, "spec": spec,
 			})
 			GinkgoWriter.Printf("NHC config after operator upgrade: uid=%s spec=%v\n", uid, spec)
+
+			By("requiring a real remediation from the upgraded candidate")
+
+			currentTargetNode, err = upgradeRunRemediationCycle(
+				ctx, "post-operator-upgrade", nhcparams.NHCUpgradeTemplateName)
+			Expect(err).NotTo(HaveOccurred())
+			AddReportEntry("nhc-upgrade-remediation-node", currentTargetNode)
+			cleanupPostRemediationNHC(ctx, &currentTargetNode, "post-operator-upgrade")
 		})
 	})

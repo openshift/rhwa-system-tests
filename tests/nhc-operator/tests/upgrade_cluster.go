@@ -425,7 +425,8 @@ var _ = Describe("NHC Upgrade Cluster",
 
 				By("Step 6: Validate GA NHC on OCP N (post-OCP-upgrade remediation)")
 
-				currentTargetNode, err = upgradeRunRemediationCycle(ctx, "post-ocp-upgrade")
+				currentTargetNode, err = upgradeRunRemediationCycle(
+					ctx, "post-ocp-upgrade", nhcparams.SNRTemplateName)
 				Expect(err).NotTo(HaveOccurred(),
 					"Post-OCP-upgrade remediation failed with GA operator")
 
@@ -672,7 +673,8 @@ var _ = Describe("NHC Upgrade Cluster",
 
 				By("Step 11: Validate NHC on OCP N (post-catalog-switch remediation)")
 
-				currentTargetNode, err = upgradeRunRemediationCycle(ctx, "post-catalog-switch")
+				currentTargetNode, err = upgradeRunRemediationCycle(
+					ctx, "post-catalog-switch", nhcparams.SNRTemplateName)
 				Expect(err).NotTo(HaveOccurred(),
 					"Post-catalog-switch remediation failed")
 
@@ -744,7 +746,7 @@ func upgradeSelectRemediationTarget(ctx context.Context) (string, error) {
 // enters Remediating, SNR reboots the node, and NHC returns to Enabled.
 // The selected node name is always returned (even on error) so the caller can
 // run safety-net recovery regardless of which step failed.
-func upgradeRunRemediationCycle(ctx context.Context, phase string) (string, error) {
+func upgradeRunRemediationCycle(ctx context.Context, phase, templateName string) (string, error) {
 	nodeName, err := upgradeSelectRemediationTarget(ctx)
 	if err != nil {
 		return "", fmt.Errorf("[%s] failed to select target node: %w", phase, err)
@@ -764,7 +766,8 @@ func upgradeRunRemediationCycle(ctx context.Context, phase string) (string, erro
 
 	By(fmt.Sprintf("[%s] Creating NHC CR targeting %s", phase, nodeName))
 
-	nhcCR := buildNHCWithHostnameSelector(nhcparams.ClusterUpgradeTestName, nodeName)
+	nhcCR := buildNHCWithHostnameSelectorAndTemplate(
+		nhcparams.ClusterUpgradeTestName, nodeName, templateName)
 	if createErr := APIClient.Create(ctx, nhcCR); createErr != nil {
 		return nodeName, fmt.Errorf("[%s] failed to create NHC CR: %w", phase, createErr)
 	}
