@@ -7,7 +7,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	nmov1beta1 "github.com/medik8s/node-maintenance-operator/api/v1beta1"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
@@ -47,10 +46,6 @@ var _ = Describe(
 
 		BeforeAll(func() {
 			ctx = context.Background()
-
-			By("Registering NMO API scheme")
-			Expect(APIClient.AttachScheme(nmov1beta1.AddToScheme)).To(Succeed(),
-				"Failed to register NMO scheme")
 
 			By("Verifying NMO deployment is Ready")
 

@@ -12,9 +12,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	nmov1beta1 "github.com/medik8s/node-maintenance-operator/api/v1beta1"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/nodes"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
@@ -40,11 +40,6 @@ var _ = Describe(
 		)
 
 		BeforeAll(func() {
-			By("Registering NMO API scheme")
-
-			err := APIClient.AttachScheme(nmov1beta1.AddToScheme)
-			Expect(err).ToNot(HaveOccurred(), "Failed to register NMO scheme")
-
 			By("Verifying NMO deployment is Ready")
 
 			nmoDeployment, err := deployment.Pull(
@@ -89,7 +84,7 @@ var _ = Describe(
 		AfterAll(func() {
 			By("Safety cleanup: removing NodeMaintenance CR if still exists")
 
-			nmCleanup := &nmov1beta1.NodeMaintenance{}
+			nmCleanup := newNodeMaintenanceObject()
 
 			cleanupErr := APIClient.Get(context.Background(), client.ObjectKey{Name: nmCRName}, nmCleanup)
 
@@ -136,15 +131,8 @@ var _ = Describe(
 				labels.FrequencyWeekly,
 			), func() {
 				By(fmt.Sprintf("Creating NodeMaintenance CR for node %s", targetNodeName))
-				nodeMaintenance := &nmov1beta1.NodeMaintenance{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: nmCRName,
-					},
-					Spec: nmov1beta1.NodeMaintenanceSpec{
-						NodeName: targetNodeName,
-						Reason:   "system-tests lifecycle validation (RHWA-1250)",
-					},
-				}
+				nodeMaintenance := newNodeMaintenanceWithReason(
+					nmCRName, targetNodeName, "system-tests lifecycle validation (RHWA-1250)")
 				Expect(APIClient.Create(context.Background(), nodeMaintenance)).To(Succeed(),
 					"Failed to create NodeMaintenance CR")
 
@@ -273,10 +261,13 @@ var _ = Describe(
 
 				By("Verifying NodeMaintenance CR still exists and phase is Succeeded")
 				Eventually(func(g Gomega) {
-					nm := &nmov1beta1.NodeMaintenance{}
+					nm := newNodeMaintenanceObject()
 					g.Expect(APIClient.Get(context.Background(), client.ObjectKey{Name: nmCRName}, nm)).To(Succeed(),
 						"NodeMaintenance CR should still exist after reboot")
-					g.Expect(nm.Status.Phase).To(Equal(nmov1beta1.MaintenanceSucceeded),
+					phase, found, err := unstructured.NestedString(nm.Object, "status", "phase")
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(found).To(BeTrue())
+					g.Expect(phase).To(Equal(nmoparams.MaintenanceSucceeded),
 						"NodeMaintenance phase should still be Succeeded after reboot")
 				}, nmoparams.MaintenanceTimeout, nmoparams.DefaultPollInterval).Should(Succeed())
 
@@ -323,13 +314,24 @@ func assertNodeCordonAndTaint(nodeName string, expectCordoned bool, timeout time
 }
 
 func assertDrainCompleted(ctx context.Context, nmCRName string) {
-	currentNM := &nmov1beta1.NodeMaintenance{}
+	currentNM := newNodeMaintenanceObject()
 	ExpectWithOffset(1, APIClient.Get(ctx, client.ObjectKey{Name: nmCRName}, currentNM)).To(Succeed())
-	ExpectWithOffset(1, currentNM.Status.Phase).To(Equal(nmov1beta1.MaintenanceSucceeded),
+	phase, phaseFound, phaseErr := unstructured.NestedString(currentNM.Object, "status", "phase")
+	ExpectWithOffset(1, phaseErr).ToNot(HaveOccurred())
+	ExpectWithOffset(1, phaseFound).To(BeTrue())
+	ExpectWithOffset(1, phase).To(Equal(nmoparams.MaintenanceSucceeded),
 		"Maintenance phase should be Succeeded")
-	ExpectWithOffset(1, currentNM.Status.DrainProgress).To(Equal(nmoparams.DrainProgressComplete),
+	drainProgress, progressFound, progressErr := unstructured.NestedInt64(currentNM.Object, "status", "drainProgress")
+	ExpectWithOffset(1, progressErr).ToNot(HaveOccurred())
+	ExpectWithOffset(1, progressFound).To(BeTrue())
+	ExpectWithOffset(1, drainProgress).To(Equal(int64(nmoparams.DrainProgressComplete)),
 		"Drain progress should be 100%%")
-	ExpectWithOffset(1, currentNM.Status.PendingPods).To(BeEmpty(),
+	pendingPods, pendingFound, pendingErr := unstructured.NestedStringSlice(currentNM.Object, "status", "pendingPods")
+	ExpectWithOffset(1, pendingErr).ToNot(HaveOccurred())
+	if !pendingFound {
+		pendingPods = nil
+	}
+	ExpectWithOffset(1, pendingPods).To(BeEmpty(),
 		"No pods should be pending eviction")
 }
 
@@ -388,7 +390,7 @@ func assertMaintenanceLease(ctx context.Context, nodeName string, shouldExist bo
 }
 
 func deleteAndWaitForNMCR(ctx context.Context, name string, timeout time.Duration) {
-	existing := &nmov1beta1.NodeMaintenance{}
+	existing := newNodeMaintenanceObject()
 
 	err := APIClient.Get(ctx, client.ObjectKey{Name: name}, existing)
 
@@ -398,7 +400,7 @@ func deleteAndWaitForNMCR(ctx context.Context, name string, timeout time.Duratio
 			fmt.Sprintf("Failed to delete NodeMaintenance CR %s", name))
 		EventuallyWithOffset(1, func() bool {
 			err := APIClient.Get(ctx,
-				client.ObjectKey{Name: name}, &nmov1beta1.NodeMaintenance{})
+				client.ObjectKey{Name: name}, newNodeMaintenanceObject())
 
 			return errors.IsNotFound(err)
 		}, timeout, nmoparams.DefaultPollInterval).Should(BeTrue(),
