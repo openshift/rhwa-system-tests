@@ -5,9 +5,6 @@ on:
     types:
       - published
   push:
-    branches:
-      - main
-      - 'release-\d.\d\d'
 
 jobs:
   build:
@@ -51,4 +48,3 @@ jobs:
         push: true
         platforms: linux/amd64,linux/arm64
         tags: quay.io/medik8s/system-tests:${{ steps.set_image_tag.outputs.IMAGE_TAG }}
-
