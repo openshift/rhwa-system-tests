@@ -163,7 +163,8 @@ var _ = Describe("NHC Functional -- Remediation Trigger and CR Lifecycle",
 			func() {
 				By("Creating NHC CR targeting single node by hostname")
 
-				nhcCR := buildNHCWithHostnameSelector(nhcparams.NHCTestName, targetWorkerName)
+				nhcCR := buildNHCWithHostnameSelectorAndTemplate(
+					nhcparams.NHCTestName, targetWorkerName, nhcparams.SNRTemplateName)
 				Expect(APIClient.Create(ctx, nhcCR)).To(Succeed(),
 					"Failed to create NHC CR")
 

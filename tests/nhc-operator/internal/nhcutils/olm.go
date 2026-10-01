@@ -12,7 +12,7 @@ import (
 	"github.com/medik8s/system-tests/tests/nhc-operator/internal/nhcparams"
 )
 
-// CreateCandidateCatalog creates the catalog used only by the PR-candidate cluster test.
+// CreateCandidateCatalog creates the test-owned catalog for a candidate operator upgrade.
 func CreateCandidateCatalog(apiClient *clients.Settings, image string) (*olm.CatalogSourceBuilder, error) {
 	catalog := olm.NewCatalogSourceBuilder(
 		apiClient, nhcparams.CandidateCatalogName, medik8sparams.GACatalogNamespace)
@@ -48,7 +48,7 @@ func InstallGAOperator(apiClient *clients.Settings) (*olm.SubscriptionBuilder, e
 		medik8sparams.OperatorNs,
 		medik8sparams.GAOperatorCatalog,
 		medik8sparams.GACatalogNamespace,
-		medik8sparams.OperatorPackage,
+		nhcparams.UpgradeNHCPackage,
 		medik8sparams.GAChannel,
 	)
 }

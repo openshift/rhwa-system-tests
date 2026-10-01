@@ -29,6 +29,10 @@ const (
 	UpgradeSNRPackage = "self-node-remediation"
 	// ClusterUpgradeSNRCSVPattern identifies the released SNR CSV.
 	ClusterUpgradeSNRCSVPattern = "self-node-remediation"
+	// ClusterUpgradeSNRDeploymentName identifies the released SNR controller.
+	ClusterUpgradeSNRDeploymentName = "self-node-remediation-controller-manager"
+	// ClusterUpgradeSNRWebhookServiceName identifies the SNR admission webhook Service.
+	ClusterUpgradeSNRWebhookServiceName = "self-node-remediation-controller-manager-service"
 	// UpgradeNHCPackage is the fixed NHC package under test.
 	UpgradeNHCPackage = "node-healthcheck-operator"
 	// UpgradeNamespace is the established namespace shared by the NHC and SNR operators.

@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -144,64 +143,4 @@ func waitForUpgradeAgentDaemonSetExists(ctx context.Context) int64 {
 			"before the standalone upgrade can be verified", sbrparams.SBRUpgradeConfigTestName)
 
 	return generation
-}
-
-// patchSBRCMaxConsecutiveFailures patches the probe SBRC's maxConsecutiveFailures field and
-// waits for its agent DaemonSet to observe a fresh generation, proving that the *current*
-// (post-upgrade) controller is actively reconciling this object rather than a stale one.
-// DesiredNumberScheduled is required to remain 0 throughout: the nodeSelector never matches
-// any node, so no agent pod is ever created and no watchdog/storage action is ever taken.
-func patchSBRCMaxConsecutiveFailures(ctx context.Context, uid types.UID, baselineGeneration, value int64) int64 {
-	Eventually(func() error {
-		sbrc := upgradeSBRC()
-		if err := APIClient.Get(ctx, client.ObjectKeyFromObject(sbrc), sbrc); err != nil {
-			return err
-		}
-
-		if sbrc.GetUID() != uid {
-			return fmt.Errorf("StorageBasedRemediationConfig UID changed during the reconciliation probe")
-		}
-
-		original := sbrc.DeepCopy()
-		if err := unstructured.SetNestedField(sbrc.Object, value, "spec", "maxConsecutiveFailures"); err != nil {
-			return err
-		}
-
-		return APIClient.Patch(ctx, sbrc,
-			client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{}))
-	}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-		"StorageBasedRemediationConfig update did not succeed after the upgraded controller became available")
-
-	var newGeneration int64
-
-	Eventually(func() error {
-		agentDS, err := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
-			ctx, upgradeSBRCAgentDaemonSetName, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("agent DaemonSet %s not found: %w", upgradeSBRCAgentDaemonSetName, err)
-		}
-
-		if agentDS.Generation <= baselineGeneration {
-			return fmt.Errorf("agent DaemonSet %s generation not advanced (current: %d, baseline: %d)",
-				upgradeSBRCAgentDaemonSetName, agentDS.Generation, baselineGeneration)
-		}
-
-		if agentDS.Status.ObservedGeneration < agentDS.Generation {
-			return fmt.Errorf("agent DaemonSet %s not yet reconciled (observed: %d, current: %d)",
-				upgradeSBRCAgentDaemonSetName, agentDS.Status.ObservedGeneration, agentDS.Generation)
-		}
-
-		if agentDS.Status.DesiredNumberScheduled != 0 {
-			return fmt.Errorf("agent DaemonSet %s unexpectedly scheduled %d pod(s); "+
-				"the probe nodeSelector must never match a node",
-				upgradeSBRCAgentDaemonSetName, agentDS.Status.DesiredNumberScheduled)
-		}
-
-		newGeneration = agentDS.Generation
-
-		return nil
-	}, sbrparams.SBRCLifecyclePatchedTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-		"agent DaemonSet %s must reconcile a fresh generation after the probe patch", upgradeSBRCAgentDaemonSetName)
-
-	return newGeneration
 }

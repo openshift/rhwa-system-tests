@@ -16,6 +16,7 @@ import (
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/olm"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -56,7 +57,8 @@ func waitForSNRNodeAgents(ctx context.Context) error {
 		func(ctx context.Context) (bool, error) {
 			daemonSet := &appsv1.DaemonSet{}
 			if err := APIClient.Get(ctx, client.ObjectKey{
-				Name: nhcparams.SNRDaemonSetName, Namespace: medik8sparams.OperatorNs,
+				Name:      nhcparams.SNRDaemonSetName,
+				Namespace: medik8sparams.OperatorNs,
 			}, daemonSet); err != nil {
 				return false, client.IgnoreNotFound(err)
 			}
@@ -65,6 +67,50 @@ func waitForSNRNodeAgents(ctx context.Context) error {
 
 			return desired > 0 && daemonSet.Status.NumberReady == desired &&
 				daemonSet.Status.UpdatedNumberScheduled == desired, nil
+		})
+}
+
+func waitForSNRControllerAndWebhook(ctx context.Context) error {
+	return wait.PollUntilContextTimeout(
+		ctx, nhcparams.DefaultPollInterval, medik8sparams.OperatorUpgradeTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			controller := &appsv1.Deployment{}
+			if err := APIClient.Get(ctx, client.ObjectKey{
+				Name:      nhcparams.ClusterUpgradeSNRDeploymentName,
+				Namespace: medik8sparams.OperatorNs,
+			}, controller); err != nil {
+				return false, client.IgnoreNotFound(err)
+			}
+
+			desiredReplicas := int32(1)
+			if controller.Spec.Replicas != nil {
+				desiredReplicas = *controller.Spec.Replicas
+			}
+
+			if desiredReplicas == 0 || controller.Status.ObservedGeneration < controller.Generation ||
+				controller.Status.UpdatedReplicas != desiredReplicas ||
+				controller.Status.AvailableReplicas != desiredReplicas {
+				return false, nil
+			}
+
+			endpointSlices := &discoveryv1.EndpointSliceList{}
+			if err := APIClient.List(ctx, endpointSlices,
+				client.InNamespace(medik8sparams.OperatorNs),
+				client.MatchingLabels{discoveryv1.LabelServiceName: nhcparams.ClusterUpgradeSNRWebhookServiceName},
+			); err != nil {
+				return false, err
+			}
+
+			for _, endpointSlice := range endpointSlices.Items {
+				for _, endpoint := range endpointSlice.Endpoints {
+					if len(endpoint.Addresses) > 0 &&
+						(endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready) {
+						return true, nil
+					}
+				}
+			}
+
+			return false, nil
 		})
 }
 

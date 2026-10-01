@@ -161,18 +161,20 @@ The project uses a development method - forking workflow
 
 # Project structure
     .
-    ├── images                             # container images artifacts
-    ├── scripts                            # makefile scripts
-    ├── tests                              # test cases directory
-    │   ├── internal                       # common packages used across framework
-    │   │   ├── config                     # common config struct
-    │   │   ├── medik8sconfig              # medik8s-specific configuration
-    │   │   ├── medik8sinittools           # medik8s test initialization
-    │   │   └── medik8sparams              # medik8s shared constants
+    ├── docs                               # Cross-cutting guides and test workflows
+    ├── images                             # Container images artifacts
+    ├── scripts                            # Makefile scripts
+    ├── tests                              # Test cases directory
+    │   ├── internal                       # Common packages used across framework
+    │   │   ├── config                     # Common config struct
+    │   │   ├── medik8sconfig              # Medik8s-specific configuration
+    │   │   ├── medik8sinittools           # Medik8s test initialization
+    │   │   └── medik8sparams              # Medik8s shared constants
     │   ├── far-operator                   # Fence Agents Remediation tests
     │   ├── mdr-operator                   # Machine Deletion Remediation tests
     │   ├── nhc-operator                   # Node Health Check tests
     │   ├── nmo-operator                   # Node Maintenance Operator tests
+    │   ├── sbr-operator                   # Storage-Based Remediation tests
     │   └── snr-operator                   # Self Node Remediation tests
     └── vendor                             # Dependencies folder
 ### Code conventions

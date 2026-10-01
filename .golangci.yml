@@ -130,6 +130,9 @@ linters:
         path: tests/internal/reporter
       - linters:
           - depguard
+        path: tests/internal/fbcsuite
+      - linters:
+          - depguard
         path: tests/.*/tests/.*
       - linters:
           - depguard

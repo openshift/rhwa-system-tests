@@ -1,188 +1,35 @@
 # NHC Operator Post-Deployment Tests
 
-## Standalone operator-bundle upgrade (OpenShift 5.0)
+## Standalone operator upgrade through FBC (OpenShift 5.0)
 
-The `tier:upgrade-operator` scenario discovers and installs downstream SNR and NHC
-baselines, upgrades NHC to the supplied candidate, and checks the new CSV,
-manager image, preserved NHC UID/full spec, a fresh controller response, and
-one complete NHC/SNR remediation by the upgraded candidate.
-The independently selectable `tier:fresh-install` scenario starts clean,
-installs the same SNR prerequisite and candidate NHC bundle, and verifies the
-candidate version, image, pods, configuration response, and cleanup.
+The common six-operator input contract is documented in
+[`../../docs/fbc-upgrades.md`](../../docs/fbc-upgrades.md).
 
-Cleanup is enabled by default. For debugging only, set
-`NHC_UPGRADE_SKIP_CLEANUP=true` to preserve resources after either standalone
-scenario. The next run will reject those leftovers, so remove them manually
-before rerunning.
+The `tier:upgrade-operator` scenario installs GA NHC and SNR from the
+cluster's built-in `redhat-operators` catalog. It then creates a test-owned
+CatalogSource from the supplied file-based catalog image and switches the
+existing NHC Subscription to that catalog. The test requires OLM to install a
+new CSV with the exact expected version and controller image, while preserving
+and freshly reconciling the existing NodeHealthCheck configuration.
 
-Use a disposable OpenShift 5.0 cluster. The namespace
-`openshift-workload-availability` must **not exist**. Preflight also rejects
-NHC/SNR installations and CRs in other namespaces, leftover OLM cluster objects
-associated with that namespace, and the existing remediation ConsolePlugin.
-A rejected preflight makes no changes. Setup marks a newly created namespace
-and CRs with a random run identifier; cleanup checks UIDs, attempts every
-installed package (including partial failures), removes owned objects and the
-namespace, and retains shared CRDs. This is deliberately unsuitable for a
-shared operator namespace. The second run must pass the same clean preflight.
-
-The NHC selector requires the same label both to exist and not exist, so no
-current or future node can match during the configuration-preservation checks.
-A pause request supplies a second guard.
-Both the downstream baseline and PR #430 validate this selector with
-`LabelSelectorAsSelector`; their controllers select only matching nodes and
-write `Paused` plus the exact pause request in `status.reason`. After old
-controller pods are gone, the test
-changes that token, waits for the exact new reason, restores the original
-token, and waits again. A persisted status or an invented observedGeneration
-field cannot satisfy this check. After those checks, the upgrade scenario
-targets one worker, stops its kubelet, and requires SNR to reboot it and return
-it to Ready. This requires at least two worker nodes and either cluster SSH
-credentials or `MEDIK8S_KUBELET_STOP_OCDEBUG=true` on a disposable cluster.
-
-### Local image preparation
-
-First inspect the new cluster's integrated registry without changing it:
+This path does not use a candidate bundle or `operator-sdk bundle-upgrade`.
+Provide a pullable FBC image containing a valid upgrade edge from the installed
+GA version to the expected candidate:
 
 ```bash
-: "${KUBECONFIG:?Set the absolute path to the new disposable cluster kubeconfig first}"
-: "${IMAGE_NAMESPACE:?Set the intended registry image namespace}"
-oc whoami --show-server
-oc get clusterversion version
-oc get configs.imageregistry.operator.openshift.io/cluster -o yaml
-oc get clusteroperator image-registry -o yaml
-oc get pods,pvc,service,route -n openshift-image-registry -o wide
-oc auth can-i create imagestreams -n "$IMAGE_NAMESPACE"
-oc auth can-i update imagestreams/layers -n "$IMAGE_NAMESPACE"
+: "${KUBECONFIG:?}" "${NHC_FBC_CATALOG_IMAGE:?}"
+: "${NHC_FBC_CANDIDATE_VERSION:?}" "${NHC_FBC_CANDIDATE_IMAGE:?}"
+export ECO_TEST_FEATURES=nhc-operator
+export ECO_TEST_LABELS='tier:upgrade-operator'
+export WORKLOAD_IMAGE=unused-by-nhc-fbc-upgrade
+make run-tests
 ```
 
-Supply `IMAGE_NAMESPACE` explicitly before these checks. Confirm storage,
-registry health, a laptop-accessible push endpoint and node pull access; RBAC
-answers alone do not prove a push/pull works. If unavailable, obtain the team's
-supported scratch destination. Registry endpoints, image tags, credentials and
-related-image digests remain environment inputs. Do not create a personal
-Quay catalog. The commands below build/publish images only when the operator
-has authorized that work; the preparation fixes themselves do not run them.
-
-Use Linux amd64, Podman, Skopeo, Git, Make, oc, and the Go version required by the
-checked-out source (PR #430 requests toolchain 1.26.5). The Dockerfile downloads
-an amd64 toolchain and needs network access. Set these real inputs first:
-`NHC_SOURCE_REPOSITORY` (existing local NHC repo), `NHC_BUILD_DIR` (new persistent
-standalone clone), `NHC_BUILD_REPORT_DIR` (persistent evidence directory),
-`OPERATOR_BUILD_IMAGE` and `BUNDLE_BUILD_IMAGE` (approved writable tagged
-destinations), `CONSOLE_PLUGIN_IMAGE` and `MUST_GATHER_IMAGE` (verified digest
-pullspecs). The helper rejects an existing build directory and preserves the
-earlier PR430 verification worktree. A standalone clone is needed because the
-NHC Dockerfile copies `.git/`; a Git worktree's `.git` file is insufficient.
-
-```bash
-export NHC_EXPECTED_SOURCE_COMMIT=36c6c7cf31898acbc0be1beb927606af1de2a8f5
-export VERSION=5.8.0
-bash scripts/nhc-upgrade-prepare.sh operator
-podman push --digestfile "$NHC_BUILD_REPORT_DIR/operator.digest" "$OPERATOR_BUILD_IMAGE"
-export NHC_OPERATOR_IMAGE="${OPERATOR_BUILD_IMAGE%:*}@$(< "$NHC_BUILD_REPORT_DIR/operator.digest")"
-oc image info "$NHC_OPERATOR_IMAGE" -o json > "$NHC_BUILD_REPORT_DIR/published-operator.json"
-bash scripts/nhc-upgrade-prepare.sh bundle
-podman push --digestfile "$NHC_BUILD_REPORT_DIR/bundle.digest" "$BUNDLE_BUILD_IMAGE"
-export NHC_UPGRADE_CANDIDATE_NHC_BUNDLE="${BUNDLE_BUILD_IMAGE%:*}@$(< "$NHC_BUILD_REPORT_DIR/bundle.digest")"
-export YQ="$NHC_BUILD_DIR/bin/yq"
-export NHC_UPGRADE_OPERATOR_SDK="$NHC_BUILD_DIR/bin/operator-sdk"
-"$NHC_UPGRADE_OPERATOR_SDK" version
-"$NHC_UPGRADE_OPERATOR_SDK" run --help
-"$NHC_UPGRADE_OPERATOR_SDK" bundle validate "$NHC_UPGRADE_CANDIDATE_NHC_BUNDLE"
-export NHC_UPGRADE_CANDIDATE_NHC_IMAGE="$NHC_OPERATOR_IMAGE"
-export NHC_UPGRADE_CANDIDATE_NHC_VERSION="$VERSION"
-```
-
-The helper builds the existing Dockerfile, then calls the real
-`bundle-build-ocp` Makefile target with consistent `VERSION`, `IMG`, `BUNDLE_IMG`,
-`CONSOLE_PLUGIN_IMAGE`, `MUST_GATHER_IMAGE`, `PREVIOUS_VERSION=0.12.0`, and
-`SKIP_RANGE_LOWER=0.1.0`. It records the source revision and generated diff.
-The operator binary derives its embedded version from `hack/build.sh` and Git;
-the explicit 5.8.0 here is the CSV version. The inspector compares the bundle
-manager digest to the separately supplied built operator, verifies package,
-CSV version and image annotation, and records all manager/console/init/related
-image digests plus upgrade metadata. An image found inside a bundle alone is
-not candidate provenance. This procedure still needs real registry execution.
-
-SDK v1.42.2 `bundle-upgrade` adds the new bundle to the existing temporary
-catalog and updates its Subscription. Its FBC catalog merge constructs a
-channel entry replacing the existing channel head (`internal/olm/operator/
-registry/index_image.go`). PR #430's default-version bundle has no CSV
-`replaces`, and has skipRange `>=0.1.0 <5.8.0`. Missing CSV `replaces` alone
-therefore does not establish an SDK upgrade blocker. Actual OLM resolution
-remains a first-run check; this says nothing about downstream catalog edges.
-
-By default, the test uses Skopeo to discover the highest plain `vX.Y.Z` tags in
-the downstream NHC and SNR bundle repositories. Commit-suffixed, alpha, beta,
-and release-candidate tags are excluded. The test resolves the selected bundles
-to digests and extracts their CSV versions and manager images. Registry
-credentials must allow these reads. Explicit baseline variables remain
-available when a specific released version must be tested.
-`oc image info` is a laptop/registry check, not proof of node pull access.
-Confirm node access during the approved cluster attempt and retain image-pull
-failures.
-
-### Two local runs, then CI
-
-Set `KUBECONFIG` to the disposable cluster and `NHC_RUN_REPORT_DIR` to a
-persistent **new** directory for each run. The four values below are currently
-caller supplied; ongoing Makefile work may populate them automatically later.
-The Go test resolves bundle tags to digests, extracts their CSVs, and verifies
-package, version, and operator-image identity before installation.
-
-```bash
-: "${KUBECONFIG:?}" "${NHC_UPGRADE_CANDIDATE_NHC_BUNDLE:?}"
-: "${NHC_UPGRADE_CANDIDATE_NHC_VERSION:?}" "${NHC_UPGRADE_CANDIDATE_NHC_IMAGE:?}"
-: "${NHC_UPGRADE_OPERATOR_SDK:?}" "${NHC_RUN_REPORT_DIR:?}"
-export ECO_TEST_FEATURES=nhc-operator ECO_TEST_LABELS='tier:upgrade-operator'
-export WORKLOAD_IMAGE=unused-by-nhc-operator-upgrade
-export ECO_REPORTS_DUMP_DIR="$NHC_RUN_REPORT_DIR"
-mkdir -p "$ECO_REPORTS_DUMP_DIR"
-set -o pipefail
-make run-tests 2>&1 | tee "$ECO_REPORTS_DUMP_DIR/run.log"
-```
-
-The package names and `openshift-workload-availability` namespace are fixed by
-the scenario. `NHC_UPGRADE_TEST_REVISION` is optional; when unset, the test
-records `git rev-parse HEAD`. Advanced runs can override discovery with the
-`NHC_UPGRADE_BASELINE_{NHC,SNR}_{BUNDLE,VERSION,IMAGE}` variables. Candidate
-SNR values default to the resolved baseline SNR. The test currently rejects a
-different `NHC_UPGRADE_CANDIDATE_SNR_{BUNDLE,VERSION,IMAGE}` because SNR upgrade
-sequencing has not yet been implemented.
-
-For the separate fresh-install checkpoint, use a new report directory and
-select only its label; reuse the pinned candidate NHC inputs. Candidate SNR is
-optional and uses the latest discovered downstream GA bundle when omitted:
-
-```bash
-export ECO_TEST_LABELS='tier:fresh-install'
-export NHC_RUN_REPORT_DIR=/absolute/path/to/a/new/fresh-install-report-directory
-export ECO_REPORTS_DUMP_DIR="$NHC_RUN_REPORT_DIR"
-mkdir -p "$ECO_REPORTS_DUMP_DIR"
-make run-tests 2>&1 | tee "$ECO_REPORTS_DUMP_DIR/run.log"
-```
-
-Keep `ARTIFACT_DIR`/`SHARED_DIR` unset locally unless using their real intended
-destinations; ARTIFACT_DIR overrides the local report path. Retain build
-evidence, XML/JUnit and logs for run1 and run2. Confirm exactly one scenario ran
-and cleanup finished each time. Failure diagnostics and cleanup errors are
-report entries; they do not replace the original test failure.
-
-Only after both local runs, publish/review the system-tests change and prepare
-the release PR. Its pinned test commit must be reachable (prefer the actual
-merged commit); a local SHA cannot be cloned by CI. Rehearse the proposed
-release configuration **before merging it** and inspect actual source refs.
-The optional/manual job consumes `my-bundle` as `OO_BUNDLE` and independently
-consumes that execution's operator image. It compares their digests, records
-JOB_SPEC and the checkout SHA, and requires the expected PR #430 commit in the
-source history. Target-branch-only rehearsals fail this requirement. Update
-the expected source SHA deliberately if #430 is rebased. The actual PR job
-and its exact source/bundle/test revisions must be recorded separately.
-
-The upstream sample is not a cluster upgrade, fresh-install coverage, downstream
-catalog qualification, or remediation test. Related-image tags in the unmodified
-CI candidate are resolved and recorded, but are still mutable references; local
-bundle generation pins console and must-gather explicitly.
+`NHC_FBC_IDMS_PATH` is optional for source-built catalogs whose image
+references are directly pullable. Downstream catalogs supply it when registry
+mirroring is required. Cleanup is enabled by default. For debugging only, set
+`NHC_FBC_SKIP_CLEANUP=true` to preserve resources. The next run rejects
+leftovers, so remove them manually before rerunning.
 
 ## OpenShift 4.22 to 5.0 cluster-upgrade scenario
 

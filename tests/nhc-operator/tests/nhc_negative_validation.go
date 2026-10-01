@@ -468,7 +468,8 @@ var _ = Describe("NHC Negative -- Zero Healthy Nodes",
 
 				By("Creating NHC CR targeting single worker node")
 
-				nhcCR := buildNHCWithHostnameSelector(nhcName, targetWorkerName)
+				nhcCR := buildNHCWithHostnameSelectorAndTemplate(
+					nhcName, targetWorkerName, nhcparams.SNRTemplateName)
 				Expect(APIClient.Create(ctx, nhcCR)).To(Succeed(),
 					"Failed to create NHC CR %q for node %s", nhcName, targetWorkerName)
 

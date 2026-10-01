@@ -2,6 +2,10 @@
 
 Automated tests validating the Fence Agents Remediation (FAR) operator deployment, security posture, and high-availability configuration.
 
+The shared FBC upgrade scenario is documented in
+[`../../docs/fbc-upgrades.md`](../../docs/fbc-upgrades.md). On AWS it performs real fencing
+and recovery before and after the candidate upgrade.
+
 ## Prerequisites
 
 - OpenShift cluster with FAR operator installed via OLM

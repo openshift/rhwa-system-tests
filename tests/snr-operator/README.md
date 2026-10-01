@@ -4,6 +4,10 @@ Automated tests validating the Self Node Remediation (SNR) operator
 deployment, configuration, OLM metadata, CRD validation, config lifecycle,
 and destructive remediation (kubelet stop, node reboot via NHC detection).
 
+The shared FBC upgrade scenario is documented in
+[`../../docs/fbc-upgrades.md`](../../docs/fbc-upgrades.md). It preserves the default SNR
+configuration and proves worker reboot remediation before and after upgrade.
+
 ## Prerequisites
 
 - OpenShift cluster with SNR operator installed via OLM

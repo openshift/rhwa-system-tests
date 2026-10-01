@@ -3,6 +3,10 @@
 Automated tests validating the Machine Deletion Remediation (MDR) operator
 deployment, OLM metadata, and security posture.
 
+The shared FBC upgrade scenario is documented in
+[`../../docs/fbc-upgrades.md`](../../docs/fbc-upgrades.md). It preserves the remediation
+template and proves Machine replacement before and after upgrade.
+
 ## Prerequisites
 
 - OpenShift cluster with MDR operator installed via OLM

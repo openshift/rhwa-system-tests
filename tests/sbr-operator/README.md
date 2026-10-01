@@ -3,6 +3,11 @@
 Automated tests validating the Storage-Based Remediation (SBR) operator
 deployment, security posture, and high-availability configuration.
 
+The shared FBC upgrade scenario is documented in
+[`../../docs/fbc-upgrades.md`](../../docs/fbc-upgrades.md). It preserves and freshly
+reconciles the same safe `StorageBasedRemediationConfig` used by the source
+upgrade and requires `SBR_STORAGE_CLASS` to identify an RWX storage class.
+
 ## Standalone operator-bundle upgrade (OpenShift 5.0)
 
 The `tier:upgrade-operator` scenario discovers and installs a downstream SBR

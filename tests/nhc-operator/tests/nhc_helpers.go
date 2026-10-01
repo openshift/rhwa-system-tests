@@ -102,15 +102,9 @@ func buildNHCForWorkers(name string) *unstructured.Unstructured {
 	return buildNHC(name, "node-role.kubernetes.io/worker", "Exists", nil)
 }
 
-// buildNHCWithHostnameSelector builds an NHC CR that monitors a single node
-// by hostname label. Uses minHealthy=0 because a single-node selector with
-// minHealthy=1 blocks remediation entirely (0/1 healthy < 1 required).
-func buildNHCWithHostnameSelector(name, hostname string) *unstructured.Unstructured {
-	return buildNHCWithHostnameSelectorAndTemplate(name, hostname, nhcparams.SNRTemplateName)
-}
-
 // buildNHCWithHostnameSelectorAndTemplate builds a single-node NHC CR using
-// the named SNR template.
+// the named SNR template. It uses minHealthy=0 because a single-node selector
+// with minHealthy=1 blocks remediation entirely (0/1 healthy < 1 required).
 func buildNHCWithHostnameSelectorAndTemplate(name, hostname, templateName string) *unstructured.Unstructured {
 	nhc := buildNHC(name, "", "", map[string]interface{}{
 		"kubernetes.io/hostname": hostname,

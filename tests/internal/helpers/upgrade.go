@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -46,36 +45,28 @@ func WaitForClusterVersionCondition(
 	return nil
 }
 
-// ApplyIDMSFromSharedDir applies the IDMS YAML saved by the medik8s-catalogsource
-// CI step. Returns true if the IDMS was created/configured (MCP rollout expected),
-// false if unchanged (no MCP rollout needed).
-func ApplyIDMSFromSharedDir(
-	ctx context.Context, sharedDir string,
-	logf func(string, ...interface{}),
-) (bool, error) {
-	if sharedDir == "" {
-		return false, fmt.Errorf("sharedDir is empty; SHARED_DIR env var may not be set")
+// ApplyIDMSFile applies an optional release-provided ImageDigestMirrorSet manifest.
+func ApplyIDMSFile(ctx context.Context, path string, logf func(string, ...interface{})) (bool, error) {
+	if path == "" {
+		logf("No IDMS supplied; using catalog image references directly\n")
+
+		return false, nil
 	}
 
-	idmsPath := filepath.Join(sharedDir, "idms.yaml")
-
-	if _, statErr := os.Stat(idmsPath); statErr != nil {
-		return false, fmt.Errorf("%s not found; medik8s-catalogsource CI step may not have run: %w",
-			idmsPath, statErr)
+	if _, err := os.Stat(path); err != nil {
+		return false, fmt.Errorf("IDMS file %s is unavailable: %w", path, err)
 	}
 
 	childCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(childCtx, "oc", "apply", "-f", idmsPath)
-
-	output, err := cmd.CombinedOutput()
+	output, err := exec.CommandContext(childCtx, "oc", "apply", "-f", path).CombinedOutput()
 	if err != nil {
-		return false, fmt.Errorf("oc apply -f %s failed: %w\nOutput: %s", idmsPath, err, output)
+		return false, fmt.Errorf("oc apply -f %s failed: %w\nOutput: %s", path, err, output)
 	}
 
 	result := strings.TrimSpace(string(output))
-	logf("Applied IDMS from %s: %s\n", idmsPath, result)
+	logf("Applied IDMS from %s: %s\n", path, result)
 
 	return !strings.Contains(result, "unchanged"), nil
 }

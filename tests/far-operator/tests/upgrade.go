@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -237,8 +238,8 @@ var _ = Describe("FAR Operator Upgrade",
 				Expect(genErr).NotTo(HaveOccurred(),
 					"Failed to capture MCP generations before IDMS apply")
 
-				idmsChanged, applyErr := helpers.ApplyIDMSFromSharedDir(ctx,
-					medik8sparams.SharedDir, GinkgoWriter.Printf)
+				idmsChanged, applyErr := helpers.ApplyIDMSFile(ctx,
+					filepath.Join(medik8sparams.SharedDir, "idms.yaml"), GinkgoWriter.Printf)
 				Expect(applyErr).NotTo(HaveOccurred(),
 					"Failed to apply IDMS from SHARED_DIR")
 

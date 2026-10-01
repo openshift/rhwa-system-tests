@@ -4,6 +4,10 @@ Automated tests validating the Node Maintenance Operator (NMO):
 deployment, OLM metadata, security posture, maintenance lifecycle,
 and negative/validation behavior.
 
+The shared FBC upgrade scenario is documented in
+[`../../docs/fbc-upgrades.md`](../../docs/fbc-upgrades.md). It preserves active maintenance
+through the upgrade, exits maintenance, then completes a second lifecycle.
+
 ## Prerequisites
 
 - OpenShift cluster with NMO operator installed via OLM
