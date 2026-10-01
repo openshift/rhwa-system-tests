@@ -205,3 +205,67 @@ func patchSBRCMaxConsecutiveFailures(ctx context.Context, uid types.UID, baselin
 
 	return newGeneration
 }
+
+// upgradeRunSBRRemediationCycle drives one full SBR remediation cycle:
+// select a target worker node, record its boot ID, create a real SBRC matching the node,
+// wait for the agent pod to be ready, create an SBR CR, and verify the node reboots.
+func upgradeRunSBRRemediationCycle(ctx context.Context, owned *sbrutils.OwnedRun) error {
+	nodeName := pickTargetWorkerNode()
+	if nodeName == "" {
+		return fmt.Errorf("failed to select target worker node")
+	}
+
+	GinkgoWriter.Printf("Target node for SBR remediation cycle: %s\n", nodeName)
+
+	bootID, err := getNodeBootID(nodeName)
+	if err != nil {
+		return fmt.Errorf("failed to get boot ID for %s: %w", nodeName, err)
+	}
+
+	storageClass := discoverRWXStorageClass()
+	Expect(storageClass).ToNot(BeEmpty(), "RWX storage class is required for SBR remediation")
+
+	By(fmt.Sprintf("Creating a real StorageBasedRemediationConfig for node %s", nodeName))
+
+	// sbr-upgrade-remediation-<token> is owned by this run and removed during Cleanup.
+	sbrcName := "sbr-upgrade-remediation-" + owned.Token
+	sbrc := buildSBRC(sbrcName, map[string]interface{}{
+		"sharedStorageClass": storageClass,
+		"nodeSelector": map[string]interface{}{
+			"matchLabels": map[string]interface{}{
+				"kubernetes.io/hostname": nodeName,
+			},
+		},
+	})
+
+	if createErr := owned.Create(ctx, sbrc); createErr != nil {
+		return fmt.Errorf("failed to create SBRC %s: %w", sbrcName, createErr)
+	}
+
+	waitForSBRCReady(sbrcName)
+
+	By(fmt.Sprintf("Triggering SBR remediation by creating SBR CR for node %s", nodeName))
+
+	sbr := buildSBR(nodeName)
+	if createErr := owned.Create(ctx, sbr); createErr != nil {
+		return fmt.Errorf("failed to create SBR CR for %s: %w", nodeName, createErr)
+	}
+
+	By(fmt.Sprintf("Waiting for node %s to reboot (boot ID change)", nodeName))
+
+	Eventually(func() (string, error) {
+		return getNodeBootID(nodeName)
+	}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).ShouldNot(Equal(bootID),
+		"Node %s must reboot after SBR CR creation", nodeName)
+
+	By(fmt.Sprintf("Waiting for node %s to return to Ready", nodeName))
+
+	if waitErr := helpers.WaitForNodeReady(ctx, APIClient, nodeName,
+		sbrparams.NodeRebootPollInterval, sbrparams.NodeRebootTimeout, GinkgoWriter.Printf); waitErr != nil {
+		return fmt.Errorf("node %s did not return to Ready: %w", nodeName, waitErr)
+	}
+
+	GinkgoWriter.Printf("SBR remediation cycle completed for node %s\n", nodeName)
+
+	return nil
+}

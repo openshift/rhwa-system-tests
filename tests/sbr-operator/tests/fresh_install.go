@@ -107,5 +107,10 @@ var _ = Describe("SBR Fresh Install", Serial, Ordered,
 					"uid": uid, "spec": spec,
 				})
 				GinkgoWriter.Printf("SBR config after fresh install: uid=%s spec=%v\n", uid, spec)
+
+				By("Step 3: Validate freshly installed SBR via real remediation cycle")
+
+				err = upgradeRunSBRRemediationCycle(ctx, owned)
+				Expect(err).NotTo(HaveOccurred(), "SBR remediation failed after fresh install")
 			})
 	})
