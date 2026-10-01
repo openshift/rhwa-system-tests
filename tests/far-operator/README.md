@@ -343,3 +343,11 @@ Validates expected FAR controller log messages during NHC-triggered remediation.
 ### 25. Verify Full NHC+FAR Interop Lifecycle ([OCP-90159](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-90159))
 
 Validates FAR CR completion, node recovery, schedulability, and removal of the FAR NoSchedule taint.
+
+### 26. Verify FAR Taint Cleanup After NHC Deletes the FAR CR ([OCP-90264](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-90264))
+
+Triggers NHC-mediated FAR remediation on a worker, waits for reboot and recovery, and verifies NHC deletes the FAR CR. Both FAR NoSchedule and out-of-service taints must remain absent while the node stays Ready and schedulable throughout a stabilization window.
+
+### 27. Verify FAR CR Finalizer Cleanup When the Target Node Is Gone ([OCP-90265](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-90265))
+
+Completes standalone FAR remediation on a worker that hosts no FAR controller, stops kubelet, deletes the Node object, and verifies FAR CR deletion clears its finalizer without restarting or replacing FAR controller pods. Cleanup restores the Node object and starts kubelet through SSH.
