@@ -309,6 +309,142 @@ var _ = Describe("NHC+FAR Interop",
 			}
 		})
 
+		It("should clean up FAR taints when NHC deletes the FAR CR after node recovery",
+			reportxml.ID("90264"), Label(labels.TierAcceptance), func() {
+				By("Triggering NHC remediation and observing the FAR taint")
+
+				nhcState = nhcRemediationState{}
+				triggerNHCRemediation(ctx, APIClient, &nhcState, &kubeletStopAttempted, leaderNode, fenceAgent,
+					"nhc-far-taint-cleanup", true, sharedParams, nodeParams)
+				Eventually(func(assertion Gomega) {
+					node := &corev1.Node{}
+					assertion.Expect(APIClient.Get(ctx, client.ObjectKey{Name: nhcState.targetNode}, node)).To(Succeed())
+
+					keys := []string{}
+					for _, taint := range node.Spec.Taints {
+						keys = append(keys, taint.Key)
+					}
+
+					assertion.Expect(keys).To(ContainElement(farparams.FARNoScheduleTaintKey))
+				}, farparams.FARConditionTimeout, farparams.DefaultPollInterval).Should(Succeed())
+
+				By("Waiting for reboot, recovery, and NHC-owned FAR CR deletion")
+				waitForRemediation(ctx, APIClient, nhcState.targetNode, nhcState.oldBootID)
+				Eventually(func() bool {
+					farObj := &unstructured.Unstructured{}
+					farObj.SetGroupVersionKind(farGVK)
+
+					return k8serrors.IsNotFound(APIClient.Get(ctx, client.ObjectKey{
+						Name: nhcState.farName, Namespace: medik8sparams.OperatorNs,
+					}, farObj))
+				}, farparams.FARCleanupTimeout, farparams.DefaultPollInterval).Should(BeTrue())
+
+				By("Verifying both taints stay absent and the node remains schedulable")
+
+				assertRecovered := func(assertion Gomega) {
+					node := &corev1.Node{}
+					assertion.Expect(APIClient.Get(ctx, client.ObjectKey{Name: nhcState.targetNode}, node)).To(Succeed())
+					assertion.Expect(helpers.IsNodeReady(node)).To(BeTrue())
+					assertion.Expect(node.Spec.Unschedulable).To(BeFalse())
+
+					for _, taint := range node.Spec.Taints {
+						assertion.Expect(taint.Key).ToNot(BeElementOf(farparams.FARNoScheduleTaintKey,
+							corev1.TaintNodeOutOfService))
+					}
+				}
+				Eventually(assertRecovered, farparams.FARCleanupTimeout, farparams.DefaultPollInterval).Should(Succeed())
+				Consistently(assertRecovered, farparams.TaintStabilizationDuration,
+					farparams.DefaultPollInterval).Should(Succeed())
+			})
+
+		It("should delete FAR CR cleanly when target node is already gone",
+			reportxml.ID("90265"), Label(labels.TierAcceptance), func() {
+				By("Selecting a worker that hosts no FAR controller")
+
+				nhcState = nhcRemediationState{}
+				controllerPods := &corev1.PodList{}
+				Expect(APIClient.List(ctx, controllerPods, client.InNamespace(medik8sparams.OperatorNs),
+					client.MatchingLabels(farparams.OperatorControllerPodLabels))).To(Succeed())
+				Expect(controllerPods.Items).ToNot(BeEmpty())
+
+				excluded := []string{leaderNode}
+				for _, controllerPod := range controllerPods.Items {
+					excluded = append(excluded, controllerPod.Spec.NodeName)
+				}
+
+				target, err := selectDedicatedWorkerNode(ctx, APIClient, excluded...)
+				Expect(err).ToNot(HaveOccurred())
+
+				By("Creating a FAR CR and waiting for completed remediation with a finalizer")
+
+				bootID, err := farutils.GetNodeBootIDFromAPI(ctx, APIClient, target.Name)
+				Expect(err).ToNot(HaveOccurred())
+				DeferCleanup(func() {
+					By("Restoring the Node object before SSH-based kubelet recovery")
+
+					node := &corev1.Node{}
+
+					err := APIClient.Get(ctx, client.ObjectKey{Name: target.Name}, node)
+					if k8serrors.IsNotFound(err) {
+						node = target.DeepCopy()
+						node.ResourceVersion = ""
+						node.UID = ""
+						node.CreationTimestamp = metav1.Time{}
+						node.ManagedFields = nil
+						node.Status = corev1.NodeStatus{}
+
+						err = APIClient.Create(ctx, node)
+						if err == nil {
+							// Preserve the address required by the existing SSH helper;
+							// kubelet replaces this status once it starts again.
+							node.Status.Addresses = target.Status.Addresses
+							err = APIClient.Status().Update(ctx, node)
+						}
+					}
+
+					Expect(err).ToNot(HaveOccurred())
+					Expect(helpers.StartKubeletSSH(ctx, APIClient, target.Name, farparams.SSHTimeout)).To(Succeed())
+					Expect(deleteRemediationCR(ctx, APIClient, farGVK, target.Name)).To(Succeed())
+					Expect(farutils.WaitForNodeReady(ctx, APIClient, target.Name,
+						farparams.NodeReadyTimeout, GinkgoWriter.Printf)).To(Succeed())
+				})
+				createFARCR(ctx, APIClient, buildFARUnstructured(target.Name, fenceAgent, sharedParams, nodeParams))
+				waitForRemediation(ctx, APIClient, target.Name, bootID)
+
+				farObj := &unstructured.Unstructured{}
+				farObj.SetGroupVersionKind(farGVK)
+				Expect(APIClient.Get(ctx, client.ObjectKey{Name: target.Name,
+					Namespace: medik8sparams.OperatorNs}, farObj)).To(Succeed())
+				Expect(farObj.GetFinalizers()).ToNot(BeEmpty())
+				Expect(farConditionSucceeded(farObj)).To(BeTrue())
+
+				By("Stopping kubelet and deleting its Node object")
+				Expect(stopKubeletForRemediation(ctx, target.Name)).To(Succeed())
+				Expect(APIClient.Delete(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: target.Name}})).To(Succeed())
+				Eventually(func() bool {
+					return k8serrors.IsNotFound(APIClient.Get(ctx, client.ObjectKey{Name: target.Name}, &corev1.Node{}))
+				}, farparams.FARCleanupTimeout, farparams.DefaultPollInterval).Should(BeTrue())
+
+				By("Deleting the FAR CR without removing its finalizer manually")
+				Expect(deleteRemediationCR(ctx, APIClient, farGVK, target.Name)).To(Succeed())
+				Expect(k8serrors.IsNotFound(APIClient.Get(ctx, client.ObjectKey{Name: target.Name}, &corev1.Node{}))).To(BeTrue())
+				By("Verifying surviving FAR controller pods did not restart or get replaced")
+
+				for _, originalPod := range controllerPods.Items {
+					fresh := &corev1.Pod{}
+					Expect(APIClient.Get(ctx, client.ObjectKeyFromObject(&originalPod), fresh)).To(Succeed())
+					Expect(fresh.UID).To(Equal(originalPod.UID))
+
+					for _, originalStatus := range originalPod.Status.ContainerStatuses {
+						for _, freshStatus := range fresh.Status.ContainerStatuses {
+							if originalStatus.Name == freshStatus.Name {
+								Expect(freshStatus.RestartCount).To(Equal(originalStatus.RestartCount))
+							}
+						}
+					}
+				}
+			})
+
 		// Keep OCP-61309 separate for its happy-path traceability; OCP-90159
 		// extends the same flow with lifecycle assertions.
 		It("should remediate unhealthy node when NHC uses a FAR template",

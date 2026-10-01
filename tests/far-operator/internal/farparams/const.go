@@ -251,6 +251,10 @@ const (
 	NHCUnhealthyDuration = "30s"
 	// NHCEnabledPhase is the phase reported when NHC watches selected nodes.
 	NHCEnabledPhase = "Enabled"
+	// FARCleanupTimeout bounds finalizer and taint cleanup after CR deletion.
+	FARCleanupTimeout = 3 * time.Minute
+	// TaintStabilizationDuration checks that recovery does not trigger remediation again.
+	TaintStabilizationDuration = 30 * time.Second
 )
 
 // WorkloadTestImage is the container image used for test workload pods.

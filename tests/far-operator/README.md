@@ -324,6 +324,15 @@ Deletes the FAR controller pods to isolate logs, then creates a FAR CR with an i
 - **Standalone**: `ginkgo --label-filter="far" --focus="timeout messages matching retry count" ./tests/far-operator/...`
 - **Pass criteria**: the active FAR controller log contains exactly 10 (`FARCRRetryCount`) `command failed` entries, one per retry
 
+## FAR cleanup regression coverage
+
+- **OCP-90264**: NHC-triggered remediation reboots a worker, NHC deletes its FAR CR after recovery, and both FAR NoSchedule and out-of-service taints remain absent. The node must remain Ready and schedulable throughout a stabilization window.
+- **OCP-90265**: After standalone remediation completes, stop kubelet, delete the worker's Node object, and verify FAR CR deletion clears its finalizer without restarting or replacing FAR controller pods. Cleanup restores the Node object and starts kubelet through SSH.
+
+Both specs require an AWS cluster with FAR and NHC installed, AWS fencing credentials, an SSH bastion/key, and at least three Ready workers. They inherit `operator:far`, `operator:nhc`, `operator:interop`, `tier:interop`, `disruption:destructive`, `platform:aws`, and `frequency:weekly`.
+
+Run with `ECO_TEST_FEATURES=far-operator ECO_TEST_LABELS='operator:far && operator:nhc && tier:interop' make run-tests`.
+
 ## NHC+FAR Interop Tests
 
 Tests validating integration between Node Healthcheck (NHC) and Fence Agents Remediation (FAR) through a FenceAgentsRemediationTemplate (FAR template).
