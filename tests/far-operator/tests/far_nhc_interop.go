@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -43,6 +44,10 @@ var nhcGVK = schema.GroupVersionKind{
 	Version: "v1alpha1",
 	Kind:    "NodeHealthCheck",
 }
+
+var errNoEligibleWorker = errors.New("no eligible dedicated Ready worker node found")
+
+const farRemediationFinalizer = "fence-agents-remediation.medik8s.io/far-finalizer"
 
 // nhcRemediationState holds the mutable test state produced by
 // triggerNHCRemediation so the JustAfterEach cleanup can reference it.
@@ -330,13 +335,13 @@ var _ = Describe("NHC+FAR Interop",
 
 				By("Waiting for reboot, recovery, and NHC-owned FAR CR deletion")
 				waitForRemediation(ctx, APIClient, nhcState.targetNode, nhcState.oldBootID)
-				Eventually(func() bool {
+				Eventually(func() (bool, error) {
 					farObj := &unstructured.Unstructured{}
 					farObj.SetGroupVersionKind(farGVK)
+					farObj.SetName(nhcState.farName)
+					farObj.SetNamespace(medik8sparams.OperatorNs)
 
-					return k8serrors.IsNotFound(APIClient.Get(ctx, client.ObjectKey{
-						Name: nhcState.farName, Namespace: medik8sparams.OperatorNs,
-					}, farObj))
+					return resourceAbsent(ctx, APIClient, farObj)
 				}, farparams.FARCleanupTimeout, farparams.DefaultPollInterval).Should(BeTrue())
 
 				By("Verifying both taints stay absent and the node remains schedulable")
@@ -373,60 +378,109 @@ var _ = Describe("NHC+FAR Interop",
 				}
 
 				target, err := selectDedicatedWorkerNode(ctx, APIClient, excluded...)
+				if errors.Is(err, errNoEligibleWorker) {
+					Skip(fmt.Sprintf("FAR finalizer cleanup requires a Ready worker outside FAR controller nodes: %v", err))
+				}
+
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Creating a FAR CR and waiting for completed remediation with a finalizer")
 
 				bootID, err := farutils.GetNodeBootIDFromAPI(ctx, APIClient, target.Name)
 				Expect(err).ToNot(HaveOccurred())
+				nodeIP, err := helpers.GetNodeInternalIP(ctx, APIClient, target.Name)
+				Expect(err).ToNot(HaveOccurred())
 				DeferCleanup(func() {
-					By("Restoring the Node object before SSH-based kubelet recovery")
+					if CurrentSpecReport().Failed() {
+						logFARRemediationDiagnostics(ctx, APIClient, target.Name)
 
-					node := &corev1.Node{}
+						farObj := &unstructured.Unstructured{}
+						farObj.SetGroupVersionKind(farGVK)
 
-					err := APIClient.Get(ctx, client.ObjectKey{Name: target.Name}, node)
-					if k8serrors.IsNotFound(err) {
-						node = target.DeepCopy()
-						node.ResourceVersion = ""
-						node.UID = ""
-						node.CreationTimestamp = metav1.Time{}
-						node.ManagedFields = nil
-						node.Status = corev1.NodeStatus{}
-
-						err = APIClient.Create(ctx, node)
-						if err == nil {
-							// Preserve the address required by the existing SSH helper;
-							// kubelet replaces this status once it starts again.
-							node.Status.Addresses = target.Status.Addresses
-							err = APIClient.Status().Update(ctx, node)
+						if err := APIClient.Get(ctx, client.ObjectKey{Name: target.Name,
+							Namespace: medik8sparams.OperatorNs}, farObj); err == nil {
+							GinkgoWriter.Printf("FAR CR %s: deletionTimestamp=%v finalizers=%v\n",
+								target.Name, farObj.GetDeletionTimestamp(), farObj.GetFinalizers())
 						}
 					}
 
-					Expect(err).ToNot(HaveOccurred())
-					Expect(helpers.StartKubeletSSH(ctx, APIClient, target.Name, farparams.SSHTimeout)).To(Succeed())
-					Expect(deleteRemediationCR(ctx, APIClient, farGVK, target.Name)).To(Succeed())
-					Expect(farutils.WaitForNodeReady(ctx, APIClient, target.Name,
-						farparams.NodeReadyTimeout, GinkgoWriter.Printf)).To(Succeed())
+					By("Restoring the Node object before SSH-based kubelet recovery")
+
+					var cleanupErrors []string
+
+					operations := []struct {
+						name string
+						run  func() error
+					}{
+						{"restore Node", func() error { return restoreDeletedNode(ctx, APIClient, target) }},
+						{"restart kubelet", func() error {
+							return helpers.StartKubeletSSHByIP(ctx, nodeIP, farparams.SSHTimeout)
+						}},
+						{"delete FAR CR", func() error {
+							deleteErr := deleteRemediationCR(ctx, APIClient, farGVK, target.Name)
+							if deleteErr == nil {
+								return nil
+							}
+
+							AddReportEntry("far-finalizer-cleanup-fallback", deleteErr.Error())
+
+							// Teardown only: the spec above must still fail if natural deletion fails.
+							if err := removeFARFinalizer(ctx, APIClient, target.Name); err != nil {
+								return err
+							}
+
+							return deleteRemediationCR(ctx, APIClient, farGVK, target.Name)
+						}},
+						{"restore Node scheduling", func() error {
+							return restoreFARNodeScheduling(ctx, APIClient, target)
+						}},
+						{"wait for Node Ready", func() error {
+							return farutils.WaitForNodeReady(ctx, APIClient, target.Name,
+								farparams.NodeReadyTimeout, GinkgoWriter.Printf)
+						}},
+					}
+					for _, operation := range operations {
+						if err := operation.run(); err != nil {
+							message := fmt.Sprintf("%s on %s: %v", operation.name, target.Name, err)
+							GinkgoWriter.Printf("WARNING: %s\n", message)
+							AddReportEntry("far-finalizer-cleanup-"+operation.name, message)
+							cleanupErrors = append(cleanupErrors, message)
+						}
+					}
+
+					if len(cleanupErrors) > 0 {
+						Fail("FAR finalizer cleanup failed: " + strings.Join(cleanupErrors, "; "))
+					}
 				})
 				createFARCR(ctx, APIClient, buildFARUnstructured(target.Name, fenceAgent, sharedParams, nodeParams))
 				waitForRemediation(ctx, APIClient, target.Name, bootID)
 
-				farObj := &unstructured.Unstructured{}
-				farObj.SetGroupVersionKind(farGVK)
-				Expect(APIClient.Get(ctx, client.ObjectKey{Name: target.Name,
-					Namespace: medik8sparams.OperatorNs}, farObj)).To(Succeed())
-				Expect(farObj.GetFinalizers()).ToNot(BeEmpty())
-				Expect(farConditionSucceeded(farObj)).To(BeTrue())
+				Eventually(func(assertion Gomega) {
+					farObj := &unstructured.Unstructured{}
+					farObj.SetGroupVersionKind(farGVK)
+					assertion.Expect(APIClient.Get(ctx, client.ObjectKey{Name: target.Name,
+						Namespace: medik8sparams.OperatorNs}, farObj)).To(Succeed())
+					assertion.Expect(farObj.GetFinalizers()).To(ContainElement(farRemediationFinalizer))
+					assertion.Expect(farConditionSucceeded(farObj)).To(BeTrue())
+				}, farparams.FARConditionTimeout, farparams.DefaultPollInterval).Should(Succeed())
 
 				By("Stopping kubelet and deleting its Node object")
 				Expect(stopKubeletForRemediation(ctx, target.Name)).To(Succeed())
 				Expect(APIClient.Delete(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: target.Name}})).To(Succeed())
-				Eventually(func() bool {
-					return k8serrors.IsNotFound(APIClient.Get(ctx, client.ObjectKey{Name: target.Name}, &corev1.Node{}))
+				Eventually(func() (bool, error) {
+					return resourceAbsent(ctx, APIClient, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: target.Name}})
 				}, farparams.FARCleanupTimeout, farparams.DefaultPollInterval).Should(BeTrue())
 
 				By("Deleting the FAR CR without removing its finalizer manually")
-				Expect(deleteRemediationCR(ctx, APIClient, farGVK, target.Name)).To(Succeed())
+
+				farObj := &unstructured.Unstructured{}
+				farObj.SetGroupVersionKind(farGVK)
+				farObj.SetName(target.Name)
+				farObj.SetNamespace(medik8sparams.OperatorNs)
+				Expect(APIClient.Delete(ctx, farObj)).To(Succeed())
+				Eventually(func() (bool, error) {
+					return resourceAbsent(ctx, APIClient, farObj)
+				}, farparams.FARCleanupTimeout, farparams.DefaultPollInterval).Should(BeTrue())
 				Expect(k8serrors.IsNotFound(APIClient.Get(ctx, client.ObjectKey{Name: target.Name}, &corev1.Node{}))).To(BeTrue())
 				By("Verifying surviving FAR controller pods did not restart or get replaced")
 
@@ -741,6 +795,109 @@ func triggerSecondNHCRemediation(
 	state.farName = waitForNHCCreatedFAR(ctx, apiClient, targetNode.Name, nhc.GetUID())
 }
 
+func removeFARFinalizer(ctx context.Context, apiClient client.Client, name string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		farObj := &unstructured.Unstructured{}
+		farObj.SetGroupVersionKind(farGVK)
+
+		if err := apiClient.Get(ctx, client.ObjectKey{Name: name,
+			Namespace: medik8sparams.OperatorNs}, farObj); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+
+		finalizers := farObj.GetFinalizers()
+		remaining := make([]string, 0, len(finalizers))
+
+		for _, finalizer := range finalizers {
+			if finalizer != farRemediationFinalizer {
+				remaining = append(remaining, finalizer)
+			}
+		}
+
+		if len(remaining) == len(finalizers) {
+			return nil
+		}
+
+		farObj.SetFinalizers(remaining)
+
+		return client.IgnoreNotFound(apiClient.Update(ctx, farObj))
+	})
+}
+
+func restoreFARNodeScheduling(ctx context.Context, apiClient client.Client, original *corev1.Node) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node := &corev1.Node{}
+		if err := apiClient.Get(ctx, client.ObjectKey{Name: original.Name}, node); err != nil {
+			return err
+		}
+
+		taints := make([]corev1.Taint, 0, len(node.Spec.Taints))
+		for _, taint := range node.Spec.Taints {
+			remove := taint.Key == farparams.FARNoScheduleTaintKey || taint.Key == corev1.TaintNodeOutOfService
+			for _, saved := range original.Spec.Taints {
+				if saved.Key == taint.Key && saved.Effect == taint.Effect {
+					remove = false
+				}
+			}
+
+			if !remove {
+				taints = append(taints, taint)
+			}
+		}
+
+		if len(taints) == len(node.Spec.Taints) && node.Spec.Unschedulable == original.Spec.Unschedulable {
+			return nil
+		}
+
+		node.Spec.Taints = taints
+		node.Spec.Unschedulable = original.Spec.Unschedulable
+
+		return apiClient.Update(ctx, node)
+	})
+}
+
+func resourceAbsent(ctx context.Context, apiClient client.Client, obj client.Object) (bool, error) {
+	key := client.ObjectKeyFromObject(obj)
+
+	err := apiClient.Get(ctx, key, obj)
+	if k8serrors.IsNotFound(err) {
+		return true, nil
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("get %T %s while waiting for deletion: %w", obj, key, err)
+	}
+
+	return false, nil
+}
+
+func restoreDeletedNode(ctx context.Context, apiClient client.Client, original *corev1.Node) error {
+	node := &corev1.Node{}
+
+	err := apiClient.Get(ctx, client.ObjectKey{Name: original.Name}, node)
+	if err == nil {
+		return nil
+	}
+
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("get Node %s for restoration: %w", original.Name, err)
+	}
+
+	node = original.DeepCopy()
+	node.ResourceVersion = ""
+	node.UID = ""
+	node.CreationTimestamp = metav1.Time{}
+	node.ManagedFields = nil
+	node.Status = corev1.NodeStatus{}
+
+	if err := apiClient.Create(ctx, node); err != nil && !k8serrors.IsAlreadyExists(err) {
+		return fmt.Errorf("restore Node %s: %w", original.Name, err)
+	}
+
+	// Kubelet repopulates status; SSH recovery uses the separately saved address.
+	return nil
+}
+
 func selectDedicatedWorkerNode(
 	ctx context.Context, apiClient client.Client, excludedNodes ...string,
 ) (*corev1.Node, error) {
@@ -765,7 +922,8 @@ func selectDedicatedWorkerNode(
 		}
 	}
 
-	return nil, fmt.Errorf("no eligible dedicated Ready worker node found")
+	return nil, fmt.Errorf("%w: %d schedulable workers, excluded nodes %v",
+		errNoEligibleWorker, len(workers), excludedNodes)
 }
 
 func buildNHCUnstructured(

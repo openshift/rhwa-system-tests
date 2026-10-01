@@ -539,6 +539,15 @@ func StartKubeletSSH(
 		return err
 	}
 
+	return StartKubeletSSHByIP(ctx, nodeIP, timeout)
+}
+
+// StartKubeletSSHByIP restarts kubelet using a saved address when the Node is absent.
+func StartKubeletSSHByIP(ctx context.Context, nodeIP string, timeout time.Duration) error {
+	if nodeIP == "" {
+		return fmt.Errorf("node IP is required for kubelet recovery")
+	}
+
 	if err := runSSH(ctx, nodeIP, timeout, "sudo systemctl unmask --runtime kubelet"); err != nil {
 		return err
 	}
