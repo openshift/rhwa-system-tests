@@ -10,10 +10,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	nmov1beta1 "github.com/medik8s/node-maintenance-operator/api/v1beta1"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
@@ -24,15 +22,8 @@ import (
 	"github.com/medik8s/system-tests/tests/nmo-operator/internal/nmoparams"
 )
 
-var nmGVK = schema.GroupVersionKind{
-	Group:   nmoparams.CRDGroup,
-	Version: nmoparams.CRDVersion,
-	Kind:    nmoparams.KindNodeMaintenance,
-}
-
-// buildNMUnstructured returns an unstructured NodeMaintenance CR. It is used for negative
-// tests that must send field values a typed nmov1beta1.NodeMaintenance struct cannot
-// represent -- e.g. an integer in the string-typed spec.reason field.
+// buildNMUnstructured returns an unstructured NodeMaintenance CR for negative tests that
+// must send raw field values, such as an integer in the string-typed spec.reason field.
 func buildNMUnstructured(name, nodeName string, reason interface{}) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -71,11 +62,6 @@ var _ = Describe("NMO Negative Validation",
 
 		BeforeAll(func() {
 			ctx = context.Background()
-
-			By("Registering NMO API scheme")
-
-			err := APIClient.AttachScheme(nmov1beta1.AddToScheme)
-			Expect(err).ToNot(HaveOccurred(), "Failed to register NMO scheme")
 
 			By("Verifying NMO deployment is Ready")
 
@@ -127,7 +113,7 @@ var _ = Describe("NMO Negative Validation",
 					By("Verifying the NodeMaintenance CR was not created")
 
 					absentErr := APIClient.Get(ctx,
-						client.ObjectKey{Name: nmoparams.InvalidNodeNMName}, &nmov1beta1.NodeMaintenance{})
+						client.ObjectKey{Name: nmoparams.InvalidNodeNMName}, newNodeMaintenanceObject())
 					Expect(k8serrors.IsNotFound(absentErr)).To(BeTrue(),
 						"NodeMaintenance CR should not exist after a rejected create")
 				})
@@ -155,7 +141,7 @@ var _ = Describe("NMO Negative Validation",
 					By("Verifying the NodeMaintenance CR was not created")
 
 					absentErr := APIClient.Get(ctx,
-						client.ObjectKey{Name: nmoparams.IncorrectFormatNMName}, &nmov1beta1.NodeMaintenance{})
+						client.ObjectKey{Name: nmoparams.IncorrectFormatNMName}, newNodeMaintenanceObject())
 					Expect(k8serrors.IsNotFound(absentErr)).To(BeTrue(),
 						"NodeMaintenance CR should not exist after a rejected create")
 

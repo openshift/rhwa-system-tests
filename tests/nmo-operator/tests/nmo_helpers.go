@@ -11,16 +11,21 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	nmov1beta1 "github.com/medik8s/node-maintenance-operator/api/v1beta1"
 
 	"github.com/medik8s/system-tests/tests/internal/helpers"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/nmo-operator/internal/nmoparams"
 )
+
+var nmGVK = schema.GroupVersionKind{
+	Group:   nmoparams.CRDGroup,
+	Version: nmoparams.CRDVersion,
+	Kind:    nmoparams.KindNodeMaintenance,
+}
 
 // isControlPlane reports whether the node carries a master or control-plane role label.
 // On compact topologies control-plane nodes also carry the worker label, so they must be
@@ -95,16 +100,26 @@ func selectSchedulableWorker(ctx context.Context) string {
 
 // newNodeMaintenance builds a NodeMaintenance CR for the given name and node using the
 // shared collision-test reason.
-func newNodeMaintenance(name, nodeName string) *nmov1beta1.NodeMaintenance {
-	return &nmov1beta1.NodeMaintenance{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: nmov1beta1.NodeMaintenanceSpec{
-			NodeName: nodeName,
-			Reason:   nmoparams.CollisionReason,
-		},
+func newNodeMaintenance(name, nodeName string) *unstructured.Unstructured {
+	return newNodeMaintenanceWithReason(name, nodeName, nmoparams.CollisionReason)
+}
+
+func newNodeMaintenanceWithReason(name, nodeName, reason string) *unstructured.Unstructured {
+	nm := newNodeMaintenanceObject()
+	nm.SetName(name)
+	nm.Object["spec"] = map[string]interface{}{
+		"nodeName": nodeName,
+		"reason":   reason,
 	}
+
+	return nm
+}
+
+func newNodeMaintenanceObject() *unstructured.Unstructured {
+	nm := &unstructured.Unstructured{}
+	nm.SetGroupVersionKind(nmGVK)
+
+	return nm
 }
 
 // waitForMaintenanceSucceeded blocks until the named NodeMaintenance reaches the Succeeded
@@ -112,14 +127,15 @@ func newNodeMaintenance(name, nodeName string) *nmov1beta1.NodeMaintenance {
 func waitForMaintenanceSucceeded(ctx context.Context, name string) {
 	GinkgoHelper()
 
-	Eventually(func() (nmov1beta1.MaintenancePhase, error) {
-		current := &nmov1beta1.NodeMaintenance{}
+	Eventually(func() (string, error) {
+		current := newNodeMaintenanceObject()
 		if err := APIClient.Get(ctx, client.ObjectKey{Name: name}, current); err != nil {
 			return "", fmt.Errorf("getting NodeMaintenance %s: %w", name, err)
 		}
 
-		return current.Status.Phase, nil
-	}, nmoparams.MaintenanceTimeout, nmoparams.DefaultPollInterval).Should(Equal(nmov1beta1.MaintenanceSucceeded),
+		phase, _, err := unstructured.NestedString(current.Object, "status", "phase")
+		return phase, err
+	}, nmoparams.MaintenanceTimeout, nmoparams.DefaultPollInterval).Should(Equal(nmoparams.MaintenanceSucceeded),
 		"NodeMaintenance %s did not reach Succeeded phase", name)
 }
 
@@ -141,7 +157,8 @@ func assertMaintenanceSucceeded(ctx context.Context, name, nodeName string) {
 // through any transient (non-NotFound) API error until the timeout, logging a warning, so a
 // single blip on a busy cluster does not abandon the deletion.
 func deleteNMBestEffort(ctx context.Context, name string) {
-	nm := &nmov1beta1.NodeMaintenance{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	nm := newNodeMaintenanceObject()
+	nm.SetName(name)
 
 	waitErr := wait.PollUntilContextTimeout(ctx, nmoparams.DefaultPollInterval, nmoparams.UncordonTimeout, true,
 		func(ctx context.Context) (bool, error) {
@@ -151,7 +168,7 @@ func deleteNMBestEffort(ctx context.Context, name string) {
 				return false, nil
 			}
 
-			getErr := APIClient.Get(ctx, client.ObjectKey{Name: name}, &nmov1beta1.NodeMaintenance{})
+			getErr := APIClient.Get(ctx, client.ObjectKey{Name: name}, newNodeMaintenanceObject())
 			if getErr != nil && !errors.IsNotFound(getErr) {
 				GinkgoWriter.Printf("WARNING: checking NodeMaintenance %s after delete failed, retrying: %v\n", name, getErr)
 
