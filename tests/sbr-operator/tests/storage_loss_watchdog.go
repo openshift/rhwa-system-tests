@@ -221,7 +221,6 @@ var _ = Describe(
 					APIClient, injectorPodName, medik8sparams.OperatorNs, sbrparams.InjectorImage).
 					DefineOnNode(targetNodeName).
 					WithHostPid(true).
-					WithHostNetwork().
 					WithPrivilegedFlag().
 					WithRestartPolicy(corev1.RestartPolicyNever).
 					RedefineDefaultCMD([]string{"sleep", "3600"}).
@@ -234,18 +233,9 @@ var _ = Describe(
 
 					if existing, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs); pullErr == nil {
 						// Best-effort: remove rules if node did not reboot; ignore errors.
-						// WithHostNetwork() already places the pod in the host network namespace,
-						// so no nsenter is needed.
-						_, _ = existing.ExecCommand([]string{
-							"sh", "-c",
-							"iptables -D INPUT -p tcp --dport 3300 -j REJECT 2>/dev/null; " +
-								"iptables -D INPUT -p tcp --dport 6789 -j REJECT 2>/dev/null; " +
-								"iptables -D INPUT -p tcp -m multiport --dports 6800:7300 -j REJECT 2>/dev/null; " +
-								"iptables -D OUTPUT -p tcp --dport 3300 -j REJECT 2>/dev/null; " +
-								"iptables -D OUTPUT -p tcp --dport 6789 -j REJECT 2>/dev/null; " +
-								"iptables -D OUTPUT -p tcp -m multiport --dports 6800:7300 -j REJECT 2>/dev/null; " +
-								"true",
-						})
+						// The injector image ships nsenter but not iptables, so the rules
+						// must be deleted on the host via nsenter (same path as injection).
+						removeCephFSRejectBidirectional(existing)
 
 						_, _ = existing.Delete()
 					}
@@ -253,22 +243,10 @@ var _ = Describe(
 
 				By("Injecting CephFS REJECT rules (INPUT + OUTPUT) on target node via nsenter")
 
-				injectScript := strings.Join([]string{
-					"iptables -I INPUT -p tcp --dport 3300 -j REJECT",
-					"iptables -I INPUT -p tcp --dport 6789 -j REJECT",
-					"iptables -I INPUT -p tcp -m multiport --dports 6800:7300 -j REJECT",
-					"iptables -I OUTPUT -p tcp --dport 3300 -j REJECT",
-					"iptables -I OUTPUT -p tcp --dport 6789 -j REJECT",
-					"iptables -I OUTPUT -p tcp -m multiport --dports 6800:7300 -j REJECT",
-				}, " && ")
-
-				// WithHostNetwork() places the pod in the host network namespace directly;
-				// no nsenter is needed to reach the host iptables.
-				_, execErr := injectorPod.ExecCommand([]string{
-					"sh", "-c", injectScript,
-				})
-				Expect(execErr).ToNot(HaveOccurred(),
-					"Failed to inject CephFS REJECT rules on node %s", targetNodeName)
+				// The injector image ships nsenter but not iptables, so iptables must run
+				// on the host via nsenter (--target 1 --net --mount), not inside the
+				// container. This reuses the same helper as the other injection specs.
+				injectCephFSRejectBidirectional(injectorPod, targetNodeName)
 
 				GinkgoWriter.Printf("CephFS REJECT rules injected on node %s\n", targetNodeName)
 
