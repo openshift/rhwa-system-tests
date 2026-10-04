@@ -69,6 +69,8 @@ const (
 	CRDVersion = "v1beta1"
 	// KindNodeMaintenance is the Kind for NodeMaintenance CRs.
 	KindNodeMaintenance = "NodeMaintenance"
+	// MaintenanceSucceeded is the status phase reported after maintenance completes.
+	MaintenanceSucceeded = "Succeeded"
 
 	// ValidReason is a well-formed spec.reason value for negative tests where the reason must be valid.
 	ValidReason = "system-tests negative validation (RHWA-1251)"
