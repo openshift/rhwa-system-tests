@@ -40,11 +40,13 @@ var _ = BeforeSuite(func() {
 	if k8serrors.IsNotFound(err) {
 		GinkgoWriter.Printf("✓ SNR operator is NOT installed (CRD %q not found)\n", snrCRDName)
 		GinkgoWriter.Printf("  SBR tests can proceed without SNR config validation\n")
+
 		return
 	}
 
 	if err != nil {
 		GinkgoWriter.Printf("⚠ Warning: could not check for SNR CRD: %v\n", err)
+
 		return
 	}
 
@@ -56,15 +58,16 @@ var _ = BeforeSuite(func() {
 	snrcList := &unstructured.UnstructuredList{}
 	snrcList.SetAPIVersion("self-node-remediation.medik8s.io/v1alpha1")
 	snrcList.SetKind("SelfNodeRemediationConfigList")
-
 	err = APIClient.List(context.TODO(), snrcList)
 	if err != nil {
 		GinkgoWriter.Printf("⚠ Warning: could not list SelfNodeRemediationConfigs: %v\n", err)
+
 		return
 	}
 
 	if len(snrcList.Items) == 0 {
 		GinkgoWriter.Printf("⚠ No SelfNodeRemediationConfig found in cluster\n")
+
 		return
 	}
 
@@ -73,20 +76,21 @@ var _ = BeforeSuite(func() {
 		config := &snrcList.Items[idx]
 		configName := config.GetName()
 		configNs := config.GetNamespace()
-
 		isSoftwareRebootEnabled, found, err := unstructured.NestedBool(
 			config.Object, "spec", "isSoftwareRebootEnabled")
-
 		if err != nil {
 			GinkgoWriter.Printf("⚠ Warning: could not read isSoftwareRebootEnabled from %s/%s: %v\n",
 				configNs, configName, err)
+
 			continue
 		}
 
 		if !found {
-			GinkgoWriter.Printf("ℹ SelfNodeRemediationConfig %s/%s: isSoftwareRebootEnabled field not set (defaults to true)\n",
-				configNs, configName)
-			GinkgoWriter.Printf("  RECOMMENDATION: Set spec.isSoftwareRebootEnabled: false to avoid conflicts with SBR watchdog-based fencing\n")
+			GinkgoWriter.Printf("ℹ SelfNodeRemediationConfig %s/%s: isSoftwareRebootEnabled field not set "+
+				"(defaults to true)\n", configNs, configName)
+			GinkgoWriter.Printf("  RECOMMENDATION: Set spec.isSoftwareRebootEnabled: false to avoid conflicts " +
+				"with SBR watchdog-based fencing\n")
+
 			continue
 		}
 

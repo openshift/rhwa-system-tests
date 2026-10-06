@@ -168,10 +168,8 @@ func testCephRBDConcurrentWrites() {
 	runningPods := helpers.FilterRunningPods(agentPods)
 	expectedCount := getWorkerNodeCount()
 	actualCount := len(runningPods)
-
 	Expect(actualCount).To(Equal(expectedCount),
 		"Agent pod count (%d) should match worker node count (%d)", actualCount, expectedCount)
-
 	GinkgoWriter.Printf("Successfully verified %d agent pods running on %d worker nodes\n",
 		actualCount, expectedCount)
 	GinkgoWriter.Printf("Agent pods are using Ceph RBD block storage in Block volume mode\n")
@@ -182,20 +180,16 @@ func testCephRBDConcurrentWrites() {
 	// multiple agents from attaching to the same block device.
 	Expect(actualCount).To(BeNumerically(">=", 2),
 		"At least 2 agents must be Ready to validate multi-attach capability")
-
 	GinkgoWriter.Printf("✓ Validated concurrent block device access: %d agents Ready\n", actualCount)
 	GinkgoWriter.Printf("✓ Ceph RBD block storage supports true RWX multi-attach\n")
 
 	By("Reading slot data from all agent pods to validate data integrity")
 	slotDataByPod := make(map[string][]SlotData)
-
 	for _, agentPod := range runningPods {
 		podName := agentPod.Object.Name
 		GinkgoWriter.Printf("Reading slot data from pod %s...\n", podName)
-
 		slotData, err := readSlotDataFromPod(podName, medik8sparams.OperatorNs)
 		Expect(err).ToNot(HaveOccurred(), "Failed to read slot data from pod %s", podName)
-
 		slotDataByPod[podName] = slotData
 		GinkgoWriter.Printf("  Retrieved %d slot entries from pod %s\n", len(slotData), podName)
 	}
@@ -205,7 +199,6 @@ func testCephRBDConcurrentWrites() {
 
 	By("Validating sequence numbers increment correctly without conflicts")
 	validateSequenceNumbers(slotDataByPod)
-
 	GinkgoWriter.Printf("✓ Block device maintains data integrity across all agents\n")
 	GinkgoWriter.Printf("✓ Sequence numbers increment correctly without conflicts\n")
 }

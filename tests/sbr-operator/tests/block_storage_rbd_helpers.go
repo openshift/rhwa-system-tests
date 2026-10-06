@@ -67,9 +67,9 @@ func checkSNRRunning() (bool, int) {
 	snrPodList, err := APIClient.CoreV1Interface.Pods("openshift-workload-availability").List(
 		context.TODO(),
 		metav1.ListOptions{LabelSelector: "app.kubernetes.io/name=self-node-remediation"})
-
 	if err != nil {
 		GinkgoWriter.Printf("Warning: could not check for SNR pods: %v\n", err)
+
 		return false, 0
 	}
 
@@ -84,7 +84,7 @@ func checkSNRRunning() (bool, int) {
 	return runningCount > 0, runningCount
 }
 
-// SlotData represents a single heartbeat slot entry from the SBR device
+// SlotData represents a single heartbeat slot entry from the SBR device.
 type SlotData struct {
 	NodeID    uint16
 	Timestamp int64
@@ -98,9 +98,7 @@ func readSlotDataFromPod(podName, namespace string) ([]SlotData, error) {
 	// Read first 255 slots (255 * 512 bytes = 130560 bytes)
 	// Each slot is 512 bytes and contains a heartbeat message
 	sbrDevicePath := "/sbr-block"
-
 	cmd := []string{"dd", "if=" + sbrDevicePath, "bs=512", "count=255", "status=none"}
-
 	podBuilder, err := pod.Pull(APIClient, podName, namespace)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pull pod %s: %w", podName, err)
@@ -117,7 +115,7 @@ func readSlotDataFromPod(podName, namespace string) ([]SlotData, error) {
 	return slots, nil
 }
 
-// parseSlotData parses raw block device bytes into SlotData entries
+// parseSlotData parses raw block device bytes into SlotData entries.
 func parseSlotData(data []byte) []SlotData {
 	const slotSize = 512
 	var slots []SlotData
@@ -138,6 +136,7 @@ func parseSlotData(data []byte) []SlotData {
 		for _, b := range slotBytes[:64] { // Check first 64 bytes
 			if b != 0 {
 				hasData = true
+
 				break
 			}
 		}
@@ -182,6 +181,7 @@ func validateSlotDataConsistency(slotDataByPod map[string][]SlotData) {
 	for podName, slots := range slotDataByPod {
 		referencePodName = podName
 		referenceSlotCount = len(slots)
+
 		break
 	}
 
@@ -215,7 +215,6 @@ func validateSlotDataConsistency(slotDataByPod map[string][]SlotData) {
 		"Slot count variance too high (%d). Min=%d, Max=%d. "+
 			"This suggests inconsistent block device reads across pods.",
 		variance, minSlots, maxSlots)
-
 	GinkgoWriter.Printf("✓ Slot counts are consistent across pods (variance: %d, max allowed: %d)\n",
 		variance, maxAllowedVariance)
 }
@@ -246,6 +245,7 @@ func validateSequenceNumbers(slotDataByPod map[string][]SlotData) {
 
 	if len(allSequences) == 0 {
 		GinkgoWriter.Printf("⚠ No sequence numbers found in slot data (agents may still be initializing)\n")
+
 		return
 	}
 
@@ -292,7 +292,6 @@ func validateSequenceNumbers(slotDataByPod map[string][]SlotData) {
 	// Verify we see heartbeats from multiple nodes (proves concurrent writes)
 	Expect(len(sequencesByNode)).To(BeNumerically(">=", 2),
 		"Should see heartbeats from at least 2 different nodes (concurrent writers)")
-
 	GinkgoWriter.Printf("✓ Sequence numbers are incrementing correctly\n")
 	GinkgoWriter.Printf("✓ Detected concurrent writes from %d different nodes\n", len(sequencesByNode))
 }
