@@ -185,4 +185,27 @@ func testCephRBDConcurrentWrites() {
 
 	GinkgoWriter.Printf("✓ Validated concurrent block device access: %d agents Ready\n", actualCount)
 	GinkgoWriter.Printf("✓ Ceph RBD block storage supports true RWX multi-attach\n")
+
+	By("Reading slot data from all agent pods to validate data integrity")
+	slotDataByPod := make(map[string][]SlotData)
+
+	for _, agentPod := range runningPods {
+		podName := agentPod.Object.Name
+		GinkgoWriter.Printf("Reading slot data from pod %s...\n", podName)
+
+		slotData, err := readSlotDataFromPod(podName, medik8sparams.OperatorNs)
+		Expect(err).ToNot(HaveOccurred(), "Failed to read slot data from pod %s", podName)
+
+		slotDataByPod[podName] = slotData
+		GinkgoWriter.Printf("  Retrieved %d slot entries from pod %s\n", len(slotData), podName)
+	}
+
+	By("Comparing slot data across all agent pods for consistency")
+	validateSlotDataConsistency(slotDataByPod)
+
+	By("Validating sequence numbers increment correctly without conflicts")
+	validateSequenceNumbers(slotDataByPod)
+
+	GinkgoWriter.Printf("✓ Block device maintains data integrity across all agents\n")
+	GinkgoWriter.Printf("✓ Sequence numbers increment correctly without conflicts\n")
 }
