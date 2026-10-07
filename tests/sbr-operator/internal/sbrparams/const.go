@@ -315,6 +315,57 @@ const (
 	// MinWorkerNodesForHandoverTest is the minimum number of schedulable worker-only nodes
 	// required for the leadership handover test (needs 2 replicas on different nodes).
 	MinWorkerNodesForHandoverTest = 2
+
+	// SBRCBlockPerfTestName is the SBRC name for the Ceph RBD heartbeat performance test.
+	SBRCBlockPerfTestName = "test-sbrc-block-perf"
+
+	// StressDaemonSetName is the name of the stress-ng DaemonSet for performance testing.
+	StressDaemonSetName = "sbr-perf-stressor"
+
+	// StressPodLabelSelector selects stress-ng pods deployed by the performance test DaemonSet.
+	StressPodLabelSelector = "app=sbr-perf-stressor"
+
+	// PerfTestBaselineDuration is the baseline monitoring duration for performance tests.
+	PerfTestBaselineDuration = 2 * time.Minute
+
+	// PerfTestLoadedDuration is the load injection duration for performance tests.
+	PerfTestLoadedDuration = 5 * time.Minute
+
+	// PerfTestRecoveryDuration is the recovery monitoring duration for performance tests.
+	PerfTestRecoveryDuration = 2 * time.Minute
+
+	// PerfTestPollInterval is the metrics polling interval during performance tests.
+	PerfTestPollInterval = 5 * time.Second
+
+	// PerfTestP99LatencyThresholdMs is the hard limit for p99 latency under load.
+	PerfTestP99LatencyThresholdMs = 500
+
+	// PerfTestP99BaselineThresholdMs is the hard limit for p99 latency at baseline.
+	PerfTestP99BaselineThresholdMs = 100
+
+	// PerfTestMaxLatencyThresholdMs is the hard limit for maximum latency at any time.
+	PerfTestMaxLatencyThresholdMs = 1000
+
+	// PerfTestMaxDegradationFactor is the warning threshold for p99 degradation ratio.
+	PerfTestMaxDegradationFactor = 3.0
+
+	// PerfTestMaxSequenceGaps is the maximum allowed sequence number gaps.
+	PerfTestMaxSequenceGaps = 5
+
+	// PerfTestMaxSequenceGapSize is the maximum allowed size of a single sequence gap.
+	PerfTestMaxSequenceGapSize = 2
+
+	// PerfTestMaxErrorRate is the maximum allowed error rate (0.01 = 1%).
+	PerfTestMaxErrorRate = 0.01
+
+	// StressNGImage is the container image for stress-ng load generation.
+	StressNGImage = "registry.fedoraproject.org/fedora:latest"
+
+	// StressCPULoad is the CPU load percentage for stress-ng.
+	StressCPULoad = 50
+
+	// StressMemoryPercent is the memory pressure percentage for stress-ng.
+	StressMemoryPercent = 30
 )
 
 // AgentExpectedMetricNames lists the Prometheus metric names that must be present in the agent output.
