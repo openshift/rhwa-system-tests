@@ -13,6 +13,65 @@ See [SKILLS.md](.agents/SKILLS.md) for the full behavioral guidelines that apply
 - **Prefer `AGENTS.md` over `CLAUDE.md`.** All project guidance goes in `AGENTS.md`. `CLAUDE.md` exists only as a redirect stub; do not add content to it.
 - **Keep whitespace changes scoped.** Do not add or remove blank lines in code you are not otherwise modifying. In modified code, follow gofumpt, goimports, `wsl_v5`, and `nlreturn` rather than personal whitespace preferences. Run `make fmt` after Go changes; repository-wide formatting belongs in a dedicated mechanical change.
 - **Keep straight-line code compact.** Do not insert blank lines between consecutive assignments, calls, or increments/decrements. Separators are allowed at comments, Ginkgo `By` steps, control-flow boundaries, returns, and inline callbacks. Use a comment or named step to mark a separate logical phase. `make lint-blanklines`, included in `make lint`, enforces the rule; `make fmt` removes violations.
+  - **Common violation:** blank line between consecutive `Expect()` calls. Keep them together unless separated by a comment or `By()` step.
+  - Example (correct):
+    ```go
+    Expect(listErr).ToNot(HaveOccurred())
+    Expect(agentPods).ToNot(BeEmpty())
+    agentPod := agentPods[0]
+    ```
+  - Example (lint failure):
+    ```go
+    Expect(listErr).ToNot(HaveOccurred())
+    Expect(agentPods).ToNot(BeEmpty())
+    
+    agentPod := agentPods[0]  // ← lint error: blank line between simple statements
+    ```
+- **Add blank line before `return`, `break`, `continue`.** The `nlreturn` linter requires a blank line before control-flow statements unless they are the only statement in a block or immediately follow a comment/`By()` step.
+  - Example (correct):
+    ```go
+    if err != nil {
+        GinkgoWriter.Printf("Error: %v\n", err)
+        
+        return  // blank line before return
+    }
+    
+    for _, item := range items {
+        if item == target {
+            
+            break  // blank line before break
+        }
+    }
+    ```
+  - Example (lint failure):
+    ```go
+    if err != nil {
+        GinkgoWriter.Printf("Error: %v\n", err)
+        return  // ← nlreturn error: return with no blank line before
+    }
+    ```
+  - Exception: single-statement blocks don't need the blank line:
+    ```go
+    if err != nil {
+        return err  // OK: only statement in block
+    }
+    ```
+- **Use descriptive variable names in loops.** The `varnamelen` linter flags short variable names (like `i`) in large scopes. Use descriptive names for loop indices when iterating over meaningful collections.
+  - Example (correct):
+    ```go
+    for scIdx := range scList.Items {
+        provisioner := scList.Items[scIdx].Provisioner
+        // ...
+    }
+    ```
+  - Example (lint failure):
+    ```go
+    for i := range scList.Items {  // ← varnamelen: 'i' is too short
+        provisioner := scList.Items[i].Provisioner
+    }
+    ```
+- **Remove unused function parameters.** The `unparam` linter detects parameters that are never used. Remove them or prefix with `_` if required by an interface.
+  - Example: `func buildSpec(name, class string)` where `name` is never referenced should be `func buildSpec(class string)`
 
 ---
 
