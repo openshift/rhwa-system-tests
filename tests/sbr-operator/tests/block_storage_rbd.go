@@ -31,6 +31,7 @@ var _ = Describe(
 			targetNodeName     string
 			setupSBRC          *unstructured.Unstructured
 			nhcCreated         bool
+			nhcInstalled       bool
 			rbdStorageClass    string
 			originalBootID     string
 			fencingSlotsBefore string
@@ -38,11 +39,9 @@ var _ = Describe(
 		)
 
 		BeforeAll(func() {
-			By("Checking NHC CRD is installed")
+			By("Checking if NHC CRD is installed")
 
-			if !isNHCCRDInstalled() {
-				Skip("NodeHealthCheck CRD not found; NHC operator not installed - skipping block persistent fencing test")
-			}
+			nhcInstalled = isNHCCRDInstalled()
 
 			By("Discovering Ceph RBD block storage class")
 
@@ -60,17 +59,19 @@ var _ = Describe(
 				"StorageBasedRemediationConfig %q must be created", sbrparams.SBRCBlockPersistentFencingTestName)
 			waitForSBRCReady(sbrparams.SBRCBlockPersistentFencingTestName)
 
-			By("Creating NodeHealthCheck CR")
+			if nhcInstalled {
+				By("Creating NodeHealthCheck CR")
 
-			ensureSBRTemplate()
-			nhc := buildNHC(sbrparams.NHCBlockPersistentFencingTestName)
-			nhcErr := APIClient.Create(context.TODO(), nhc)
-			if nhcErr != nil && !k8serrors.IsAlreadyExists(nhcErr) {
-				Expect(nhcErr).ToNot(HaveOccurred(),
-					"NodeHealthCheck CR %q must be created", sbrparams.NHCBlockPersistentFencingTestName)
+				ensureSBRTemplate()
+				nhc := buildNHC(sbrparams.NHCBlockPersistentFencingTestName)
+				nhcErr := APIClient.Create(context.TODO(), nhc)
+				if nhcErr != nil && !k8serrors.IsAlreadyExists(nhcErr) {
+					Expect(nhcErr).ToNot(HaveOccurred(),
+						"NodeHealthCheck CR %q must be created", sbrparams.NHCBlockPersistentFencingTestName)
+				}
+
+				nhcCreated = nhcErr == nil
 			}
-
-			nhcCreated = nhcErr == nil
 
 			By("Selecting target worker node (schedulable, not controller pod host)")
 
@@ -153,6 +154,11 @@ var _ = Describe(
 				labels.ComponentRemediation,
 				labels.FrequencyWeekly,
 			), func() {
+				requireNHC := false // This test manually creates SBR CR, doesn't require NHC
+
+				if requireNHC && !nhcInstalled {
+					Skip("NodeHealthCheck CRD not found; NHC operator not installed - skipping test")
+				}
 				By(fmt.Sprintf("Recording boot-id for node %s before fencing", targetNodeName))
 
 				var bootIDErr error
