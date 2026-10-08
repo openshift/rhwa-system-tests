@@ -260,7 +260,7 @@ var _ = Describe(
 			By("AfterAll: force-removing any leftover StorageBasedRemediation CR")
 
 			if targetNodeName != "" {
-				cleanupSBRCR(targetNodeName)
+				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 		})
 
@@ -324,7 +324,7 @@ var _ = Describe(
 
 					By("DeferCleanup: force-removing StorageBasedRemediation CR if still present")
 
-					cleanupSBRCR(targetNodeName)
+					cleanupSBRCR(context.Background(), targetNodeName)
 
 					By("DeferCleanup: waiting for node to become schedulable after CR cleanup")
 

@@ -209,7 +209,7 @@ var _ = Describe(
 		AfterAll(func() {
 			if nhcCreated {
 				By("Deleting NodeHealthCheck CR")
-				cleanupNHCCR(sbrparams.NHCNodeHangTestName)
+				cleanupNHCCR(context.Background(), sbrparams.NHCNodeHangTestName)
 			}
 
 			if setupSBRC != nil {
@@ -247,7 +247,7 @@ var _ = Describe(
 
 			if targetNodeName != "" {
 				By("Force-deleting any leftover StorageBasedRemediation CR for target node")
-				cleanupSBRCR(targetNodeName)
+				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 		})
 

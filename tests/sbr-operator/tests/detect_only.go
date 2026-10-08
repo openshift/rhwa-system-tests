@@ -304,18 +304,10 @@ var _ = Describe(
 			deleteKeepalivePods(keepalivePods)
 			keepalivePods = nil
 
-			By("AfterAll: removing NHC CR if created by this test")
-
-			if nhcCreatedByUs && nhcCR != nil {
-				cleanupNHCCR(sbrparams.NHCDetectOnlyTestName)
-			}
-
-			By("AfterAll: removing any SBR CR for target node")
-
-			if targetNodeName != "" {
-				cleanupSBRCR(targetNodeName)
-			}
-
+			// Order matters: remove the storage fault first so the node becomes
+			// healthy, then delete the NHC (its webhook rejects deletion during an
+			// ongoing remediation) while the agents still run the SBR CR finalizer
+			// that uncordons the node, and only then force-remove any leftover CR.
 			By("AfterAll: flushing any remaining injector pod and iptables rules")
 
 			cleanupPod, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs)
@@ -325,6 +317,18 @@ var _ = Describe(
 				if _, delErr := cleanupPod.Delete(); delErr != nil && !k8serrors.IsNotFound(delErr) {
 					GinkgoWriter.Printf("Warning: delete injector pod %s: %v\n", injectorPodName, delErr)
 				}
+			}
+
+			By("AfterAll: removing NHC CR if created by this test")
+
+			if nhcCreatedByUs && nhcCR != nil {
+				cleanupNHCCR(context.Background(), sbrparams.NHCDetectOnlyTestName)
+			}
+
+			By("AfterAll: removing any SBR CR for target node")
+
+			if targetNodeName != "" {
+				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 
 			By("AfterAll: removing detect-only StorageBasedRemediationConfig")
@@ -484,16 +488,18 @@ var _ = Describe(
 						}
 					}
 
-					By("DeferCleanup: removing SBR CR for target node")
-
-					cleanupSBRCR(targetNodeName)
-
 					By("DeferCleanup: removing NHC CR if created by this test")
 
 					if nhcCreatedByUs && nhcCR != nil {
-						cleanupNHCCR(sbrparams.NHCDetectOnlyTestName)
-						nhcCreatedByUs = false
+						// Keep the flag on failure so AfterAll retries the delete.
+						if cleanupNHCCR(context.Background(), sbrparams.NHCDetectOnlyTestName) {
+							nhcCreatedByUs = false
+						}
 					}
+
+					By("DeferCleanup: removing SBR CR for target node")
+
+					cleanupSBRCR(context.Background(), targetNodeName)
 				})
 
 				By("Fetching the StorageBasedRemediationConfig from the cluster")

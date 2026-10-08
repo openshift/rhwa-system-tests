@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 )
 
 // buildSBR returns an unstructured StorageBasedRemediation CR named after nodeName.
@@ -42,8 +43,10 @@ func pullSBRCR(nodeName string) (*unstructured.Unstructured, error) {
 }
 
 // cleanupSBRCR force-removes a StorageBasedRemediation CR by clearing finalizers first.
-// Safe to call when the CR may already be gone.
-func cleanupSBRCR(nodeName string) {
+// When it strips the finalizer it also mutates the Node: it uncordons the node and
+// removes the out-of-service taint if fencing completed (see
+// restoreNodeAfterForcedSBRCleanup). Safe to call when the CR may already be gone.
+func cleanupSBRCR(ctx context.Context, nodeName string) {
 	sbrObject, err := pullSBRCR(nodeName)
 
 	if k8serrors.IsNotFound(err) {
@@ -56,19 +59,77 @@ func cleanupSBRCR(nodeName string) {
 		return
 	}
 
+	finalizersStripped := false
+
 	if len(sbrObject.GetFinalizers()) > 0 {
 		sbrObject.SetFinalizers(nil)
 
-		if updateErr := APIClient.Update(context.TODO(), sbrObject); updateErr != nil &&
+		if updateErr := APIClient.Update(ctx, sbrObject); updateErr != nil &&
 			!k8serrors.IsNotFound(updateErr) {
 			GinkgoT().Logf("Warning: cleanup clear finalizers on StorageBasedRemediation/%s: %v",
 				nodeName, updateErr)
+		} else {
+			finalizersStripped = true
 		}
 	}
 
-	if deleteErr := APIClient.Delete(context.TODO(), sbrObject); deleteErr != nil &&
+	if deleteErr := APIClient.Delete(ctx, sbrObject); deleteErr != nil &&
 		!k8serrors.IsNotFound(deleteErr) {
 		GinkgoT().Logf("Warning: cleanup delete StorageBasedRemediation/%s: %v", nodeName, deleteErr)
+	}
+
+	if finalizersStripped {
+		restoreNodeAfterForcedSBRCleanup(ctx, nodeName)
+	}
+}
+
+// restoreNodeAfterForcedSBRCleanup undoes what the SBR agent's finalizer
+// would have undone, but only when the out-of-service taint shows fencing
+// completed. Fencing cordons the node and adds the out-of-service
+// NoExecute taint; the agent removes both only while processing its
+// finalizer, so stripping the finalizer leaves them behind. The taint evicts
+// pods without a matching toleration, including the CephFS CSI node plugin,
+// which breaks shared-storage mounts for every later SBRC on that node.
+// Conflicts and transient API errors are retried with retry.DefaultBackoff, and
+// NodeRestoreTimeout bounds every API call.
+func restoreNodeAfterForcedSBRCleanup(ctx context.Context, nodeName string) {
+	ctx, cancel := context.WithTimeout(ctx, sbrparams.NodeRestoreTimeout)
+	defer cancel()
+
+	retryErr := retry.OnError(retry.DefaultBackoff, func(err error) bool {
+		return ctx.Err() == nil && !k8serrors.IsNotFound(err) &&
+			!k8serrors.IsForbidden(err) && !k8serrors.IsUnauthorized(err)
+	}, func() error {
+		node, err := APIClient.CoreV1Interface.Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		taints := make([]corev1.Taint, 0, len(node.Spec.Taints))
+		for _, taint := range node.Spec.Taints {
+			if taint.Key != corev1.TaintNodeOutOfService {
+				taints = append(taints, taint)
+			}
+		}
+
+		// Without the out-of-service taint the agent never completed fencing,
+		// so a cordon may belong to someone else (for example an MCO drain).
+		if len(taints) == len(node.Spec.Taints) {
+			return nil
+		}
+
+		GinkgoT().Logf("Restoring node %s after forced SBR CR cleanup: unschedulable=%t taints=%v",
+			nodeName, node.Spec.Unschedulable, node.Spec.Taints)
+		node.Spec.Unschedulable = false
+		node.Spec.Taints = taints
+		_, err = APIClient.CoreV1Interface.Nodes().Update(ctx, node, metav1.UpdateOptions{})
+
+		return err
+	})
+	if retryErr != nil {
+		GinkgoT().Logf("Warning: failed to restore node %s after forced SBR CR cleanup: %v", nodeName, retryErr)
+		AddReportEntry("sbr-node-restore-failed",
+			fmt.Sprintf("node %s may stay cordoned with the out-of-service taint: %v", nodeName, retryErr))
 	}
 }
 
@@ -249,7 +310,7 @@ var _ = Describe(
 				DeferCleanup(func() {
 					By("DeferCleanup: removing StorageBasedRemediation CR and restoring node schedulability")
 
-					cleanupSBRCR(targetNodeName)
+					cleanupSBRCR(context.Background(), targetNodeName)
 
 					// The operator may have cordoned the node as part of CR reconciliation.
 					// If it is still cordoned after CR removal (operator race or incomplete uncordon),

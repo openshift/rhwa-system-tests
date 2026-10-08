@@ -249,7 +249,7 @@ var _ = Describe(
 					continue
 				}
 
-				cleanupSBRCR(nodeName)
+				cleanupSBRCR(context.Background(), nodeName)
 			}
 
 			By("AfterAll: ensuring injector pod iptables rules are removed")
@@ -290,7 +290,7 @@ var _ = Describe(
 
 					allNodes := append([]string{targetNodeName}, healthyNodes...)
 					for _, nodeName := range allNodes {
-						cleanupSBRCR(nodeName)
+						cleanupSBRCR(context.Background(), nodeName)
 					}
 				})
 
