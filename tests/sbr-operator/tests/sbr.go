@@ -665,6 +665,14 @@ func agentPodDiagnostics(ctx context.Context, namespace, dsName, podSelector str
 		for _, ctrStatus := range agentPod.Status.ContainerStatuses {
 			report.WriteString("  " + containerStateSummary(ctrStatus))
 		}
+
+		// A cordoned or out-of-service-tainted node (for example after a forced
+		// SBR CR cleanup) keeps the agent pod and its CSI mount from starting.
+		if agentPod.Status.Phase != corev1.PodRunning {
+			helpers.LogNodeState(ctx, APIClient, func(format string, args ...interface{}) {
+				fmt.Fprintf(&report, "  "+format, args...)
+			}, agentPod.Spec.NodeName)
+		}
 	}
 
 	if !found {

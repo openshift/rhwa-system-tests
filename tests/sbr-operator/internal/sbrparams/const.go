@@ -108,6 +108,15 @@ const (
 	// so healthy runs never wait this long.
 	SBRCReadyTimeout = 10 * time.Minute
 
+	// NHCCleanupTimeout bounds how long cleanup retries deleting an NHC CR. The NHC
+	// webhook admits the delete only after the NHC ends its remediation, which
+	// follows the node becoming healthy again once the injected fault is removed.
+	NHCCleanupTimeout = 5 * time.Minute
+
+	// NodeRestoreTimeout bounds the Node Get/Update calls that uncordon a node and
+	// remove its out-of-service taint after an SBR CR finalizer was force-stripped.
+	NodeRestoreTimeout = 1 * time.Minute
+
 	// SBRCReadyDiagMaxEvents caps how many recent Warning events are included in the on-timeout
 	// readiness diagnostics dumped by waitForSBRCReady, to keep the failure message readable.
 	SBRCReadyDiagMaxEvents = 15

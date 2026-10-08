@@ -246,13 +246,73 @@ func isSSHAvailable() bool {
 	return err == nil
 }
 
-// cleanupNHCCR safely deletes a NodeHealthCheck CR by name.
-// NHC CRs are cluster-scoped (namespace is empty).
-func cleanupNHCCR(ctx context.Context, name string) {
-	helpers.DeleteRemediationCR(
+// cleanupNHCCR safely deletes a NodeHealthCheck CR by name and returns true when
+// it is confirmed gone. NHC CRs are cluster-scoped (namespace is empty).
+func cleanupNHCCR(ctx context.Context, name string) bool {
+	gone := helpers.DeleteRemediationCR(
 		ctx, APIClient, nhcGVK, name, "",
 		nhcparams.DefaultPollInterval, nhcparams.RemediationCRDeletionTimeout,
 		GinkgoWriter.Printf)
+	if !gone {
+		AddReportEntry("nhc-cleanup-failed",
+			fmt.Sprintf("NodeHealthCheck %s still exists and may remediate nodes in later specs", name))
+	}
+
+	return gone
+}
+
+// listStaleTestNHCs returns the NHC CRs left by an earlier spec (names
+// starting with nhcparams.TestNHCNamePrefix). A leftover NHC keeps watching all
+// workers and takes ownership of remediation CRs for nodes that later specs disrupt.
+func listStaleTestNHCs(ctx context.Context) ([]string, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(nhcGVK.GroupVersion().WithKind(nhcGVK.Kind + "List"))
+
+	if err := APIClient.List(ctx, list); err != nil {
+		return nil, fmt.Errorf("list NHC CRs: %w", err)
+	}
+
+	var names []string
+
+	for i := range list.Items {
+		if name := list.Items[i].GetName(); strings.HasPrefix(name, nhcparams.TestNHCNamePrefix) {
+			names = append(names, name)
+		}
+	}
+
+	return names, nil
+}
+
+// sweepStaleTestNHCs deletes every leftover test NHC CR and fails when one
+// remains. The List is retried so a transient API error after an earlier
+// destructive spec does not fail setup; each delete is retried by
+// cleanupNHCCR itself. leftoverImpact explains what a leftover NHC would break.
+func sweepStaleTestNHCs(ctx context.Context, leftoverImpact string) {
+	GinkgoHelper()
+
+	var staleNHCs []string
+
+	Eventually(func() error {
+		var listErr error
+		staleNHCs, listErr = listStaleTestNHCs(ctx)
+
+		return listErr
+	}).WithContext(ctx).
+		WithTimeout(nhcparams.StaleNHCListTimeout).
+		WithPolling(nhcparams.DefaultPollInterval).
+		Should(Succeed(), "Failed to list leftover test NHC CRs")
+
+	var remaining []string
+
+	for _, name := range staleNHCs {
+		GinkgoWriter.Printf("sweepStaleTestNHCs: deleting leftover NHC %s\n", name)
+
+		if !cleanupNHCCR(ctx, name) {
+			remaining = append(remaining, name)
+		}
+	}
+
+	Expect(remaining).To(BeEmpty(), leftoverImpact)
 }
 
 // cleanupSNRCR safely deletes a SelfNodeRemediation CR by name.
@@ -361,25 +421,55 @@ func getNHCReason(ctx context.Context, name string) (string, error) {
 }
 
 // waitForNHCPhase polls until the NHC CR reaches the expected phase.
+// Transient API errors are retried; NotFound, Forbidden and Unauthorized fail
+// fast because retrying cannot fix them.
+// On timeout the error names the last observed phase and the last API error,
+// so a stuck phase is not reported as an unrelated client error from the final poll.
 func waitForNHCPhase(ctx context.Context, name, expectedPhase string, timeout time.Duration) error {
-	return wait.PollUntilContextTimeout(
+	lastPhase := "<not observed>"
+
+	var lastErr error
+
+	err := wait.PollUntilContextTimeout(
 		ctx, nhcparams.DefaultPollInterval, timeout, true,
-		func(ctx context.Context) (bool, error) {
-			phase, err := getNHCPhase(ctx, name)
+		func(pollCtx context.Context) (bool, error) {
+			phase, err := getNHCPhase(pollCtx, name)
 			if err != nil {
 				// "has no status.phase" means the CR exists but the controller
-				// hasn't reconciled yet -- retry.
-				if strings.Contains(err.Error(), "has no status.phase") {
+				// hasn't reconciled yet -- retry. An error caused by the poll
+				// deadline itself (for example the client rate limiter refusing
+				// to wait past it) is a timeout, not an API failure.
+				if strings.Contains(err.Error(), "has no status.phase") || helpers.IsPollDeadlineError(pollCtx, err) {
 					return false, nil
 				}
 
-				// Real API errors (RBAC, network) -- fail fast.
-				return false, err
+				if k8serrors.IsNotFound(err) || k8serrors.IsForbidden(err) || k8serrors.IsUnauthorized(err) {
+					return false, err
+				}
+
+				// Other API errors (throttling, connection resets) may be transient -- retry.
+				lastErr = err
+
+				return false, nil
 			}
+
+			lastPhase = phase
+			lastErr = nil
 
 			return phase == expectedPhase, nil
 		},
 	)
+	if err != nil && wait.Interrupted(err) {
+		if lastErr != nil {
+			return fmt.Errorf("NHC %s did not reach phase %s within %s (last phase: %s, last API error: %w): %w",
+				name, expectedPhase, timeout, lastPhase, lastErr, err)
+		}
+
+		return fmt.Errorf("NHC %s did not reach phase %s within %s (last phase: %s): %w",
+			name, expectedPhase, timeout, lastPhase, err)
+	}
+
+	return err
 }
 
 // waitForSNRRemediationComplete polls until the SNR remediation cycle finishes

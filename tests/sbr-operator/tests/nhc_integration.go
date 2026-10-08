@@ -251,7 +251,7 @@ var _ = Describe(
 			By("AfterAll: force-removing any leftover StorageBasedRemediation CR")
 
 			if targetNodeName != "" {
-				cleanupSBRCR(targetNodeName)
+				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 
 			By("AfterAll: removing injector pod if still present")
@@ -292,7 +292,7 @@ var _ = Describe(
 
 					By("DeferCleanup: force-removing StorageBasedRemediation CR if still present")
 
-					cleanupSBRCR(targetNodeName)
+					cleanupSBRCR(context.Background(), targetNodeName)
 				})
 
 				By("Recording pre-injection BootID (baseline before watchdog reboot)")
@@ -302,6 +302,7 @@ var _ = Describe(
 				Expect(nodeBootErr).ToNot(HaveOccurred(),
 					"Failed to get node %q to record pre-injection BootID", targetNodeName)
 				preRebootBootID = nodeBeforeInject.Status.NodeInfo.BootID
+				GinkgoWriter.Printf("Node %q pre-injection BootID: %s\n", targetNodeName, preRebootBootID)
 
 				By(fmt.Sprintf("Creating privileged injector pod on node %q", targetNodeName))
 
@@ -349,28 +350,41 @@ var _ = Describe(
 
 				GinkgoWriter.Printf("StorageBasedRemediation CR for node %q created by NHC\n", targetNodeName)
 
-				By("Waiting for FencingInProgress=True on the StorageBasedRemediation CR")
+				By("Waiting for the controller to start fencing (FencingInProgress or FencingSucceeded)")
 
+				// FencingInProgress=True can last less than one poll interval: the
+				// storage heartbeat already stopped because of the injected REJECT
+				// rules, so the controller proves the fence on its next reconcile
+				// and moves straight to FencingSucceeded. After the node reboots and
+				// recovers, NHC deletes the CR. Any of these states shows that
+				// fencing started; the BootID check below proves the reboot.
 				Eventually(func() error {
 					sbrObj, getErr := pullSBRCR(targetNodeName)
+					if k8serrors.IsNotFound(getErr) {
+						GinkgoWriter.Printf("StorageBasedRemediation/%s already removed after fencing\n", targetNodeName)
+
+						return nil
+					}
+
 					if getErr != nil {
 						return getErr
 					}
 
-					cond := getSBRCRCondition(sbrObj, sbrparams.FencingInProgressCondition)
-					if cond == nil {
-						return fmt.Errorf("StorageBasedRemediation/%s: %s condition not present",
-							targetNodeName, sbrparams.FencingInProgressCondition)
+					for _, condType := range []string{
+						sbrparams.FencingInProgressCondition, sbrparams.FencingSucceededCondition,
+					} {
+						if cond := getSBRCRCondition(sbrObj, condType); cond != nil &&
+							cond["status"] == string(corev1.ConditionTrue) {
+							GinkgoWriter.Printf("StorageBasedRemediation/%s: %s=True\n", targetNodeName, condType)
+
+							return nil
+						}
 					}
 
-					if cond["status"] != string(corev1.ConditionTrue) {
-						return fmt.Errorf("StorageBasedRemediation/%s: %s=%v, want True",
-							targetNodeName, sbrparams.FencingInProgressCondition, cond["status"])
-					}
-
-					return nil
+					return fmt.Errorf("StorageBasedRemediation/%s: neither %s nor %s is True",
+						targetNodeName, sbrparams.FencingInProgressCondition, sbrparams.FencingSucceededCondition)
 				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"StorageBasedRemediation/%s must reach FencingInProgress=True", targetNodeName)
+					"StorageBasedRemediation/%s must start fencing", targetNodeName)
 
 				By(fmt.Sprintf("Waiting for node %q to go NotReady then return Ready (reboot cycle)", targetNodeName))
 
@@ -380,6 +394,12 @@ var _ = Describe(
 						context.TODO(), targetNodeName, metav1.GetOptions{})
 					if nodeGetErr != nil {
 						return nodeGetErr
+					}
+
+					// A changed BootID means the reboot already happened while the
+					// fencing step above was polling, so the NotReady window passed.
+					if node.Status.NodeInfo.BootID != preRebootBootID {
+						return nil
 					}
 
 					for _, cond := range node.Status.Conditions {
@@ -392,7 +412,7 @@ var _ = Describe(
 				}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).Should(Succeed(),
 					"Node %q must become NotReady during reboot", targetNodeName)
 
-				GinkgoWriter.Printf("Node %q is NotReady — reboot in progress\n", targetNodeName)
+				GinkgoWriter.Printf("Node %q is NotReady or already rebooted\n", targetNodeName)
 
 				// Phase 2: wait for Ready.
 				Eventually(func() error {

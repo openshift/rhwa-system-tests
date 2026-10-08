@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -16,16 +17,34 @@ import (
 )
 
 // DeleteRemediationCR deletes an unstructured remediation CR by GVK and name,
-// polling until the resource is gone or the timeout expires.
+// polling until the resource is gone or the timeout expires. Returns true when
+// the CR is confirmed gone.
 func DeleteRemediationCR(
 	ctx context.Context, k8sClient client.Client,
 	gvk schema.GroupVersionKind, name, namespace string,
 	pollInterval, timeout time.Duration,
 	logf func(string, ...interface{}),
-) {
+) bool {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
 	key := client.ObjectKey{Name: name, Namespace: namespace}
+
+	// lastErr keeps the most recent Get/Delete failure so a timeout reports why
+	// deletion did not happen (for example an admission webhook denial).
+	var lastErr error
+
+	recordErr := func(pollCtx context.Context, err error) {
+		// Errors caused by the poll deadline itself would hide the real cause.
+		if IsPollDeadlineError(pollCtx, err) {
+			return
+		}
+
+		if lastErr == nil || lastErr.Error() != err.Error() {
+			logf("DeleteRemediationCR(%s %s): %v\n", gvk.Kind, name, err)
+		}
+
+		lastErr = err
+	}
 
 	if waitErr := wait.PollUntilContextTimeout(
 		ctx, pollInterval, timeout, true,
@@ -35,7 +54,9 @@ func DeleteRemediationCR(
 					return true, nil
 				}
 
-				return false, nil
+				recordErr(ctx, err)
+
+				return false, permanentAPIError(err)
 			}
 
 			if delErr := k8sClient.Delete(ctx, obj); delErr != nil {
@@ -43,15 +64,40 @@ func DeleteRemediationCR(
 					return true, nil
 				}
 
-				return false, nil
+				recordErr(ctx, delErr)
+
+				return false, permanentAPIError(delErr)
 			}
 
 			return false, nil
 		},
 	); waitErr != nil {
-		logf("Warning: %s %s not fully deleted within %s: %v\n",
-			gvk.Kind, name, timeout, waitErr)
+		logf("Warning: %s %s not fully deleted within %s: %v (last API error: %v)\n",
+			gvk.Kind, name, timeout, waitErr, lastErr)
+
+		return false
 	}
+
+	return true
+}
+
+// permanentAPIError returns err when retrying cannot succeed (Forbidden or
+// Unauthorized), which stops the poll early, and nil for errors worth retrying.
+func permanentAPIError(err error) error {
+	if k8serrors.IsForbidden(err) || k8serrors.IsUnauthorized(err) {
+		return err
+	}
+
+	return nil
+}
+
+// IsPollDeadlineError reports whether err was caused by the poll context
+// running out rather than by the API server. client-go's rate limiter fails
+// with "would exceed context deadline" shortly before the deadline passes,
+// so ctx.Err() alone does not catch it.
+func IsPollDeadlineError(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(err.Error(), "would exceed context deadline")
 }
 
 // GetLeaderPodName reads the leader election Lease and returns the leader pod
