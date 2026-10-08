@@ -193,6 +193,9 @@ var _ = Describe("NHC Upgrade Cluster",
 
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
+				logNHCRemediationDiagnostics(context.Background(),
+					[]string{nhcparams.ClusterUpgradeTestName, nhcparams.NHCUpgradeTestName},
+					[]string{currentTargetNode}, snrGVK)
 				GinkgoWriter.Println("Upgrade test failed - collecting NHC controller logs")
 				logNHCControllerState()
 			}

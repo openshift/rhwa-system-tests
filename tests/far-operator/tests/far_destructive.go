@@ -1306,112 +1306,20 @@ func logFARControllerState(ctx context.Context, k8sClient client.Client) {
 
 // logFARRemediationDiagnostics dumps, on test failure, the ground-truth state
 // needed to classify a remediation failure that pod-phase logging alone cannot:
-// the FAR CR's status conditions (whether the controller reached Succeeded, and
-// the fence-action outcome) and the active controller's recent logs (where a
+// the FAR CR's status (whether the controller reached Succeeded, and the
+// fence-action outcome) and the exact lease holder's recent logs (where a
 // stalled reconcile surfaces). Called while currentFARName is still set, before
-// the cleanup path deletes the CR. Both halves are best-effort so a diagnostics
-// fetch error never masks the original test failure.
+// the cleanup path deletes the CR. Collection is best-effort and bounded so a
+// diagnostics fetch error never masks the original test failure.
 func logFARRemediationDiagnostics(ctx context.Context, apiClient *clients.Settings, farName string) {
-	if farName != "" {
-		logFARCRConditions(ctx, apiClient, farName)
-	}
-
-	logActiveControllerLogs(ctx, apiClient)
-}
-
-// logFARCRConditions prints every status condition on the named FAR CR so a
-// failed remediation shows its terminal (or stuck) state instead of just the
-// controller pod being Ready elsewhere.
-func logFARCRConditions(ctx context.Context, k8sClient client.Client, farName string) {
-	farObj := &unstructured.Unstructured{}
-	farObj.SetGroupVersionKind(farGVK)
-
-	if err := k8sClient.Get(ctx, client.ObjectKey{
-		Name:      farName,
-		Namespace: medik8sparams.OperatorNs,
-	}, farObj); err != nil {
-		GinkgoWriter.Printf("WARNING: could not fetch FAR CR %s for diagnostics: %v\n", farName, err)
-
-		return
-	}
-
-	conditions, found, err := unstructured.NestedSlice(farObj.Object, "status", "conditions")
-	if err != nil || !found {
-		GinkgoWriter.Printf("FAR CR %s has no status conditions yet (found=%v, err=%v)\n",
-			farName, found, err)
-
-		return
-	}
-
-	GinkgoWriter.Printf("FAR CR %s status conditions:\n", farName)
-
-	for _, c := range conditions {
-		condMap, ok := c.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		GinkgoWriter.Printf("  type=%v status=%v reason=%v message=%q\n",
-			condMap["type"], condMap["status"], condMap["reason"], condMap["message"])
-	}
-}
-
-// logActiveControllerLogs dumps the trailing lines of the active FAR controller
-// pod's log, resolved via the leader-election lease so the output is the replica
-// that actually reconciled the remediation rather than a passive standby.
-func logActiveControllerLogs(ctx context.Context, apiClient *clients.Settings) {
-	leaderNode, err := farutils.GetActiveFARControllerNode(ctx, apiClient)
-	if err != nil {
-		GinkgoWriter.Printf("WARNING: could not resolve active FAR controller for logs: %v\n", err)
-
-		return
-	}
-
-	pods, err := farutils.GetFARControllerPods(ctx, apiClient)
-	if err != nil {
-		GinkgoWriter.Printf("WARNING: could not list FAR controller pods for logs: %v\n", err)
-
-		return
-	}
-
-	var activePodName string
-
-	for i := range pods {
-		if pods[i].Spec.NodeName == leaderNode {
-			activePodName = pods[i].Name
-
-			break
-		}
-	}
-
-	if activePodName == "" {
-		GinkgoWriter.Printf("WARNING: no FAR controller pod found on leader node %s\n", leaderNode)
-
-		return
-	}
-
-	logs, err := getControllerContainerLogs(
-		apiClient, activePodName, farparams.ManagerContainerName, medik8sparams.OperatorNs)
-	if err != nil {
-		GinkgoWriter.Printf("WARNING: could not fetch logs for controller pod %s: %v\n", activePodName, err)
-
-		return
-	}
-
-	GinkgoWriter.Printf("Last %d log lines from active FAR controller pod %s:\n%s\n",
-		farparams.DiagnosticsLogTailLines, activePodName,
-		tailLines(logs, farparams.DiagnosticsLogTailLines))
-}
-
-// tailLines returns the last maxLines lines of s, or all of s when it has fewer
-// than maxLines lines.
-func tailLines(s string, maxLines int) string {
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(lines) <= maxLines {
-		return strings.Join(lines, "\n")
-	}
-
-	return strings.Join(lines[len(lines)-maxLines:], "\n")
+	helpers.LogRemediationDiagnostics(ctx, apiClient,
+		[]helpers.DiagnosticResource{{
+			GVK: farGVK, Key: client.ObjectKey{Name: farName, Namespace: medik8sparams.OperatorNs},
+		}},
+		helpers.ControllerDiagnostics{
+			Namespace: medik8sparams.OperatorNs, LeaseName: farparams.ControllerLeaseName,
+			ContainerName: farparams.ManagerContainerName, TailLines: farparams.DiagnosticsLogTailLines,
+		}, GinkgoWriter.Printf)
 }
 
 func logPodDiagnostics(ctx context.Context, k8sClient client.Client, pod *corev1.Pod) {

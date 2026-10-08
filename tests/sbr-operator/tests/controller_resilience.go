@@ -140,6 +140,12 @@ var _ = Describe(
 	ContinueOnFailure,
 	Serial,
 	Label(labels.OperatorSBR), func() {
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSBRRemediationDiagnostics(context.Background())
+			}
+		})
+
 		BeforeAll(func() {
 			By("Verifying SBR controller deployment is Ready")
 

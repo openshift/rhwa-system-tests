@@ -57,7 +57,7 @@ func CheckClean(ctx context.Context, api client.Client, namespace string) error 
 		{Group: "operators.coreos.com", Version: "v1alpha1", Kind: "InstallPlan"},
 		{Group: "apps", Version: "v1", Kind: "Deployment"},
 		{Group: "apps", Version: "v1", Kind: "DaemonSet"},
-		{Group: sbrparams.CRDGroup, Version: sbrparams.CRDVersion, Kind: "StorageBasedRemediation"},
+		{Group: sbrparams.CRDGroup, Version: sbrparams.CRDVersion, Kind: sbrparams.RemediationKind},
 		{Group: sbrparams.CRDGroup, Version: sbrparams.CRDVersion, Kind: "StorageBasedRemediationConfig"},
 		{Group: sbrparams.CRDGroup, Version: sbrparams.CRDVersion, Kind: "StorageBasedRemediationTemplate"},
 	} {

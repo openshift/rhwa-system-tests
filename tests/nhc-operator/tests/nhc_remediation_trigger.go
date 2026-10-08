@@ -108,6 +108,12 @@ var _ = Describe("NHC Functional -- Remediation Trigger and CR Lifecycle",
 
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
+				logNHCRemediationDiagnostics(context.Background(),
+					[]string{
+						nhcparams.NHCTestName, nhcparams.NHCSecondTestName,
+						nhcparams.NHCOldDefaultName, nhcparams.NHCControlPlaneTestName,
+					},
+					[]string{targetWorkerName, nhcControllerNodeName}, snrGVK)
 				logNHCControllerState()
 			}
 

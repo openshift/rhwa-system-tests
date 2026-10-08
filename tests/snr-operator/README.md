@@ -68,6 +68,12 @@ export ECO_TEST_FEATURES="snr-operator"
 make run-tests
 ```
 
+On destructive worker/master test failure, diagnostics print the involved SNR
+and NHC CR status and conditions before cleanup, followed by the last 100 log
+lines from the SNR controller's current leader-election lease holder. Collection
+is best-effort; each CR read and the controller log collection have their own
+15-second timeout, and warnings preserve the original test failure.
+
 ## Tests
 
 ### 1. Verify SNR Resources Are Installed and Running ([OCP-54205](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-54205))

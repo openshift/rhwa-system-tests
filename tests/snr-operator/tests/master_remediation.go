@@ -27,6 +27,7 @@ var _ = Describe("SNR Functional - Master Remediation",
 		var (
 			ctx              context.Context
 			targetMasterName string
+			targetWorkerName string
 			currentNHCNames  []string
 		)
 
@@ -58,6 +59,8 @@ var _ = Describe("SNR Functional - Master Remediation",
 		})
 
 		BeforeEach(func() {
+			targetWorkerName = ""
+
 			By("Removing any stale kubelet stop guard from a previous run")
 
 			Expect(helpers.RemoveKubeletStopGuard(ctx, targetMasterName, snrparams.OcDebugTimeout)).To(Succeed(),
@@ -73,6 +76,10 @@ var _ = Describe("SNR Functional - Master Remediation",
 		})
 
 		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSNRRemediationDiagnostics(context.Background(), currentNHCNames, targetMasterName, targetWorkerName)
+			}
+
 			// Cleanup order: CRs first (only needs API server), then node
 			// recovery.
 			for _, nhcName := range currentNHCNames {
@@ -199,7 +206,7 @@ var _ = Describe("SNR Functional - Master Remediation",
 
 				targetWorkerNode, err := helpers.SelectWorkerNode(ctx, APIClient)
 				Expect(err).ToNot(HaveOccurred(), "Failed to select worker node")
-				targetWorkerName := targetWorkerNode.Name
+				targetWorkerName = targetWorkerNode.Name
 				GinkgoWriter.Printf("Target worker node: %s\n", targetWorkerName)
 
 				DeferCleanup(func() {

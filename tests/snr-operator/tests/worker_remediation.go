@@ -94,6 +94,10 @@ var _ = Describe("SNR Functional - Worker Remediation",
 		})
 
 		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSNRRemediationDiagnostics(context.Background(), []string{currentNHCName}, targetWorkerName)
+			}
+
 			// Cleanup order: CRs first (only needs API server), then node
 			// recovery.
 			if currentNHCName != "" {

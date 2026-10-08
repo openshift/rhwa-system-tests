@@ -30,7 +30,7 @@ var (
 
 	// ExpectedCRDKinds lists the Kubernetes kinds for all CRDs owned by the SBR operator.
 	ExpectedCRDKinds = []string{
-		"StorageBasedRemediation",
+		RemediationKind,
 		"StorageBasedRemediationConfig",
 		"StorageBasedRemediationTemplate",
 	}

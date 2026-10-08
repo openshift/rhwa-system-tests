@@ -111,6 +111,14 @@ export ECO_TEST_LABELS='!tier:upgrade-operator && !tier:fresh-install && !tier:u
 make run-tests
 ```
 
+On destructive remediation, escalation, custom-template, or status-tracking
+test failure, diagnostics print the involved cluster-scoped NodeHealthCheck
+status and conditions plus the scenario's SNR or TestRemediation CR status
+before cleanup. The last 100 log lines come from the NHC controller's current
+leader-election lease holder. Collection is best-effort; each CR read and the
+controller log collection have their own 15-second timeout, and warnings
+preserve the original test failure.
+
 ## Tests
 
 ### 1. Verify NHC Resources Are Installed and Running ([OCP-89629](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89629))

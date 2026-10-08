@@ -91,6 +91,14 @@ resource names, so preflight rejects one if the other's cleanup did not finish.
 ginkgo --label-filter="sbr" ./tests/sbr-operator/...
 ```
 
+On functional storage/remediation or controller-resilience test failure,
+diagnostics print the involved StorageBasedRemediation CR status and conditions
+before cleanup, followed by the last 100 log lines from the SBR controller's
+current leader-election lease holder. Controller-only scenarios collect logs
+without a remediation CR. Collection is best-effort; each CR read and the
+controller log collection have their own 15-second timeout, and warnings
+preserve the original test failure.
+
 ## Tests
 
 ### 1. Verify SBR Operator Pod is Running ([OCP-89232](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89232))

@@ -3,6 +3,11 @@ package nmoparams
 import "time"
 
 const (
+	// DiagnosticsLogTailLines is the controller log tail collected on failure.
+	DiagnosticsLogTailLines = 100
+	// ControllerLeaseName is the manager election lease, not a maintenance lock.
+	ControllerLeaseName = "135b1886.medik8s.io"
+
 	// Label is the operator name used in the suite-level Labels array.
 	Label = "nmo"
 	// DefaultPollInterval is the polling interval used with Eventually calls.

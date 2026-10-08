@@ -8,6 +8,11 @@ import (
 )
 
 const (
+	// DiagnosticsLogTailLines is the controller log tail collected on failure.
+	DiagnosticsLogTailLines = 100
+	// RemediationKind is the StorageBasedRemediation CR kind.
+	RemediationKind = "StorageBasedRemediation"
+
 	// DefaultPollInterval is the polling interval used with Eventually calls.
 	DefaultPollInterval = 5 * time.Second
 

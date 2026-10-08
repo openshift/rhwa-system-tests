@@ -44,6 +44,14 @@ var _ = Describe(
 		labels.ComponentWebhook,
 	), func() {
 		var ctx context.Context
+		var currentNMNames []string
+
+		BeforeEach(func() { currentNMNames = nil })
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logNMORemediationDiagnostics(context.Background(), currentNMNames...)
+			}
+		})
 
 		BeforeAll(func() {
 			ctx = context.Background()
@@ -91,6 +99,7 @@ var _ = Describe(
 					nmoparams.DuplicateNMName, firstNodeName))
 
 				firstNM := newNodeMaintenance(nmoparams.DuplicateNMName, firstNodeName)
+				currentNMNames = []string{firstNM.Name}
 				Expect(APIClient.Create(ctx, firstNM)).To(Succeed(),
 					"Failed to create the first NodeMaintenance CR")
 
@@ -135,6 +144,7 @@ var _ = Describe(
 					nmoparams.FirstNMName, targetNodeName))
 
 				firstNM := newNodeMaintenance(nmoparams.FirstNMName, targetNodeName)
+				currentNMNames = []string{firstNM.Name, nmoparams.SecondNMName}
 				Expect(APIClient.Create(ctx, firstNM)).To(Succeed(),
 					"Failed to create the first NodeMaintenance CR")
 

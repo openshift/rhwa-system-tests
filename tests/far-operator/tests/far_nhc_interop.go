@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -20,7 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
-	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
 	"github.com/medik8s/system-tests/tests/far-operator/internal/farparams"
@@ -34,8 +35,7 @@ import (
 const (
 	nhcDeploymentName             = "node-healthcheck-controller-manager"
 	nhcOldDefaultName             = "nhc-worker-default"
-	nhcControllerPodLabelSelector = "app.kubernetes.io/component=controller-manager," +
-		"app.kubernetes.io/name=node-healthcheck-operator"
+	nhcAggregationClusterRoleName = "node-healthcheck-operator-aggregation"
 )
 
 var nhcGVK = schema.GroupVersionKind{
@@ -741,88 +741,44 @@ func logNHCDiagnostics(ctx context.Context, nhcName, nodeName string) {
 	GinkgoWriter.Println("=== End NHC Diagnostics ===")
 }
 
+// logNHCCRStatus prints the full NHC status, including unhealthyNodes and
+// inFlightRemediations, via the shared bounded diagnostics helper.
 func logNHCCRStatus(ctx context.Context, nhcName string) {
-	nhcObj := &unstructured.Unstructured{}
-	nhcObj.SetGroupVersionKind(nhcGVK)
+	diagCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), helpers.DiagnosticsRequestTimeout)
+	defer cancel()
 
-	if err := APIClient.Get(ctx, client.ObjectKey{Name: nhcName}, nhcObj); err != nil {
-		GinkgoWriter.Printf("WARNING: failed to get NHC %s: %v\n", nhcName, err)
-
-		return
-	}
-
-	phase, _, _ := unstructured.NestedString(nhcObj.Object, "status", "phase")
-	GinkgoWriter.Printf("NHC %s: phase=%s\n", nhcName, phase)
-	conditions, found, _ := unstructured.NestedSlice(nhcObj.Object, "status", "conditions")
-	if found {
-		for _, c := range conditions {
-			cMap, ok := c.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			GinkgoWriter.Printf("  condition: type=%v status=%v reason=%v message=%v\n",
-				cMap["type"], cMap["status"], cMap["reason"], cMap["message"])
-		}
-	}
-
-	unhealthyNodes, found, _ := unstructured.NestedSlice(nhcObj.Object, "status", "unhealthyNodes")
-	if found {
-		GinkgoWriter.Printf("  unhealthyNodes: %v\n", unhealthyNodes)
-	}
-
-	inFlightRemediations, found, _ := unstructured.NestedSlice(nhcObj.Object, "status", "inFlightRemediations")
-	if found {
-		for _, r := range inFlightRemediations {
-			GinkgoWriter.Printf("  inFlightRemediation: %v\n", r)
-		}
-	}
+	helpers.LogCRStatus(diagCtx, APIClient, nhcGVK, client.ObjectKey{Name: nhcName}, GinkgoWriter.Printf)
 }
 
+// logNHCControllerLogs prints a bounded log tail from the exact NHC lease holder,
+// then the NHC aggregation ClusterRole used to manage FAR templates.
 func logNHCControllerLogs(ctx context.Context) {
-	controllerPods, err := pod.List(APIClient, medik8sparams.OperatorNs,
-		metav1.ListOptions{LabelSelector: nhcControllerPodLabelSelector})
-	if err != nil {
-		GinkgoWriter.Printf("WARNING: failed to list NHC controller pods: %v\n", err)
-
-		return
-	}
-
-	if len(controllerPods) == 0 {
-		GinkgoWriter.Printf("WARNING: no NHC controller pods found with selector %q\n",
-			nhcControllerPodLabelSelector)
-
-		return
-	}
-
-	for i := range controllerPods {
-		controllerPod := controllerPods[i]
-		for _, container := range controllerPod.Object.Spec.Containers {
-			logs, logErr := getControllerContainerLogs(
-				APIClient, controllerPod.Object.Name, container.Name, medik8sparams.OperatorNs)
-			if logErr != nil {
-				GinkgoWriter.Printf("WARNING: failed to get NHC logs for pod %s container %s: %v\n",
-					controllerPod.Object.Name, container.Name, logErr)
-
-				continue
-			}
-
-			GinkgoWriter.Printf("NHC controller logs (pod=%s container=%s):\n%s\n",
-				controllerPod.Object.Name, container.Name, tailLines(logs, farparams.DiagnosticsLogTailLines))
-		}
-	}
-
-	rbacCtx, rbacCancel := context.WithTimeout(ctx, farparams.ControllerRBACTimeout)
+	logCtx, logCancel := context.WithTimeout(context.WithoutCancel(ctx), helpers.DiagnosticsRequestTimeout)
+	helpers.LogActiveControllerLogs(logCtx, APIClient, helpers.ControllerDiagnostics{
+		Namespace: medik8sparams.OperatorNs, LeaseName: farparams.NHCControllerLeaseName,
+		ContainerName: farparams.NHCManagerContainerName, TailLines: farparams.DiagnosticsLogTailLines,
+	}, GinkgoWriter.Printf)
+	logCancel()
+	rbacCtx, rbacCancel := context.WithTimeout(context.WithoutCancel(ctx), farparams.ControllerRBACTimeout)
 	defer rbacCancel()
 
-	rbacCmd := exec.CommandContext(rbacCtx, "oc", "get", "clusterrole",
-		"node-healthcheck-operator-aggregation", "-o", "yaml")
-	rbacOut, rbacErr := rbacCmd.CombinedOutput()
-	if rbacErr != nil {
-		GinkgoWriter.Printf("WARNING: failed to get NHC aggregation role: %v\n", rbacErr)
-	} else {
-		GinkgoWriter.Printf("NHC aggregation ClusterRole rules:\n%s\n", string(rbacOut))
+	role := &rbacv1.ClusterRole{}
+	if err := APIClient.Get(rbacCtx, client.ObjectKey{Name: nhcAggregationClusterRoleName}, role); err != nil {
+		GinkgoWriter.Printf("WARNING: failed to get NHC aggregation role: %v\n", err)
+
+		return
 	}
+
+	// Keep labels and aggregationRule: they explain empty or stale aggregated rules.
+	role.ManagedFields = nil
+	roleJSON, err := json.MarshalIndent(role, "", "  ")
+	if err != nil {
+		GinkgoWriter.Printf("WARNING: failed to format NHC aggregation role: %v\n", err)
+
+		return
+	}
+
+	GinkgoWriter.Printf("NHC aggregation ClusterRole:\n%s\n", roleJSON)
 }
 
 func logKubeletDiagnostics(ctx context.Context, nodeName string) {

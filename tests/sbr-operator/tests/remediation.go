@@ -24,14 +24,14 @@ import (
 // buildSBR returns an unstructured StorageBasedRemediation CR named after nodeName.
 // The SBR operator identifies the target node by metadata.name; spec is intentionally empty.
 func buildSBR(nodeName string) *unstructured.Unstructured {
-	return buildSBRUnstructured("StorageBasedRemediation", nodeName, map[string]interface{}{})
+	return buildSBRUnstructured(sbrparams.RemediationKind, nodeName, map[string]interface{}{})
 }
 
 // pullSBRCR fetches the named StorageBasedRemediation CR from the cluster.
 func pullSBRCR(nodeName string) (*unstructured.Unstructured, error) {
 	sbrObject := &unstructured.Unstructured{}
 	sbrObject.SetAPIVersion(sbrparams.CRDGroup + "/" + sbrparams.CRDVersion)
-	sbrObject.SetKind("StorageBasedRemediation")
+	sbrObject.SetKind(sbrparams.RemediationKind)
 	err := APIClient.Get(context.TODO(),
 		types.NamespacedName{Name: nodeName, Namespace: medik8sparams.OperatorNs}, sbrObject)
 	if err != nil {
@@ -108,6 +108,12 @@ var _ = Describe(
 			// the DaemonSet after the storage init job completes successfully.
 			setupSBRC *unstructured.Unstructured
 		)
+
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSBRRemediationDiagnostics(context.Background(), targetNodeName)
+			}
+		})
 
 		BeforeAll(func() {
 			By("Pre-cleanup: removing any stale SBRC from prior runs")
