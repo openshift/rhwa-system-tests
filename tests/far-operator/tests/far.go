@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -114,7 +115,11 @@ var _ = Describe(
 
 				var annotationErrors []string
 
-				for annotationKey, expectedValue := range farparams.RequiredAnnotations {
+				expectedAnnotations := maps.Clone(farparams.RequiredAnnotations)
+				farMajor := farCSV.Object.Spec.Version.Major
+				expectedAnnotations[farparams.TLSProfilesAnnotation] = farparams.ExpectedTLSProfilesValue(farMajor)
+
+				for annotationKey, expectedValue := range expectedAnnotations {
 					annotationValue, exists := farCSV.Object.Annotations[annotationKey]
 					if !exists {
 						annotationErrors = append(annotationErrors,
