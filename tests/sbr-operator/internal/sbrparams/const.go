@@ -261,6 +261,9 @@ const (
 	// SBRCMetricsTestName is the SBRC name used exclusively by the metrics test suite (OCP-89202).
 	SBRCMetricsTestName = "test-sbrc-metrics"
 
+	// SBRCBlockTestName is the SBRC name for the Ceph RBD block storage concurrency test.
+	SBRCBlockTestName = "test-sbrc-block-rbd"
+
 	// AgentPodLabelSelector selects SBR agent pods deployed by any SBRC.
 	AgentPodLabelSelector = "app=sbr-agent"
 
