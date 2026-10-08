@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -104,6 +102,8 @@ func monitorHeartbeatLatency(
 	defer ticker.Stop()
 
 	sampleCount := 0
+	successfulRounds := 0
+	const maxSamplesPerPod = 5 // Stop after 5 successful samples per pod
 
 	for {
 		select {
@@ -115,7 +115,10 @@ func monitorHeartbeatLatency(
 			}
 
 			// Collect snapshot from each agent
+			roundSuccessCount := 0
 			for _, agentPod := range agentPods {
+				GinkgoWriter.Printf("[%s] Collecting metrics from pod %s (attempt %d)\n",
+					phase, agentPod.Definition.Name, sampleCount+1)
 				snapshot, err := collectAgentMetricsSimple(agentPod)
 				if err != nil {
 					GinkgoWriter.Printf("[%s] Warning: failed to collect metrics from %s: %v\n",
@@ -123,11 +126,28 @@ func monitorHeartbeatLatency(
 					continue
 				}
 
+				GinkgoWriter.Printf("[%s] Successfully collected from %s: seq=%d, errors=%d, latency_samples=%d\n",
+					phase, agentPod.Definition.Name, snapshot.SequenceNumber, snapshot.ErrorCount, len(snapshot.LatencySamples))
+
 				allSnapshots[agentPod.Definition.Name] = append(
 					allSnapshots[agentPod.Definition.Name],
 					*snapshot,
 				)
 				sampleCount++
+				roundSuccessCount++
+			}
+
+			// If we successfully collected from all pods this round, increment counter
+			if roundSuccessCount == len(agentPods) {
+				successfulRounds++
+				GinkgoWriter.Printf("[%s] Completed round %d/%d\n", phase, successfulRounds, maxSamplesPerPod)
+
+				// Stop early if we have enough successful samples
+				if successfulRounds >= maxSamplesPerPod {
+					GinkgoWriter.Printf("[%s] Early completion: collected %d rounds of data from all %d pods\n",
+						phase, successfulRounds, len(agentPods))
+					goto done
+				}
 			}
 		}
 	}
@@ -137,33 +157,24 @@ done:
 	return aggregateMetrics(allSnapshots, startTime, endTime, phase)
 }
 
-// collectAgentMetricsSimple scrapes metrics using simple text parsing (no Prometheus client libs).
+// collectAgentMetricsSimple scrapes metrics using oc exec curl from inside the cluster.
 func collectAgentMetricsSimple(agentPod *pod.Builder) (*AgentSnapshot, error) {
-	// Get pod IP
-	podIP := agentPod.Object.Status.PodIP
-	if podIP == "" {
-		return nil, fmt.Errorf("pod %s has no IP", agentPod.Definition.Name)
-	}
+	// Use oc exec to curl the metrics endpoint from inside the pod
+	metricsURL := fmt.Sprintf("http://localhost:%s/metrics", sbrparams.AgentMetricsPort)
 
-	// Scrape metrics endpoint
-	metricsURL := fmt.Sprintf("http://%s:%s/metrics", podIP, sbrparams.AgentMetricsPort)
+	GinkgoWriter.Printf("  Executing: oc exec %s -- sh -c 'curl -sf %s'\n",
+		agentPod.Definition.Name, metricsURL)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(metricsURL)
+	output, err := agentPod.ExecCommand([]string{
+		"sh", "-c",
+		"curl -sf " + metricsURL + " 2>/dev/null || wget -qO- " + metricsURL + " 2>/dev/null",
+	})
 	if err != nil {
-		return nil, fmt.Errorf("HTTP GET failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metrics endpoint returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("oc exec curl failed: %w", err)
 	}
 
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
+	body := output.Bytes()
+	GinkgoWriter.Printf("  Received %d bytes of metrics data\n", len(body))
 
 	// Parse metrics using regex
 	snapshot := &AgentSnapshot{
@@ -174,43 +185,39 @@ func collectAgentMetricsSimple(agentPod *pod.Builder) (*AgentSnapshot, error) {
 
 	metricsText := string(body)
 
-	// Extract sequence number: sbr_heartbeat_sequence_number{...} VALUE
-	seqRe := regexp.MustCompile(`sbr_heartbeat_sequence_number\{[^}]*\}\s+(\d+)`)
+	// Extract sequence number from sbr_watchdog_pets_total as a proxy for agent activity
+	// NOTE: sbr_heartbeat_sequence_number does not exist in current agent implementation
+	seqRe := regexp.MustCompile(`sbr_watchdog_pets_total\s+(\d+)`)
 	if matches := seqRe.FindStringSubmatch(metricsText); len(matches) > 1 {
 		snapshot.SequenceNumber, _ = strconv.ParseUint(matches[1], 10, 64)
+		GinkgoWriter.Printf("  Found sbr_watchdog_pets_total (activity proxy): %d\n", snapshot.SequenceNumber)
+	} else {
+		GinkgoWriter.Printf("  WARNING: sbr_watchdog_pets_total metric not found\n")
 	}
 
-	// Extract error count: sbr_heartbeat_write_errors_total{...} VALUE
-	errRe := regexp.MustCompile(`sbr_heartbeat_write_errors_total\{[^}]*\}\s+(\d+)`)
+	// Extract device I/O errors - this is what actually tracks storage problems
+	// NOTE: sbr_heartbeat_write_errors_total does not exist in current agent implementation
+	errRe := regexp.MustCompile(`sbr_device_io_errors_total\s+(\d+)`)
 	if matches := errRe.FindStringSubmatch(metricsText); len(matches) > 1 {
 		errCount, _ := strconv.ParseInt(matches[1], 10, 64)
 		snapshot.ErrorCount = int(errCount)
+		GinkgoWriter.Printf("  Found sbr_device_io_errors_total: %d\n", snapshot.ErrorCount)
+	} else {
+		GinkgoWriter.Printf("  WARNING: sbr_device_io_errors_total metric not found\n")
 	}
 
-	// Extract histogram sum and count for mean calculation
-	// sbr_heartbeat_write_duration_seconds_sum VALUE
-	// sbr_heartbeat_write_duration_seconds_count VALUE
-	sumRe := regexp.MustCompile(`sbr_heartbeat_write_duration_seconds_sum\{[^}]*\}\s+([\d.]+)`)
-	countRe := regexp.MustCompile(`sbr_heartbeat_write_duration_seconds_count\{[^}]*\}\s+(\d+)`)
-
-	var sumSeconds float64
-	var count int
-
-	if matches := sumRe.FindStringSubmatch(metricsText); len(matches) > 1 {
-		sumSeconds, _ = strconv.ParseFloat(matches[1], 64)
-	}
-
-	if matches := countRe.FindStringSubmatch(metricsText); len(matches) > 1 {
-		countInt, _ := strconv.ParseInt(matches[1], 10, 64)
-		count = int(countInt)
-	}
-
-	// Estimate latency samples from mean
-	if count > 0 && sumSeconds > 0 {
-		meanLatency := time.Duration(float64(time.Second) * sumSeconds / float64(count))
-		// Create synthetic samples around mean (simplified approximation)
-		snapshot.LatencySamples = []time.Duration{meanLatency}
-	}
+	// Heartbeat latency metrics do not exist in the current agent implementation
+	// The agent only exposes:
+	//   - sbr_watchdog_pets_total (watchdog activity counter)
+	//   - sbr_device_io_errors_total (I/O error counter)
+	//   - sbr_agent_status_healthy (overall health gauge)
+	//   - sbr_peer_status (peer liveness status)
+	//   - sbr_self_fenced_total (self-fence event counter)
+	//
+	// This performance test tracks device I/O error increases under load as a proxy
+	// for storage performance degradation, since direct heartbeat latency histograms
+	// are not available.
+	GinkgoWriter.Printf("  INFO: Heartbeat latency metrics not available - tracking I/O errors instead\n")
 
 	return snapshot, nil
 }
@@ -354,20 +361,22 @@ func stdDev(values []time.Duration) time.Duration {
 // logMetricsSummary prints a human-readable metrics summary.
 func logMetricsSummary(label string, metrics *HeartbeatMetrics) {
 	GinkgoWriter.Printf("\n===== %s METRICS =====\n", label)
-	GinkgoWriter.Printf("Phase:        %s\n", metrics.Phase)
-	GinkgoWriter.Printf("Duration:     %v\n", metrics.EndTime.Sub(metrics.StartTime))
-	GinkgoWriter.Printf("Samples:      %d\n", metrics.SampleCount)
-	GinkgoWriter.Printf("P50 latency:  %v\n", metrics.P50)
-	GinkgoWriter.Printf("P95 latency:  %v\n", metrics.P95)
-	GinkgoWriter.Printf("P99 latency:  %v\n", metrics.P99)
-	GinkgoWriter.Printf("Max latency:  %v\n", metrics.Max)
-	GinkgoWriter.Printf("Mean latency: %v\n", metrics.Mean)
-	GinkgoWriter.Printf("Std dev:      %v\n", metrics.StdDev)
-	GinkgoWriter.Printf("Errors:       %d\n", metrics.ErrorCount)
-	GinkgoWriter.Printf("Seq gaps:     %d\n", len(metrics.Gaps))
+	GinkgoWriter.Printf("Phase:          %s\n", metrics.Phase)
+	GinkgoWriter.Printf("Duration:       %v\n", metrics.EndTime.Sub(metrics.StartTime))
+	GinkgoWriter.Printf("Samples:        %d\n", metrics.SampleCount)
+	GinkgoWriter.Printf("I/O Errors:     %d\n", metrics.ErrorCount)
+	GinkgoWriter.Printf("Activity gaps:  %d\n", len(metrics.Gaps))
+
+	if metrics.SampleCount > 0 {
+		GinkgoWriter.Printf("Latency stats:  %v (p50) / %v (p95) / %v (p99) / %v (max)\n",
+			metrics.P50, metrics.P95, metrics.P99, metrics.Max)
+		GinkgoWriter.Printf("Mean/StdDev:    %v / %v\n", metrics.Mean, metrics.StdDev)
+	} else {
+		GinkgoWriter.Printf("Latency stats:  N/A (heartbeat metrics not available)\n")
+	}
 
 	if len(metrics.Gaps) > 0 {
-		GinkgoWriter.Printf("  Gap details:\n")
+		GinkgoWriter.Printf("  Activity gap details:\n")
 		for i, gap := range metrics.Gaps {
 			if i >= 5 {
 				GinkgoWriter.Printf("  ... (%d more gaps)\n", len(metrics.Gaps)-5)

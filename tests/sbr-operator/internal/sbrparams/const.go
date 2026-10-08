@@ -265,7 +265,17 @@ const (
 	AgentPodLabelSelector = "app=sbr-agent"
 
 	// AgentMetricsPort is the port on which SBR agent pods expose custom Prometheus metrics.
-	// Port 8080 is controller-runtime's built-in metrics; port 8082 is the SBR agent's own metrics.
+	// Port 8080 exposes controller-runtime built-in metrics (workqueue, reconciliation).
+	// Port 8082 exposes SBR-specific agent metrics (watchdog, device I/O, peer status).
+	//
+	// NOTE: Heartbeat latency histogram metrics (sbr_heartbeat_write_duration_seconds_*,
+	// sbr_heartbeat_sequence_number, sbr_heartbeat_write_errors_total) do NOT exist in the
+	// current agent implementation. Only these metrics are available on port 8082:
+	//   - sbr_agent_status_healthy
+	//   - sbr_watchdog_pets_total
+	//   - sbr_device_io_errors_total
+	//   - sbr_peer_status
+	//   - sbr_self_fenced_total
 	AgentMetricsPort = "8082"
 
 	// MustGatherOCTimeout is the --timeout flag passed to oc adm must-gather so it cleans up gracefully.
