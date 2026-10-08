@@ -129,6 +129,7 @@ var _ = Describe("MDR Functional -- NHC-Triggered Remediation",
 
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
+				logMDRRemediationDiagnostics(context.Background(), currentNHCName, targetWorkerName)
 				logMDRControllerState()
 			}
 

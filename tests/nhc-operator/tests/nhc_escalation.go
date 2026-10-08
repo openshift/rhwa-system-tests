@@ -82,6 +82,7 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 		var (
 			ctx              context.Context
 			targetWorkerName string
+			currentNHCName   string
 		)
 
 		BeforeAll(func() {
@@ -133,6 +134,8 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 		})
 
 		BeforeEach(func() {
+			currentNHCName = ""
+
 			By("Verifying NHC deployment is ready before each test")
 
 			verifyNHCDeploymentReady()
@@ -147,6 +150,8 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
+				logNHCRemediationDiagnostics(context.Background(), []string{currentNHCName},
+					[]string{targetWorkerName}, testRemediationGVK, snrGVK)
 				logNHCControllerState()
 			}
 		})
@@ -161,6 +166,7 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 			Label(labels.TierResiliency, labels.PlatformAny,
 				labels.ComponentRemediation), func() {
 				nhcName := nhcparams.NHCEscalationTestName + "-basic"
+				currentNHCName = nhcName
 
 				By("Recording initial boot ID")
 
@@ -250,6 +256,7 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 			Label(labels.TierResiliency, labels.PlatformAny,
 				labels.ComponentRemediation), func() {
 				nhcName := nhcparams.NHCEscalationTestName + "-stops"
+				currentNHCName = nhcName
 
 				By("Creating NHC with escalation: SNR first (order=0), TestRemediation second (order=1, timeout=600s)")
 
@@ -310,6 +317,7 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 			Label(labels.TierResiliency, labels.PlatformAny,
 				labels.ComponentRemediation), func() {
 				nhcName := nhcparams.NHCEscalationTestName + "-timeout"
+				currentNHCName = nhcName
 
 				By("Creating NHC with escalation: SNR first (order=0, timeout=60s), TestRemediation second (order=1)")
 

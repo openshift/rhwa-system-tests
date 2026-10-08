@@ -46,6 +46,9 @@ func (hooks *nhcUpgradeOperatorFBCTest) Setup(ctx context.Context) error {
 }
 
 func (hooks *nhcUpgradeOperatorFBCTest) FailureEvidence(ctx context.Context) interface{} {
+	logNHCRemediationDiagnostics(ctx, []string{nhcparams.ClusterUpgradeTestName},
+		[]string{hooks.currentTargetNode}, snrGVK)
+
 	return nhcutils.CollectFailureEvidence(ctx, hooks.namespace)
 }
 

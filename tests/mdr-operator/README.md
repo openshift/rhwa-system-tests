@@ -27,6 +27,12 @@ export ECO_TEST_FEATURES="mdr-operator"
 make run-tests
 ```
 
+On destructive remediation test failure, diagnostics print the involved MDR and
+NHC CR status and conditions before cleanup, followed by the last 100 log lines
+from the MDR controller's current leader-election lease holder. Collection is
+best-effort; each CR read and the controller log collection have their own
+15-second timeout, and warnings preserve the original test failure.
+
 ## Tests
 
 ### 1. Verify Machine Deletion Remediation Operator Pod Is Running ([OCP-65767](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-65767))

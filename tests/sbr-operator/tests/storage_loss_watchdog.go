@@ -47,6 +47,12 @@ var _ = Describe(
 			bootIDBeforeTest string
 		)
 
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSBRRemediationDiagnostics(context.Background(), targetNodeName)
+			}
+		})
+
 		BeforeAll(func() {
 			By("Checking NodeHealthCheck CRD is installed")
 

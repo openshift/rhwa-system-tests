@@ -101,6 +101,8 @@ var _ = Describe("NHC Status Field Tracking",
 
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
+				logNHCRemediationDiagnostics(context.Background(), []string{nhcparams.NHCStatusTestName},
+					[]string{targetWorkerName}, snrGVK)
 				logNHCControllerState()
 			}
 

@@ -28,6 +28,15 @@ export ECO_TEST_FEATURES="nmo-operator"
 make run-tests
 ```
 
+On maintenance lifecycle, collision, or control-plane quorum test failure,
+diagnostics print the involved cluster-scoped NodeMaintenance CR status before
+cleanup, including phase, drain progress, pending pods, and the last error.
+NodeMaintenance has no conditions field. The last 100 log lines come from the
+NMO controller's current leader-election lease holder, not a maintenance lock
+in `medik8s-leases`. Collection is best-effort; each CR read and the controller
+log collection have their own 15-second timeout, and warnings preserve the
+original test failure.
+
 ## Tests
 
 ### 1. Verify Node Maintenance Operator Pod Is Running ([OCP-46315](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-46315))

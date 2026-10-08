@@ -84,6 +84,12 @@ var _ = Describe(
 			deleteAndWaitForNMCR(context.Background(), nmCRName, nmoparams.UncordonTimeout)
 		})
 
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logNMORemediationDiagnostics(context.Background(), nmCRName)
+			}
+		})
+
 		AfterAll(func() {
 			By("Safety cleanup: removing NodeMaintenance CR if still exists")
 

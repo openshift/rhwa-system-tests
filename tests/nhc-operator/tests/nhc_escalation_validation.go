@@ -198,6 +198,7 @@ var _ = Describe("NHC Escalation -- Edit During Remediation",
 		labels.DisruptionDestructive, labels.FrequencyWeekly),
 	func() {
 		var ctx context.Context
+		var targetWorkerName string
 
 		BeforeAll(func() {
 			ctx = context.Background()
@@ -219,6 +220,8 @@ var _ = Describe("NHC Escalation -- Edit During Remediation",
 
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
+				logNHCRemediationDiagnostics(context.Background(), []string{nhcparams.NHCEscalationEditTestName},
+					[]string{targetWorkerName}, testRemediationGVK, snrGVK)
 				logNHCControllerState()
 			}
 		})
@@ -252,6 +255,7 @@ var _ = Describe("NHC Escalation -- Edit During Remediation",
 
 				targetNode, nodeErr := helpers.SelectWorkerNode(ctx, APIClient)
 				Expect(nodeErr).ToNot(HaveOccurred(), "Failed to select worker node")
+				targetWorkerName = targetNode.Name
 				GinkgoWriter.Printf("Target worker node: %s\n", targetNode.Name)
 				Expect(stopKubeletForRemediation(ctx, targetNode.Name)).To(Succeed(),
 					"Failed to stop kubelet on %s", targetNode.Name)

@@ -3,6 +3,9 @@ package nhcparams
 import "time"
 
 const (
+	// DiagnosticsLogTailLines is the controller log tail collected on failure.
+	DiagnosticsLogTailLines = 100
+
 	// Label is the operator name used in the suite-level Labels array.
 	Label = "nhc"
 	// DefaultPollInterval is the polling interval used with Eventually/Consistently calls.

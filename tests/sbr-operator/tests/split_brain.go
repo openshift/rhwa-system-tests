@@ -33,7 +33,7 @@ func buildSplitBrainNHC() *unstructured.Unstructured {
 func sbrCRExists(nodeName string) error {
 	obj := &unstructured.Unstructured{}
 	obj.SetAPIVersion(sbrparams.CRDGroup + "/" + sbrparams.CRDVersion)
-	obj.SetKind("StorageBasedRemediation")
+	obj.SetKind(sbrparams.RemediationKind)
 
 	return APIClient.Get(context.TODO(),
 		types.NamespacedName{Name: nodeName, Namespace: medik8sparams.OperatorNs}, obj)
@@ -69,6 +69,12 @@ var _ = Describe(
 			storageClass    string
 			injectorPodName string
 		)
+
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSBRRemediationDiagnostics(context.Background(), append([]string{targetNodeName}, healthyNodes...)...)
+			}
+		})
 
 		BeforeAll(func() {
 			By("Checking whether NHC CRD is installed")

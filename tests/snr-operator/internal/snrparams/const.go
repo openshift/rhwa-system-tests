@@ -7,6 +7,11 @@ import (
 )
 
 const (
+	// DiagnosticsLogTailLines is the controller log tail collected on failure.
+	DiagnosticsLogTailLines = 100
+	// ControllerLeaseName is the SNR manager leader-election lease.
+	ControllerLeaseName = "547f6cb6.medik8s.io"
+
 	// Label is the operator name used in the suite-level Labels array.
 	Label = "snr"
 	// DefaultPollInterval is the polling interval used with Eventually calls.

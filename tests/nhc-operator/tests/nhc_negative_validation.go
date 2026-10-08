@@ -414,6 +414,8 @@ var _ = Describe("NHC Negative -- Zero Healthy Nodes",
 
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
+				logNHCRemediationDiagnostics(context.Background(), []string{nhcparams.NHCZeroHealthyTestName},
+					[]string{targetWorkerName}, snrGVK)
 				logNHCControllerState()
 			}
 

@@ -172,6 +172,8 @@ var _ = Describe("NHC Template Management -- Custom Remediation",
 
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
+				logNHCRemediationDiagnostics(context.Background(), []string{nhcparams.NHCCustomTemplateTestName},
+					[]string{targetWorkerName}, testRemediationGVK)
 				logNHCControllerState()
 			}
 

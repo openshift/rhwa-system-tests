@@ -72,6 +72,12 @@ var _ = Describe(
 			keepalivePods   []string // pod names, one per worker node
 		)
 
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSBRRemediationDiagnostics(context.Background(), targetNodeName)
+			}
+		})
+
 		BeforeAll(func() {
 			By("Verifying SBR operator deployment is ready")
 
@@ -608,7 +614,7 @@ var _ = Describe(
 						// Assert the controller has not set FencingSucceeded=True on it.
 						sbrCR := &unstructured.Unstructured{}
 						sbrCR.SetAPIVersion(sbrparams.CRDGroup + "/" + sbrparams.CRDVersion)
-						sbrCR.SetKind("StorageBasedRemediation")
+						sbrCR.SetKind(sbrparams.RemediationKind)
 
 						if crGetErr := APIClient.Get(context.TODO(),
 							types.NamespacedName{Name: targetNodeName, Namespace: medik8sparams.OperatorNs},

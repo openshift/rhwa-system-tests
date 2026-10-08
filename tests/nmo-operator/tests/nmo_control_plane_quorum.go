@@ -34,6 +34,15 @@ var _ = Describe(
 	Ordered,
 	Serial,
 	Label(labels.OperatorNMO), func() {
+		var currentNMNames []string
+
+		BeforeEach(func() { currentNMNames = nil })
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logNMORemediationDiagnostics(context.Background(), currentNMNames...)
+			}
+		})
+
 		BeforeAll(func() {
 			ctx := context.Background()
 
@@ -110,6 +119,7 @@ var _ = Describe(
 				Expect(err).ToNot(HaveOccurred(), "Failed to select a control-plane node")
 				firstNodeName := firstNode.Name
 				firstNMName := fmt.Sprintf("quorum-first-%s", firstNodeName)
+				currentNMNames = []string{firstNMName}
 
 				By(fmt.Sprintf("Pre-cleaning any stale NodeMaintenance for node %s", firstNodeName))
 				deleteNMsForNode(ctx, firstNodeName, nmoparams.UncordonTimeout)
@@ -183,6 +193,7 @@ var _ = Describe(
 				Expect(err).ToNot(HaveOccurred(), "Failed to select a second control-plane node")
 				secondNodeName := secondNode.Name
 				secondNMName := fmt.Sprintf("quorum-second-%s", secondNodeName)
+				currentNMNames = append(currentNMNames, secondNMName)
 
 				By(fmt.Sprintf("Pre-cleaning any stale NodeMaintenance for node %s", secondNodeName))
 				deleteNMsForNode(ctx, secondNodeName, nmoparams.UncordonTimeout)

@@ -21,8 +21,8 @@ const (
 	// ManagerContainerName is the name of the main controller container in the FAR pod.
 	ManagerContainerName = "manager"
 
-	// DiagnosticsLogTailLines is how many trailing lines of the active FAR
-	// controller log to dump when a destructive test fails, enough to capture
+	// DiagnosticsLogTailLines is how many trailing lines of the active FAR (or,
+	// in the NHC interop suite, NHC) controller log to dump when a destructive test fails, enough to capture
 	// the reconcile that stalled without flooding the test output.
 	DiagnosticsLogTailLines = 100
 
@@ -92,6 +92,11 @@ const (
 
 	// ControllerLeaseName is the FAR leader election lease name (LeaderElectionID in cmd/main.go).
 	ControllerLeaseName = "cb305759.medik8s.io"
+	// NHCControllerLeaseName is the NHC leader election lease name used by the
+	// FAR+NHC interop diagnostics (nhcparams is internal to the NHC suite).
+	NHCControllerLeaseName = "e1f13584.medik8s.io"
+	// NHCManagerContainerName is the main controller container in the NHC pod.
+	NHCManagerContainerName = "manager"
 
 	// FARConditionProcessing is the condition type for remediation progress.
 	FARConditionProcessing = "Processing"

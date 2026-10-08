@@ -111,6 +111,12 @@ var _ = Describe(
 			storageClassName string
 		)
 
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSBRRemediationDiagnostics(context.Background(), targetNodeName)
+			}
+		})
+
 		BeforeAll(func() {
 			By("Discovering a CephFS StorageClass for the transient storage test")
 

@@ -89,6 +89,12 @@ var _ = Describe(
 			injectorPod     *pod.Builder
 		)
 
+		JustAfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				logSBRRemediationDiagnostics(context.Background(), targetNodeName)
+			}
+		})
+
 		BeforeAll(func() {
 			By("Checking whether NHC CRD is installed")
 
