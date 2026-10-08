@@ -41,7 +41,7 @@ Validates that the active FAR ClusterServiceVersion (in Succeeded phase) has all
 - **Storage**: None
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="far" --focus="required annotations" ./tests/far-operator/...`
-- **Pass criteria**: All required annotations present with expected values on the active CSV
+- **Pass criteria**: All required annotations present with expected values on the active CSV (`tls-profiles` is expected `"true"` for FAR 5.x and later, `"false"` for earlier versions)
 
 ### 3. Verify FAR Controller Replicas and Node Distribution ([OCP-61222](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-61222))
 
