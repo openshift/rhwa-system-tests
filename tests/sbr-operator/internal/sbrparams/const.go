@@ -315,6 +315,18 @@ const (
 	// MinWorkerNodesForHandoverTest is the minimum number of schedulable worker-only nodes
 	// required for the leadership handover test (needs 2 replicas on different nodes).
 	MinWorkerNodesForHandoverTest = 2
+
+	// SBRCBlockPersistentFencingTestName is the SBRC name for the Ceph RBD persistent fencing state test.
+	SBRCBlockPersistentFencingTestName = "test-sbrc-block-persistent-fencing"
+
+	// NHCBlockPersistentFencingTestName is the NHC CR name for the block persistent fencing test.
+	NHCBlockPersistentFencingTestName = "nhc-sbr-block-persistent-fencing"
+
+	// BlockFencingStateCheckTimeout is how long to wait for block device slot state to stabilize after reboot.
+	BlockFencingStateCheckTimeout = 5 * time.Minute
+
+	// BlockFencingStateCheckInterval is the polling interval for block device slot state checks.
+	BlockFencingStateCheckInterval = 10 * time.Second
 )
 
 // AgentExpectedMetricNames lists the Prometheus metric names that must be present in the agent output.
@@ -331,6 +343,11 @@ var AgentExpectedMetricNames = []string{
 // Set SBR_STORAGE_CLASS env var to override auto-discovery (useful in air-gapped or non-ODF environments).
 // When empty, tests auto-discover a CephFS StorageClass (provisioner containing "cephfs").
 var SBRStorageClass = os.Getenv("SBR_STORAGE_CLASS")
+
+// SBRRBDStorageClass is the StorageClass name to use for Ceph RBD block storage tests.
+// Set SBR_RBD_STORAGE_CLASS env var to override auto-discovery.
+// When empty, tests auto-discover a Ceph RBD StorageClass (provisioner containing "rbd.csi.ceph.com").
+var SBRRBDStorageClass = os.Getenv("SBR_RBD_STORAGE_CLASS")
 
 // WatchdogDebugImage is the container image for /dev/watchdog* discovery and keepalive pods.
 // Must provide sh and ls. Set SBR_WATCHDOG_DEBUG_IMAGE to override (e.g. in disconnected clusters).
