@@ -45,21 +45,6 @@ var (
 		{Cr: &coordinationv1.LeaseList{}, Namespace: &operatorNs},
 	}
 
-	// RequiredAnnotations defines the required annotations and expected values for SNR CSV.
-	RequiredAnnotations = map[string]string{
-		"features.operators.openshift.io/tls-profiles":     "false",
-		"features.operators.openshift.io/disconnected":     "true",
-		"features.operators.openshift.io/fips-compliant":   "true",
-		"features.operators.openshift.io/proxy-aware":      "false",
-		"features.operators.openshift.io/cnf":              "false",
-		"features.operators.openshift.io/cni":              "false",
-		"features.operators.openshift.io/csi":              "false",
-		"features.operators.openshift.io/token-auth-aws":   "false",
-		"features.operators.openshift.io/token-auth-azure": "false",
-		"features.operators.openshift.io/token-auth-gcp":   "false",
-		"operatorframework.io/suggested-namespace":         medik8sparams.OperatorNs,
-	}
-
 	// UnsupportedTemplateNames lists template names that must NOT exist.
 	UnsupportedTemplateNames = []string{
 		"self-node-remediation-resource-deletion-template",

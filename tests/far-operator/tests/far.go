@@ -111,10 +111,12 @@ var _ = Describe(
 				By("Checking annotation values on FAR CSV")
 
 				Expect(farCSV.Object.Annotations).ToNot(BeNil(), "CSV annotations should not be nil")
+				expectedAnnotations := medik8sparams.ExpectedFeatureAnnotations(
+					farCSV.Object.Spec.Version.String(), true)
 
 				var annotationErrors []string
 
-				for annotationKey, expectedValue := range farparams.RequiredAnnotations {
+				for annotationKey, expectedValue := range expectedAnnotations {
 					annotationValue, exists := farCSV.Object.Annotations[annotationKey]
 					if !exists {
 						annotationErrors = append(annotationErrors,

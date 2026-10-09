@@ -129,10 +129,12 @@ var _ = Describe(
 				By("Checking annotation values on NMO CSV")
 
 				Expect(nmoCSV.Object.Annotations).ToNot(BeNil(), "CSV annotations should not be nil")
+				expectedAnnotations := medik8sparams.ExpectedFeatureAnnotations(
+					nmoCSV.Object.Spec.Version.String(), true)
 
 				var annotationErrors []string
 
-				for annotationKey, expectedValue := range nmoparams.RequiredAnnotations {
+				for annotationKey, expectedValue := range expectedAnnotations {
 					annotationValue, exists := nmoCSV.Object.Annotations[annotationKey]
 					if !exists {
 						annotationErrors = append(annotationErrors,

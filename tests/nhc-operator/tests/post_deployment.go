@@ -177,10 +177,12 @@ var _ = Describe(
 				} else {
 					annotations := nhcCSV.Object.Annotations
 					Expect(annotations).ToNot(BeNil(), "CSV annotations should not be nil")
+					expectedAnnotations := medik8sparams.ExpectedFeatureAnnotations(
+						nhcCSV.Object.Spec.Version.String(), true)
 
 					var annotationErrors []string
 
-					for annotationKey, expectedValue := range nhcparams.RequiredAnnotations {
+					for annotationKey, expectedValue := range expectedAnnotations {
 						annotationValue, exists := annotations[annotationKey]
 						if !exists {
 							annotationErrors = append(annotationErrors,

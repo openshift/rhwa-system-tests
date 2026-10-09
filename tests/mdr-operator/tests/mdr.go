@@ -144,10 +144,12 @@ var _ = Describe(
 				By("Checking annotation values on MDR CSV")
 
 				Expect(mdrCSV.Object.Annotations).ToNot(BeNil(), "CSV annotations should not be nil")
+				expectedAnnotations := medik8sparams.ExpectedFeatureAnnotations(
+					mdrCSV.Object.Spec.Version.String(), true)
 
 				var annotationErrors []string
 
-				for annotationKey, expectedValue := range mdrparams.RequiredAnnotations {
+				for annotationKey, expectedValue := range expectedAnnotations {
 					annotationValue, exists := mdrCSV.Object.Annotations[annotationKey]
 					if !exists {
 						annotationErrors = append(annotationErrors,

@@ -285,9 +285,13 @@ var _ = Describe(
 
 				Expect(sbrCSV.Object.Annotations).ToNot(BeNil(), "CSV annotations should not be nil")
 
+				// SBR ships fips-compliant="false"; tls-profiles is release-dependent.
+				expectedAnnotations := medik8sparams.ExpectedFeatureAnnotations(
+					sbrCSV.Object.Spec.Version.String(), false)
+
 				var annotationErrors []string
 
-				for annotationKey, expectedValue := range sbrparams.RequiredAnnotations {
+				for annotationKey, expectedValue := range expectedAnnotations {
 					annotationValue, exists := sbrCSV.Object.Annotations[annotationKey]
 					if !exists {
 						annotationErrors = append(annotationErrors,
