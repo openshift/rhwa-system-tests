@@ -60,6 +60,13 @@ var (
 		"operatorframework.io/suggested-namespace":         medik8sparams.OperatorNs,
 	}
 
+	// SNRCRDNames lists the full CRD names (plural.group) for all SNR custom resource definitions.
+	SNRCRDNames = []string{
+		"selfnoderemediationconfigs." + CRDGroup,
+		"selfnoderemediations." + CRDGroup,
+		"selfnoderemediationtemplates." + CRDGroup,
+	}
+
 	// UnsupportedTemplateNames lists template names that must NOT exist.
 	UnsupportedTemplateNames = []string{
 		"self-node-remediation-resource-deletion-template",

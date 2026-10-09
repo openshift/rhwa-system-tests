@@ -9,6 +9,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/clients"
+	oplmV1alpha1 "github.com/rh-ecosystem-edge/eco-goinfra/pkg/schemes/olm/operators/v1alpha1"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const (
@@ -109,6 +115,29 @@ printf '%s\n' "$*" "HOME=$HOME" > "$COMMAND_RECORD"
 	}
 }
 
+func TestRunDigestRefSkipsImageInfo(t *testing.T) {
+	// `oc image info` fails; a digest-pinned ref must still log its digest
+	// from the ref itself rather than falling back to a WARNING.
+	fakeOC(t, `if [ "$1" = image ]; then exit 1; fi
+exit 0
+`)
+	dest := t.TempDir()
+	var logs strings.Builder
+	image := "registry.redhat.io/workload-availability/must-gather@sha256:abc123"
+	if err := Run(context.Background(), image, dest, Options{ImageInfoTimeout: testTimeout},
+		func(format string, args ...interface{}) { fmt.Fprintf(&logs, format, args...) }); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(logs.String(), "WARNING") {
+		t.Fatalf("digest ref should not warn: %s", logs.String())
+	}
+
+	if !strings.Contains(logs.String(), "digest sha256:abc123") {
+		t.Fatalf("embedded digest not logged: %s", logs.String())
+	}
+}
+
 func TestRunCanceledContext(t *testing.T) {
 	fakeOC(t, "exit 0\n")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -194,5 +223,82 @@ fi
 
 	if string(output) != "delete ns openshift-must-gather-new --ignore-not-found --wait=false\n" {
 		t.Fatalf("wrong cleanup targets: %s", output)
+	}
+}
+
+const (
+	testEnvVar       = "MUST_GATHER_IMAGE"
+	testNamespace    = "openshift-workload-availability"
+	testDefaultImage = "quay.io/medik8s/must-gather:latest"
+	testEnvImage     = "mirror.example.com/must-gather:mirrored"
+	testCSVImage     = "registry.redhat.io/workload-availability/must-gather@sha256:abc"
+)
+
+// csvClient returns a fake *clients.Settings holding the given CSVs.
+func csvClient(t *testing.T, csvs ...*oplmV1alpha1.ClusterServiceVersion) *clients.Settings {
+	t.Helper()
+	objects := make([]runtime.Object, 0, len(csvs))
+	for _, csv := range csvs {
+		objects = append(objects, csv)
+	}
+
+	return clients.GetTestClients(clients.TestClientParams{
+		K8sMockObjects:  objects,
+		SchemeAttachers: []clients.SchemeAttacher{oplmV1alpha1.AddToScheme},
+	})
+}
+
+// csvWithRelatedImage builds a CSV carrying a single relatedImages entry.
+func csvWithRelatedImage(name, relatedName, image string) *oplmV1alpha1.ClusterServiceVersion {
+	return &oplmV1alpha1.ClusterServiceVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec: oplmV1alpha1.ClusterServiceVersionSpec{
+			RelatedImages: []oplmV1alpha1.RelatedImage{{Name: relatedName, Image: image}},
+		},
+	}
+}
+
+func TestDiscoverImage(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		env       string
+		apiClient *clients.Settings
+		want      string
+	}{
+		{
+			name:      "env var wins over discovery and default",
+			env:       testEnvImage,
+			apiClient: csvClient(t, csvWithRelatedImage("nhc.v0.1", "must_gather", testCSVImage)),
+			want:      testEnvImage,
+		},
+		{
+			name:      "discovers must_gather from CSV relatedImages",
+			apiClient: csvClient(t, csvWithRelatedImage("nhc.v0.1", "must_gather", testCSVImage)),
+			want:      testCSVImage,
+		},
+		{
+			name:      "accepts hyphenated must-gather name case-insensitively",
+			apiClient: csvClient(t, csvWithRelatedImage("nhc.v0.1", "Must-Gather", testCSVImage)),
+			want:      testCSVImage,
+		},
+		{
+			name:      "falls back to default when no CSV carries must-gather",
+			apiClient: csvClient(t, csvWithRelatedImage("far.v0.1", "fence-agents-remediation", "other")),
+			want:      testDefaultImage,
+		},
+		{
+			name:      "falls back to default with nil client",
+			apiClient: nil,
+			want:      testDefaultImage,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(testEnvVar, test.env)
+			got := DiscoverImage(test.apiClient, testNamespace, testEnvVar, testDefaultImage,
+				func(string, ...interface{}) {})
+			if got != test.want {
+				t.Fatalf("DiscoverImage = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

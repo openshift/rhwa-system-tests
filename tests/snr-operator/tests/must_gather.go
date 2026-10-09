@@ -13,24 +13,25 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/infrastructure"
+	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
 	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/internal/mustgather"
-	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
+	"github.com/medik8s/system-tests/tests/snr-operator/internal/snrparams"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var _ = Describe(
-	"SBR Must-Gather Diagnostics",
+	"SNR Must-Gather Diagnostics",
 	Serial,
 	Ordered,
-	Label(labels.OperatorSBR), func() {
-		It("Verify SBR must-gather collects diagnostic data",
-			reportxml.ID("88733"),
+	Label(labels.OperatorSNR), func() {
+		It("Verify SNR must-gather collects diagnostic data",
+			reportxml.ID("50774"),
 			Label(
 				labels.DisruptionNonDestructive,
 				labels.TierAcceptance,
@@ -38,13 +39,13 @@ var _ = Describe(
 				labels.ComponentController,
 				labels.FrequencyWeekly,
 			), func() {
-				By("Verifying SBR deployment is Ready")
+				By("Verifying SNR deployment is Ready")
 
-				sbrDeployment, err := deployment.Pull(
-					APIClient, sbrparams.OperatorDeploymentName, medik8sparams.OperatorNs)
-				Expect(err).ToNot(HaveOccurred(), "Failed to get SBR deployment")
-				Expect(sbrDeployment.IsReady(medik8sparams.DefaultTimeout)).To(BeTrue(),
-					"SBR deployment is not Ready")
+				snrDeployment, err := deployment.Pull(
+					APIClient, snrparams.OperatorDeploymentName, medik8sparams.OperatorNs)
+				Expect(err).ToNot(HaveOccurred(), "Failed to get SNR deployment")
+				Expect(snrDeployment.IsReady(medik8sparams.DefaultTimeout)).To(BeTrue(),
+					"SNR deployment is not Ready")
 
 				By("Detecting cluster topology")
 
@@ -53,22 +54,21 @@ var _ = Describe(
 
 				if infraConfig.Object.Status.ControlPlaneTopology == configv1.ExternalTopologyMode {
 					Skip("Must-gather test not supported on HyperShift clusters. " +
-						"Node collection via 'oc adm inspect nodes' fails due to HyperShift API limitations (0 nodes collected), " +
-						"and Machine API resources (MachineHealthCheck) exist only on the management cluster. " +
-						"See: https://github.com/openshift/release/pull/83913")
+						"Node collection via 'oc adm inspect nodes' fails due to HyperShift API limitations " +
+						"(0 nodes collected).")
 				}
 
 				By("Resolving the RHWA must-gather image")
 
 				mustGatherImage := mustgather.DiscoverImage(
 					APIClient, medik8sparams.OperatorNs,
-					sbrparams.MustGatherImageEnvVar, sbrparams.DefaultMustGatherImage, GinkgoWriter.Printf)
+					snrparams.MustGatherImageEnvVar, snrparams.DefaultMustGatherImage, GinkgoWriter.Printf)
 				Expect(mustGatherImage).To(ContainSubstring(":"),
 					"must-gather image %q should contain a tag separator", mustGatherImage)
 
 				By("Creating artifact directory for must-gather output")
 
-				destDir, mkdirErr := mustgather.CreateDestDir("sbr-must-gather-", GinkgoT().TempDir())
+				destDir, mkdirErr := mustgather.CreateDestDir("snr-must-gather-", GinkgoT().TempDir())
 				Expect(mkdirErr).ToNot(HaveOccurred(), "Failed to create must-gather output directory")
 
 				By("Capturing cluster state before must-gather for validation")
@@ -85,21 +85,23 @@ var _ = Describe(
 					nodeNames = append(nodeNames, nodeList.Items[i].Name)
 				}
 
+				snrPodNames := collectSNRPodNames()
+
 				By("Running oc adm must-gather")
 
 				testStartTime := time.Now()
-				ctx, cancel := context.WithTimeout(context.Background(), sbrparams.MustGatherContextTimeout)
+				ctx, cancel := context.WithTimeout(context.Background(), snrparams.MustGatherContextTimeout)
 				defer cancel()
 
 				DeferCleanup(func() {
 					By("Cleaning up leftover must-gather namespaces")
 					mustgather.CleanupNamespaces(context.Background(), testStartTime,
-						sbrparams.MustGatherCleanupTimeout, GinkgoWriter.Printf)
+						snrparams.MustGatherCleanupTimeout, GinkgoWriter.Printf)
 				})
 
 				Expect(mustgather.Run(ctx, mustGatherImage, destDir, mustgather.Options{
-					ImageInfoTimeout: sbrparams.MustGatherImageInfoTimeout,
-					OCTimeout:        sbrparams.MustGatherOCTimeout,
+					ImageInfoTimeout: snrparams.MustGatherImageInfoTimeout,
+					OCTimeout:        snrparams.MustGatherOCTimeout,
 					SaveCommandLog:   true,
 					HomeFallback:     true,
 				}, GinkgoWriter.Printf)).To(Succeed(), "oc adm must-gather failed")
@@ -124,16 +126,47 @@ var _ = Describe(
 
 				GinkgoWriter.Printf("Node YAMLs collected: %d/%d\n", len(nodeNames), len(nodeNames))
 
-				By("Validating SBR CRD definitions are present")
+				By("Validating SNR CRD definitions are present")
 
-				for _, crdName := range sbrparams.SBRCRDNames {
+				for _, crdName := range snrparams.SNRCRDNames {
 					Expect(mustgather.HasMatchingFile(collectedFiles, crdName+".yaml")).To(BeTrue(),
 						"must-gather should contain CRD definition for %s", crdName)
 				}
 
-				By("Validating MachineHealthCheck data is collected")
+				By("Validating SNR controller and agent pod data is collected")
 
-				Expect(mustgather.HasMatchingFile(collectedFiles, "machinehealthchecks")).To(BeTrue(),
-					"must-gather should contain MachineHealthCheck data")
+				for _, podName := range snrPodNames {
+					Expect(mustgather.HasMatchingFile(collectedFiles, podName)).To(BeTrue(),
+						"must-gather should contain data for SNR pod %s", podName)
+				}
+
+				GinkgoWriter.Printf("SNR pod data collected: %d/%d\n", len(snrPodNames), len(snrPodNames))
 			})
 	})
+
+// collectSNRPodNames returns the names of the SNR controller-manager and agent DaemonSet pods
+// that must-gather is expected to collect data for.
+func collectSNRPodNames() []string {
+	var podNames []string
+
+	ctrlPods, ctrlErr := pod.List(APIClient, medik8sparams.OperatorNs, metav1.ListOptions{
+		LabelSelector: snrparams.OperatorControllerPodLabelSelector,
+	})
+	Expect(ctrlErr).ToNot(HaveOccurred(), "Failed to list SNR controller pods")
+	Expect(ctrlPods).ToNot(BeEmpty(), "No SNR controller pods found")
+	dsPods, dsErr := pod.List(APIClient, medik8sparams.OperatorNs, metav1.ListOptions{
+		LabelSelector: snrparams.DaemonSetPodLabelSelector,
+	})
+	Expect(dsErr).ToNot(HaveOccurred(), "Failed to list SNR DaemonSet pods")
+	Expect(dsPods).ToNot(BeEmpty(), "No SNR DaemonSet pods found")
+
+	for _, p := range ctrlPods {
+		podNames = append(podNames, p.Object.Name)
+	}
+
+	for _, p := range dsPods {
+		podNames = append(podNames, p.Object.Name)
+	}
+
+	return podNames
+}

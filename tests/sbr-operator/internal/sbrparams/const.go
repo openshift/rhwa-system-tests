@@ -275,13 +275,15 @@ const (
 	MustGatherContextTimeout = 16 * time.Minute
 
 	// MustGatherImageEnvVar overrides the must-gather image (e.g. a mirrored ref on disconnected clusters).
+	// It takes precedence over both CSV discovery and the default (see mustgather.DiscoverImage).
 	MustGatherImageEnvVar = "MUST_GATHER_IMAGE"
 
-	// DefaultMustGatherImage is the upstream medik8s must-gather image, matching the FAR suite.
-	// The :latest tag is intentional so the test exercises the must-gather build a user would actually
-	// pull; the resolved image digest is logged on every run (see mustgather.Run) so a failure is
-	// reproducible against the exact build, and MustGatherImageEnvVar overrides it when a specific ref
-	// is needed.
+	// DefaultMustGatherImage is the community medik8s must-gather image, used as the last-resort
+	// fallback. mustgather.DiscoverImage prefers, in order: the MustGatherImageEnvVar override, then
+	// the version-matched downstream build scraped from an installed CSV's relatedImages, and only
+	// then this default. The :latest tag is intentional so a fallback run still exercises the build a
+	// user would pull; the resolved image digest is logged on every run (see mustgather.Run) so a
+	// failure is reproducible against the exact build.
 	DefaultMustGatherImage = "quay.io/medik8s/must-gather:latest"
 
 	// MustGatherImageInfoTimeout bounds the best-effort `oc image info` digest lookup.

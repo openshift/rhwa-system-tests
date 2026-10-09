@@ -11,12 +11,22 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/clients"
+	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/olm"
 )
 
 const (
 	commandLogPermissions    = 0o644
 	namespaceTimestampFields = 2
 )
+
+// relatedImageMustGatherNames are the names under which the version-matched
+// downstream must-gather image is published in an operator CSV's
+// .spec.relatedImages. OSBS derives the entry name from the RELATED_IMAGE_MUST_GATHER
+// env var the NHC bundle injects, lowercasing the suffix to "must_gather"; the
+// hyphenated form is accepted defensively in case the convention changes.
+var relatedImageMustGatherNames = []string{"must_gather", "must-gather"}
 
 // Options preserves each suite's command execution and artifact requirements.
 type Options struct {
@@ -47,7 +57,12 @@ type MustGatherExpectation struct {
 func Run(
 	ctx context.Context, image, destDir string, options Options, logf func(format string, args ...interface{}),
 ) error {
-	if digest, digestErr := resolveImageDigest(ctx, image, options.ImageInfoTimeout); digestErr != nil {
+	// A digest-pinned ref already carries its provenance, so log it directly and
+	// skip the client-side `oc image info` lookup, which needs registry creds the
+	// test pod may lack (e.g. registry.redhat.io on downstream builds).
+	if _, digest, found := strings.Cut(image, "@"); found {
+		logf("Using must-gather image %s (digest %s)\n", image, digest)
+	} else if digest, digestErr := resolveImageDigest(ctx, image, options.ImageInfoTimeout); digestErr != nil {
 		logf("WARNING: could not resolve must-gather image digest for %q: %v\n", image, digestErr)
 	} else {
 		logf("Using must-gather image %s (digest %s)\n", image, digest)
@@ -93,6 +108,84 @@ func Run(
 	}
 
 	return nil
+}
+
+// DiscoverImage resolves the must-gather image a spec should run, in order of
+// preference:
+//
+//  1. the envVar override, when set (lets disconnected CI inject the mirrored ref);
+//  2. the version-matched downstream build, scraped from an installed operator
+//     CSV's .spec.relatedImages (the runtime analog of rendering the FBC catalog);
+//  3. defaultImage, the community image, as a last resort.
+//
+// The chosen source is logged so a run's image provenance is visible in the test
+// output. A nil apiClient or a failed cluster lookup is non-fatal: discovery is
+// skipped and resolution falls through to defaultImage.
+func DiscoverImage(
+	apiClient *clients.Settings,
+	namespace, envVar, defaultImage string,
+	logf func(format string, args ...interface{}),
+) string {
+	if envImg := os.Getenv(envVar); envImg != "" {
+		logf("must-gather image resolved from %s env var: %s\n", envVar, envImg)
+
+		return envImg
+	}
+
+	if img := imageFromCSVRelatedImages(apiClient, namespace, logf); img != "" {
+		logf("must-gather image discovered from CSV relatedImages: %s\n", img)
+
+		return img
+	}
+
+	logf("must-gather image using default: %s\n", defaultImage)
+
+	return defaultImage
+}
+
+// imageFromCSVRelatedImages scans every CSV installed in namespace for a
+// .spec.relatedImages entry naming the must-gather image, returning the first
+// match (empty string when none is found or the lookup fails). The must-gather
+// image is pinned only in the NHC CSV, but the scan is operator-agnostic so it
+// keeps working whichever operator ends up carrying it.
+func imageFromCSVRelatedImages(
+	apiClient *clients.Settings, namespace string, logf func(format string, args ...interface{}),
+) string {
+	if apiClient == nil {
+		return ""
+	}
+
+	csvs, err := olm.ListClusterServiceVersion(apiClient, namespace)
+	if err != nil {
+		logf("WARNING: could not list CSVs in %s for must-gather discovery: %v\n", namespace, err)
+
+		return ""
+	}
+
+	for _, csv := range csvs {
+		for _, related := range csv.Object.Spec.RelatedImages {
+			for _, name := range relatedImageMustGatherNames {
+				if strings.EqualFold(related.Name, name) && related.Image != "" {
+					return related.Image
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// CreateDestDir creates a unique output directory for must-gather artifacts.
+// It roots the directory at ARTIFACT_DIR when set (so CI collects the output),
+// falling back to fallbackBase otherwise. prefix names the per-operator temp
+// directory. It returns the created directory and any error from MkdirTemp.
+func CreateDestDir(prefix, fallbackBase string) (string, error) {
+	base := os.Getenv("ARTIFACT_DIR")
+	if base == "" {
+		base = fallbackBase
+	}
+
+	return os.MkdirTemp(base, prefix)
 }
 
 // resolveImageDigest returns the manifest digest a mutable image reference
