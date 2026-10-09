@@ -137,16 +137,9 @@ var _ = Describe(
 	})
 
 func resolveMustGatherImage() string {
-	if envImg := os.Getenv(sbrparams.MustGatherImageEnvVar); envImg != "" {
-		GinkgoWriter.Printf("must-gather image resolved from %s env var: %s\n",
-			sbrparams.MustGatherImageEnvVar, envImg)
-
-		return envImg
-	}
-
-	GinkgoWriter.Printf("must-gather image using default: %s\n", sbrparams.DefaultMustGatherImage)
-
-	return sbrparams.DefaultMustGatherImage
+	return mustgather.DiscoverImage(
+		APIClient, medik8sparams.OperatorNs,
+		sbrparams.MustGatherImageEnvVar, sbrparams.DefaultMustGatherImage, GinkgoWriter.Printf)
 }
 
 func createMustGatherDestDir() string {

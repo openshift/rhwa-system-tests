@@ -11,12 +11,22 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/clients"
+	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/olm"
 )
 
 const (
 	commandLogPermissions    = 0o644
 	namespaceTimestampFields = 2
 )
+
+// relatedImageMustGatherNames are the names under which the version-matched
+// downstream must-gather image is published in an operator CSV's
+// .spec.relatedImages. OSBS derives the entry name from the RELATED_IMAGE_MUST_GATHER
+// env var the NHC bundle injects, lowercasing the suffix to "must_gather"; the
+// hyphenated form is accepted defensively in case the convention changes.
+var relatedImageMustGatherNames = []string{"must_gather", "must-gather"}
 
 // Options preserves each suite's command execution and artifact requirements.
 type Options struct {
@@ -121,6 +131,71 @@ func resolveImageDigest(ctx context.Context, image string, timeout time.Duration
 	}
 
 	return info.Digest, nil
+}
+
+// DiscoverImage resolves the must-gather image a spec should run, in order of
+// preference:
+//
+//  1. the envVar override, when set (lets disconnected CI inject the mirrored ref);
+//  2. the version-matched downstream build, scraped from an installed operator
+//     CSV's .spec.relatedImages (the runtime analog of rendering the FBC catalog);
+//  3. defaultImage, the community image, as a last resort.
+//
+// The chosen source is logged so a run's image provenance is visible in the test
+// output. A nil apiClient or a failed cluster lookup is non-fatal: discovery is
+// skipped and resolution falls through to defaultImage.
+func DiscoverImage(
+	apiClient *clients.Settings,
+	namespace, envVar, defaultImage string,
+	logf func(format string, args ...interface{}),
+) string {
+	if envImg := os.Getenv(envVar); envImg != "" {
+		logf("must-gather image resolved from %s env var: %s\n", envVar, envImg)
+
+		return envImg
+	}
+
+	if img := imageFromCSVRelatedImages(apiClient, namespace, logf); img != "" {
+		logf("must-gather image discovered from CSV relatedImages: %s\n", img)
+
+		return img
+	}
+
+	logf("must-gather image using default: %s\n", defaultImage)
+
+	return defaultImage
+}
+
+// imageFromCSVRelatedImages scans every CSV installed in namespace for a
+// .spec.relatedImages entry naming the must-gather image, returning the first
+// match (empty string when none is found or the lookup fails). The must-gather
+// image is pinned only in the NHC CSV, but the scan is operator-agnostic so it
+// keeps working whichever operator ends up carrying it.
+func imageFromCSVRelatedImages(
+	apiClient *clients.Settings, namespace string, logf func(format string, args ...interface{}),
+) string {
+	if apiClient == nil {
+		return ""
+	}
+
+	csvs, err := olm.ListClusterServiceVersion(apiClient, namespace)
+	if err != nil {
+		logf("WARNING: could not list CSVs in %s for must-gather discovery: %v\n", namespace, err)
+
+		return ""
+	}
+
+	for _, csv := range csvs {
+		for _, related := range csv.Object.Spec.RelatedImages {
+			for _, name := range relatedImageMustGatherNames {
+				if strings.EqualFold(related.Name, name) && related.Image != "" {
+					return related.Image
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // ValidateMustGatherContents checks that the must-gather output directory
