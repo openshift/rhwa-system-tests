@@ -239,26 +239,13 @@ var _ = Describe(
 				}
 			}
 
-			if injectorPod != nil {
-				if existing, pullErr := pod.Pull(
-					APIClient, sbrparams.TransientInjectorPodName, medik8sparams.OperatorNs,
-				); pullErr == nil {
-					if _, delErr := existing.Delete(); delErr != nil {
-						GinkgoWriter.Printf("AfterAll: failed to delete injector pod: %v\n", delErr)
-					} else {
-						Eventually(func() error {
-							_, err := pod.Pull(APIClient, sbrparams.TransientInjectorPodName,
-								medik8sparams.OperatorNs)
-							if err != nil {
-								return nil // not found = gone
-							}
+			By("AfterAll: deleting the injector pod if it is still present")
 
-							return fmt.Errorf("injector pod %s still present",
-								sbrparams.TransientInjectorPodName)
-						}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed())
-					}
-				}
-			}
+			deleteInjectorPod(sbrparams.TransientInjectorPodName)
+
+			By("AfterAll: clearing any CephFS REJECT rules left on the target node")
+
+			ensureCephFSRejectRulesCleared(targetNodeName)
 		})
 
 		It("Verify transient storage failure clears without fencing",
@@ -293,17 +280,14 @@ func verifyTransientStorageSelfHealing(targetNodeName *string, injectorPod **pod
 		"Injector pod must start running on node %q", *targetNodeName)
 	*injectorPod = built
 
-	// Capture the pod value now; the test body may nil *injectorPod before DeferCleanup fires.
-	cleanupPod := built
+	// Capture the node name now; the sweep must run even when the test body has already
+	// deleted the injector pod, and must not depend on that pod to reach the host.
+	cleanupNode := *targetNodeName
 
 	DeferCleanup(func() {
-		if cleanupPod == nil {
-			return
-		}
+		By("DeferCleanup: clearing CephFS iptables REJECT rules from the target node")
 
-		By("DeferCleanup: removing CephFS iptables OUTPUT REJECT rules")
-
-		removeCephFSRejectOutput(cleanupPod)
+		ensureCephFSRejectRulesCleared(cleanupNode)
 	})
 
 	By("Injecting CephFS port REJECT rules via iptables OUTPUT (nsenter --net)")

@@ -133,6 +133,18 @@ const (
 	// StorageInjectionPollInterval is the polling interval while waiting for the storage unhealthy condition.
 	StorageInjectionPollInterval = 10 * time.Second
 
+	// CephFSSweepPodName is the name prefix for the pod that removes leftover CephFS REJECT
+	// rules from a node. The target node name is appended to keep one sweep pod per node.
+	CephFSSweepPodName = "sbr-cephfs-sweep-"
+
+	// CephFSSweepPodTimeout is how long a CephFS REJECT-rule sweep pod has to reach Running.
+	// Kept well under StorageInjectionTimeout so a sweep cannot dominate a teardown.
+	CephFSSweepPodTimeout = 2 * time.Minute
+
+	// CephFSSweepPodLifetime is the sleep duration of a sweep pod. The sweep itself takes
+	// milliseconds; the pod only has to outlive the single exec issued against it.
+	CephFSSweepPodLifetime = "120"
+
 	// NHCCRDName is the CRD name for NodeHealthCheck, used to detect if NHC is installed.
 	NHCCRDName = "nodehealthchecks.remediation.medik8s.io"
 

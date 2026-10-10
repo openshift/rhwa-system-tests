@@ -279,48 +279,8 @@ var _ = Describe(
 				DeferCleanup(func() {
 					By("DeferCleanup: removing OUTPUT REJECT rules on target node")
 
-					if injectorPod == nil {
-						// Pod was never created (creation failed before assignment);
-						// attempt a best-effort cleanup pod on the target node.
-						cleanupPodName := func(name string) string {
-							safe := strings.Map(func(r rune) rune {
-								if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-									return r
-								}
-
-								return '-'
-							}, strings.ToLower(name))
-
-							result := "sbr-write-cleanup-" + safe
-							if len(result) > 63 {
-								result = result[:63]
-							}
-
-							return strings.TrimRight(result, "-")
-						}(targetNodeName)
-
-						cleanupPod, cleanupErr := pod.NewBuilder(APIClient,
-							cleanupPodName,
-							medik8sparams.OperatorNs, sbrparams.InjectorImage).
-							DefineOnNode(targetNodeName).
-							WithHostPid(true).
-							WithPrivilegedFlag().
-							CreateAndWaitUntilRunning(medik8sparams.DefaultTimeout)
-						if cleanupErr != nil {
-							GinkgoWriter.Printf("Warning: could not create cleanup pod on node %s: %v\n",
-								targetNodeName, cleanupErr)
-						} else {
-							injectorPod = cleanupPod
-						}
-					}
-
-					if injectorPod != nil {
-						removeCephFSRejectOutput(injectorPod)
-
-						if _, delErr := injectorPod.Delete(); delErr != nil {
-							GinkgoWriter.Printf("Warning: delete injector pod: %v\n", delErr)
-						}
-					}
+					deleteInjectorPod(injectorPodName)
+					ensureCephFSRejectRulesCleared(targetNodeName)
 
 					By("DeferCleanup: force-removing StorageBasedRemediation CR if still present")
 

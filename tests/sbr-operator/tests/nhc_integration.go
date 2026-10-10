@@ -281,14 +281,8 @@ var _ = Describe(
 				DeferCleanup(func() {
 					By("DeferCleanup: removing iptables REJECT rules on target node")
 
-					cleanupPod, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs)
-					if pullErr == nil {
-						removeCephFSRejectOutput(cleanupPod)
-
-						if _, delErr := cleanupPod.Delete(); delErr != nil {
-							GinkgoWriter.Printf("Warning: delete injector pod: %v\n", delErr)
-						}
-					}
+					deleteInjectorPod(injectorPodName)
+					ensureCephFSRejectRulesCleared(targetNodeName)
 
 					By("DeferCleanup: force-removing StorageBasedRemediation CR if still present")
 
