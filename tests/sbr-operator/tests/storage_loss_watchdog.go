@@ -232,15 +232,12 @@ var _ = Describe(
 					"Failed to create injector pod on node %s", targetNodeName)
 
 				DeferCleanup(func() {
-					By("DeferCleanup: removing injector pod (iptables rules are cleared on reboot)")
+					By("DeferCleanup: removing injector pod and any surviving iptables rules")
 
-					if existing, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs); pullErr == nil {
-						// Best-effort: remove rules if node did not reboot; ignore errors.
-						// The injector image ships nsenter but not iptables, so the rules
-						// must be deleted on the host via nsenter (same path as injection).
-						removeCephFSRejectBidirectional(existing)
-						_, _ = existing.Delete()
-					}
+					// The reboot this spec triggers normally clears the rules, but it does not
+					// always happen: the sweep covers the case where the node stayed up.
+					deleteInjectorPod(injectorPodName)
+					ensureCephFSRejectRulesCleared(targetNodeName)
 				})
 
 				By("Injecting CephFS REJECT rules (INPUT + OUTPUT) on target node via nsenter")

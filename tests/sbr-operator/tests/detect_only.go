@@ -318,14 +318,8 @@ var _ = Describe(
 
 			By("AfterAll: flushing any remaining injector pod and iptables rules")
 
-			cleanupPod, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs)
-			if pullErr == nil {
-				removeCephFSRejectBidirectional(cleanupPod)
-
-				if _, delErr := cleanupPod.Delete(); delErr != nil && !k8serrors.IsNotFound(delErr) {
-					GinkgoWriter.Printf("Warning: delete injector pod %s: %v\n", injectorPodName, delErr)
-				}
-			}
+			deleteInjectorPod(injectorPodName)
+			ensureCephFSRejectRulesCleared(targetNodeName)
 
 			By("AfterAll: removing detect-only StorageBasedRemediationConfig")
 
@@ -475,14 +469,8 @@ var _ = Describe(
 				DeferCleanup(func() {
 					By("DeferCleanup: flushing iptables REJECT rules and deleting injector pod")
 
-					cleanupPod, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs)
-					if pullErr == nil {
-						removeCephFSRejectBidirectional(cleanupPod)
-
-						if _, delErr := cleanupPod.Delete(); delErr != nil && !k8serrors.IsNotFound(delErr) {
-							GinkgoWriter.Printf("Warning: delete injector pod %s: %v\n", injectorPodName, delErr)
-						}
-					}
+					deleteInjectorPod(injectorPodName)
+					ensureCephFSRejectRulesCleared(targetNodeName)
 
 					By("DeferCleanup: removing SBR CR for target node")
 

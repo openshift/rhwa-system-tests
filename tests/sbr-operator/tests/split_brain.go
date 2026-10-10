@@ -254,14 +254,8 @@ var _ = Describe(
 
 			By("AfterAll: ensuring injector pod iptables rules are removed")
 
-			cleanupPod, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs)
-			if pullErr == nil {
-				removeCephFSRejectBidirectional(cleanupPod)
-
-				if _, delErr := cleanupPod.Delete(); delErr != nil {
-					GinkgoWriter.Printf("Warning: delete injector pod in AfterAll: %v\n", delErr)
-				}
-			}
+			deleteInjectorPod(injectorPodName)
+			ensureCephFSRejectRulesCleared(targetNodeName)
 		})
 
 		It("Split-brain: only the storage-isolated node is fenced; healthy witnesses are untouched",
@@ -277,14 +271,8 @@ var _ = Describe(
 				DeferCleanup(func() {
 					By("DeferCleanup: removing iptables REJECT rules on target node")
 
-					cleanupPod, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs)
-					if pullErr == nil {
-						removeCephFSRejectBidirectional(cleanupPod)
-
-						if _, delErr := cleanupPod.Delete(); delErr != nil {
-							GinkgoWriter.Printf("Warning: delete injector pod: %v\n", delErr)
-						}
-					}
+					deleteInjectorPod(injectorPodName)
+					ensureCephFSRejectRulesCleared(targetNodeName)
 
 					By("DeferCleanup: force-removing SBR CRs for all involved nodes")
 
