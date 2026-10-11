@@ -287,7 +287,8 @@ var _ = Describe(
 
 				var annotationErrors []string
 
-				for annotationKey, expectedValue := range sbrparams.RequiredAnnotations {
+				for annotationKey, expectedValue := range medik8sparams.ExpectedCSVAnnotations(sbrparams.RequiredAnnotations,
+					sbrCSV.Object.Spec.Version.Major, sbrCSV.Object.Spec.Version.Minor) {
 					annotationValue, exists := sbrCSV.Object.Annotations[annotationKey]
 					if !exists {
 						annotationErrors = append(annotationErrors,

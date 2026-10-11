@@ -56,7 +56,7 @@ var (
 	}
 
 	// RequiredAnnotations defines the required annotations and their expected values for FAR CSV.
-	// The tls-profiles annotation is version-dependent and checked separately (see ExpectedTLSProfilesValue).
+	// The tls-profiles annotation is version-dependent and checked separately (see medik8sparams.ExpectedCSVAnnotations).
 	RequiredAnnotations = map[string]string{
 		"features.operators.openshift.io/disconnected":     "true",
 		"features.operators.openshift.io/fips-compliant":   "true",
@@ -70,22 +70,3 @@ var (
 		"operatorframework.io/suggested-namespace":         operatorNs,
 	}
 )
-
-const (
-	// TLSProfilesAnnotation is the CSV feature annotation advertising TLS security profile support.
-	TLSProfilesAnnotation = "features.operators.openshift.io/tls-profiles"
-
-	// TLSProfilesMinMajorVersion is the first FAR major version whose bundle sets tls-profiles to "true".
-	// Released 0.x bundles set it to "false". Upstream switched it to "true" before moving to 5.x versioning,
-	// so unreleased 0.x builds from that window are intentionally not handled.
-	TLSProfilesMinMajorVersion = 5
-)
-
-// ExpectedTLSProfilesValue returns the expected tls-profiles annotation value for a FAR CSV major version.
-func ExpectedTLSProfilesValue(major uint64) string {
-	if major >= TLSProfilesMinMajorVersion {
-		return "true"
-	}
-
-	return "false"
-}

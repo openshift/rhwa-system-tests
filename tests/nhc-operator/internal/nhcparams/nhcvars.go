@@ -33,8 +33,8 @@ var (
 	}
 
 	// RequiredAnnotations defines the required annotations and expected values for NHC CSV.
+	// tls-profiles is version-dependent and added by medik8sparams.ExpectedCSVAnnotations.
 	RequiredAnnotations = map[string]string{
-		"features.operators.openshift.io/tls-profiles":     "false",
 		"features.operators.openshift.io/disconnected":     "true",
 		"features.operators.openshift.io/fips-compliant":   "true",
 		"features.operators.openshift.io/proxy-aware":      "false",

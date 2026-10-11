@@ -180,7 +180,8 @@ var _ = Describe(
 
 					var annotationErrors []string
 
-					for annotationKey, expectedValue := range nhcparams.RequiredAnnotations {
+					for annotationKey, expectedValue := range medik8sparams.ExpectedCSVAnnotations(nhcparams.RequiredAnnotations,
+						nhcCSV.Object.Spec.Version.Major, nhcCSV.Object.Spec.Version.Minor) {
 						annotationValue, exists := annotations[annotationKey]
 						if !exists {
 							annotationErrors = append(annotationErrors,
