@@ -110,11 +110,9 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 			Expect(workerCount).To(BeNumerically(">=", minWorkersForEscalationTests),
 				"NHC escalation E2E tests require at least %d Ready workers", minWorkersForEscalationTests)
 
-			By("Pre-cleaning stale NHC CRs from previous interrupted runs")
+			By("Pre-cleaning stale NHC CRs from previous specs and interrupted runs")
 
-			for _, suffix := range []string{"-basic", "-stops", "-timeout"} {
-				cleanupNHCCR(ctx, nhcparams.NHCEscalationTestName+suffix)
-			}
+			sweepStaleTestNHCs(ctx, "Leftover test NHC CRs would own remediation CRs for the escalation target node")
 
 			By("Selecting target worker node")
 
@@ -148,6 +146,7 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
 				logNHCControllerState()
+				helpers.LogNodeState(ctx, APIClient, GinkgoWriter.Printf, targetWorkerName)
 			}
 		})
 

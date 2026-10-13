@@ -108,6 +108,49 @@ const (
 	// so healthy runs never wait this long.
 	SBRCReadyTimeout = 10 * time.Minute
 
+	// NHCCleanupTimeout bounds how long cleanup retries deleting an NHC CR. The NHC
+	// webhook admits the delete only after the NHC ends its remediation, which
+	// follows the node becoming healthy again once the injected fault is removed.
+	NHCCleanupTimeout = 5 * time.Minute
+
+	// ForceSBRCRCleanupTimeout bounds the Get/Update/Delete calls that force-remove a
+	// StorageBasedRemediation CR during cleanup.
+	ForceSBRCRCleanupTimeout = 1 * time.Minute
+
+	// NodeRestoreTimeout bounds the Node Get/Update calls that uncordon a node and
+	// remove its out-of-service taint after an SBR CR finalizer was force-stripped.
+	NodeRestoreTimeout = 1 * time.Minute
+
+	// ODFNamespace is the namespace of the ODF (Rook/Ceph) operators.
+	ODFNamespace = "openshift-storage"
+
+	// RookOperatorPodLabelSelector selects the Rook operator pod, which has the ceph CLI
+	// and the admin config used to clear stale ODF fences (DFBUGS-11731).
+	RookOperatorPodLabelSelector = "app=rook-ceph-operator"
+
+	// RookOperatorContainer is the container that runs ceph commands in the Rook operator pod.
+	RookOperatorContainer = "rook-ceph-operator"
+
+	// RookCephConfig is the admin config Rook writes for the openshift-storage cluster.
+	RookCephConfig = "/var/lib/rook/openshift-storage/openshift-storage.config"
+
+	// ODFAutoFenceExpiry is ceph-csi's AutoBlocklistTime: the expiry of the range blocklist
+	// entry it adds for a node with the out-of-service taint. The expiry is a heuristic;
+	// recovery also requires a completed test target and confirmed fault cleanup.
+	ODFAutoFenceExpiry = 94670856 * time.Second
+
+	// ODFAutoFenceCooldown matches ceph-csi's minimum age before automatic unfencing.
+	ODFAutoFenceCooldown = 5 * time.Minute
+
+	// StaleODFFenceMaxAge caps the inferred age of a recoverable test fence.
+	StaleODFFenceMaxAge = 6 * time.Hour
+
+	// StaleODFFenceRetryInterval throttles recovery checks during storage setup polling.
+	StaleODFFenceRetryInterval = 30 * time.Second
+
+	// StaleODFFenceTimeout bounds the ceph commands run to clear stale ODF fences.
+	StaleODFFenceTimeout = 1 * time.Minute
+
 	// SBRCReadyDiagMaxEvents caps how many recent Warning events are included in the on-timeout
 	// readiness diagnostics dumped by waitForSBRCReady, to keep the failure message readable.
 	SBRCReadyDiagMaxEvents = 15

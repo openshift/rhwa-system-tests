@@ -28,27 +28,6 @@ func buildWriteLossNHCUnstructured() *unstructured.Unstructured {
 	return buildNHC(sbrparams.NHCWriteLossTestName)
 }
 
-// getSBRCRConditionWrite returns the named status condition from an unstructured SBR CR, or nil.
-func getSBRCRConditionWrite(sbrObj *unstructured.Unstructured, condType string) map[string]interface{} {
-	conditions, found, err := unstructured.NestedSlice(sbrObj.Object, "status", "conditions")
-	if err != nil || !found {
-		return nil
-	}
-
-	for _, c := range conditions {
-		cond, ok := c.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		if cond["type"] == condType {
-			return cond
-		}
-	}
-
-	return nil
-}
-
 // getNodeConditionWrite fetches a named condition from a node's status.
 // Returns nil when the condition is not present or the node cannot be retrieved.
 func getNodeConditionWrite(ctx context.Context, nodeName, condType string) *corev1.NodeCondition {
@@ -87,6 +66,7 @@ var _ = Describe(
 			storageClass    string
 			injectorPodName string
 			injectorPod     *pod.Builder
+			rulesRemoved    bool
 		)
 
 		BeforeAll(func() {
@@ -229,6 +209,9 @@ var _ = Describe(
 		})
 
 		AfterAll(func() {
+			By("AfterAll: removing injected CephFS REJECT rules before deleting the NHC")
+			rulesRemoved = removeInjectedRejectRules(injectorPodName, removeCephFSRejectOutput)
+
 			By("AfterAll: deleting StorageBasedRemediationConfig")
 
 			if testSBRC != nil {
@@ -260,7 +243,7 @@ var _ = Describe(
 			By("AfterAll: force-removing any leftover StorageBasedRemediation CR")
 
 			if targetNodeName != "" {
-				cleanupSBRCR(targetNodeName)
+				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 		})
 
@@ -315,7 +298,9 @@ var _ = Describe(
 					}
 
 					if injectorPod != nil {
-						removeCephFSRejectOutput(injectorPod)
+						if !rulesRemoved {
+							rulesRemoved = removeInjectedRejectRules(injectorPod.Definition.Name, removeCephFSRejectOutput)
+						}
 
 						if _, delErr := injectorPod.Delete(); delErr != nil {
 							GinkgoWriter.Printf("Warning: delete injector pod: %v\n", delErr)
@@ -324,7 +309,7 @@ var _ = Describe(
 
 					By("DeferCleanup: force-removing StorageBasedRemediation CR if still present")
 
-					cleanupSBRCR(targetNodeName)
+					cleanupSBRCR(context.Background(), targetNodeName)
 
 					By("DeferCleanup: waiting for node to become schedulable after CR cleanup")
 
@@ -396,44 +381,30 @@ var _ = Describe(
 					"Node %q must reach %s=True after write-path storage injection",
 					targetNodeName, sbrparams.SBRStorageUnhealthyCondition)
 
-				By(fmt.Sprintf("Waiting for NHC to create StorageBasedRemediation CR for node %q",
-					targetNodeName))
+				By(fmt.Sprintf("Waiting for NHC to create StorageBasedRemediation CR for node %q "+
+					"and for FencingSucceeded=True on it", targetNodeName))
+
+				// The SBR agents fence as soon as the CR exists and NHC deletes it seconds later,
+				// long before the node is Ready again, so FencingSucceeded must be observed now.
+
+				sbrObserver := &sbrCRObserver{nodeName: targetNodeName}
+				Eventually(sbrObserver.crFenced, sbrparams.NHCSBRCRCreationTimeout,
+					sbrparams.DefaultPollInterval).Should(Succeed(),
+					"NHC must create StorageBasedRemediation CR for node %q and it must reach FencingSucceeded=True",
+					targetNodeName)
+				GinkgoWriter.Printf("StorageBasedRemediation/%s (uid %s) created by NHC and FencingSucceeded=True\n",
+					targetNodeName, sbrObserver.uid)
+
+				By(fmt.Sprintf("Waiting for node %q to reboot (NotReady or boot ID change) "+
+					"after self-fencing via fence-message-read path", targetNodeName))
 
 				Eventually(func() error {
-					_, getErr := pullSBRCR(targetNodeName)
-					if k8serrors.IsNotFound(getErr) {
-						return fmt.Errorf("StorageBasedRemediation/%s not yet created by NHC", targetNodeName)
-					}
-
-					return getErr
-				}, sbrparams.NHCSBRCRCreationTimeout, sbrparams.NHCSBRCRCreationPollInterval).Should(Succeed(),
-					"NHC must create StorageBasedRemediation CR for node %q within timeout", targetNodeName)
-
-				GinkgoWriter.Printf("StorageBasedRemediation CR for node %q created by NHC\n", targetNodeName)
-
-				By(fmt.Sprintf("Waiting for node %q to go NotReady "+
-					"(self-fencing via fence-message-read path)", targetNodeName))
-
-				Eventually(func() error {
-					node, nodeGetErr := APIClient.CoreV1Interface.Nodes().Get(
-						context.TODO(), targetNodeName, metav1.GetOptions{})
-					if nodeGetErr != nil {
-						return nodeGetErr
-					}
-
-					for _, cond := range node.Status.Conditions {
-						if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-							return nil
-						}
-					}
-
-					return fmt.Errorf("node %s is still Ready; waiting for NotReady after fence-message-read",
-						targetNodeName)
+					return nodeRebootStarted(targetNodeName, preRebootBootID)
 				}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).Should(Succeed(),
-					"Node %q must become NotReady when it self-fences after reading the fence message",
+					"Node %q must reboot when it self-fences after reading the fence message",
 					targetNodeName)
 
-				GinkgoWriter.Printf("Node %q is NotReady — fence-message-read reboot in progress\n",
+				GinkgoWriter.Printf("Node %q is NotReady or already rebooted — fence-message-read reboot\n",
 					targetNodeName)
 
 				By(fmt.Sprintf("Waiting for node %q to return Ready after reboot", targetNodeName))
@@ -475,61 +446,12 @@ var _ = Describe(
 				GinkgoWriter.Printf("Boot ID changed on node %q: %q to %q\n",
 					targetNodeName, preRebootBootID, postRebootBootID)
 
-				By("Waiting for FencingSucceeded=True on the StorageBasedRemediation CR")
+				By("Waiting for the fenced StorageBasedRemediation CR to be deleted (controller cleanup)")
 
-				var fencingObserved bool
-
-				Eventually(func() error {
-					sbrObj, getErr := pullSBRCR(targetNodeName)
-					if k8serrors.IsNotFound(getErr) {
-						if fencingObserved {
-							return nil // CR cleaned up after confirmed fencing
-						}
-
-						return fmt.Errorf(
-							"StorageBasedRemediation/%s already gone before FencingSucceeded=True was observed",
-							targetNodeName)
-					}
-
-					if getErr != nil {
-						return getErr
-					}
-
-					cond := getSBRCRConditionWrite(sbrObj, "FencingSucceeded")
-					if cond == nil {
-						return fmt.Errorf("StorageBasedRemediation/%s: FencingSucceeded condition not present",
-							targetNodeName)
-					}
-
-					if cond["status"] != "True" {
-						return fmt.Errorf("StorageBasedRemediation/%s: FencingSucceeded=%v, want True",
-							targetNodeName, cond["status"])
-					}
-
-					fencingObserved = true
-
-					return nil
-				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"StorageBasedRemediation/%s must reach FencingSucceeded=True", targetNodeName)
-
-				By("Waiting for the SBR CR to be deleted (controller cleanup after successful fencing)")
-
-				Eventually(func() error {
-					_, getErr := pullSBRCR(targetNodeName)
-					if k8serrors.IsNotFound(getErr) {
-						return nil
-					}
-
-					if getErr != nil {
-						return getErr
-					}
-
-					return fmt.Errorf("StorageBasedRemediation/%s still exists; waiting for controller cleanup",
-						targetNodeName)
-				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"StorageBasedRemediation/%s must be deleted by controller after successful fencing",
-					targetNodeName)
-
+				Eventually(sbrObserver.crRemoved, medik8sparams.DefaultTimeout,
+					sbrparams.DefaultPollInterval).Should(Succeed(),
+					"StorageBasedRemediation/%s (uid %s) must be deleted after successful fencing",
+					targetNodeName, sbrObserver.uid)
 				GinkgoWriter.Printf("Write-only storage loss (fence-message-read) fencing completed "+
 					"successfully for node %q\n", targetNodeName)
 			})

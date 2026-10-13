@@ -547,6 +547,8 @@ func waitForSBRCReady(sbrcName string) {
 	dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrcName
 
 	Eventually(func() error {
+		// Recovery is throttled and restricted to completed earlier fault specs.
+		clearStaleODFFences()
 		agentDS, err := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
 			context.TODO(), dsName, metav1.GetOptions{})
 		if err != nil {
@@ -664,6 +666,14 @@ func agentPodDiagnostics(ctx context.Context, namespace, dsName, podSelector str
 
 		for _, ctrStatus := range agentPod.Status.ContainerStatuses {
 			report.WriteString("  " + containerStateSummary(ctrStatus))
+		}
+
+		// A cordoned or out-of-service-tainted node (for example after a forced
+		// SBR CR cleanup) keeps the agent pod and its CSI mount from starting.
+		if agentPod.Status.Phase != corev1.PodRunning {
+			helpers.LogNodeState(ctx, APIClient, func(format string, args ...interface{}) {
+				fmt.Fprintf(&report, "  "+format, args...)
+			}, agentPod.Spec.NodeName)
 		}
 	}
 
