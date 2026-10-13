@@ -251,7 +251,7 @@ var _ = Describe(
 			By("AfterAll: force-removing any leftover StorageBasedRemediation CR")
 
 			if targetNodeName != "" {
-				cleanupSBRCR(targetNodeName)
+				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 
 			By("AfterAll: removing injector pod if still present")
@@ -292,7 +292,7 @@ var _ = Describe(
 
 					By("DeferCleanup: force-removing StorageBasedRemediation CR if still present")
 
-					cleanupSBRCR(targetNodeName)
+					cleanupSBRCR(context.Background(), targetNodeName)
 				})
 
 				By("Recording pre-injection BootID (baseline before watchdog reboot)")

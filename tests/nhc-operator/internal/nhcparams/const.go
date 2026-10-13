@@ -43,6 +43,10 @@ const (
 	// SNRDaemonSetName is the node-agent DaemonSet that performs self-remediation.
 	SNRDaemonSetName = "self-node-remediation-ds"
 
+	// TestNHCNamePrefix is the name prefix shared by NHC CRs created by these
+	// tests; destructive specs delete any leftover CR with this prefix first.
+	TestNHCNamePrefix = "nhc-test-"
+
 	// NHCTestName is the NHC CR name used in remediation trigger tests.
 	// In multi-CR tests, this is the slower/standard-duration NHC.
 	// Named "nhc-test-b-*" so it sorts AFTER the short-duration NHC
@@ -91,6 +95,10 @@ const (
 
 	// RemediationCRDeletionTimeout is the timeout for retry-safe CR deletion.
 	RemediationCRDeletionTimeout = 5 * time.Minute
+
+	// StaleNHCListTimeout bounds the retried List of leftover test NHC CRs, so a
+	// transient API error after an earlier destructive spec does not fail setup.
+	StaleNHCListTimeout = 1 * time.Minute
 
 	// NHCPhaseEnabled is the NHC status phase when healthy.
 	NHCPhaseEnabled = "Enabled"

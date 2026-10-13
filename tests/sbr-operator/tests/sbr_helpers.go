@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -315,15 +316,21 @@ func buildNHC(name string) *unstructured.Unstructured {
 	}
 }
 
-// cleanupNHCCR deletes the named NodeHealthCheck CR. Safe to call when CR may not exist.
-func cleanupNHCCR(name string) {
-	nhc := &unstructured.Unstructured{}
-	nhc.SetAPIVersion(sbrparams.NHCAPIGroup + "/" + sbrparams.NHCAPIVersion)
-	nhc.SetKind("NodeHealthCheck")
-	nhc.SetName(name)
-	err := APIClient.Delete(context.TODO(), nhc)
-	if err != nil && !k8serrors.IsNotFound(err) {
-		GinkgoT().Logf("Warning: cleanup NHC %s: %v", name, err)
+// cleanupNHCCR deletes the named NodeHealthCheck CR, retrying until it is gone.
+// The NHC webhook rejects deletion while the NHC has an ongoing remediation, so
+// call this after the injected storage fault is removed; NHC then ends the
+// remediation (deleting the SBR CR through the agent finalizer) and the delete
+// is admitted. Safe to call when the CR may not exist. A CR that is still present
+// after the timeout is recorded as a report entry.
+func cleanupNHCCR(ctx context.Context, name string) {
+	nhcGVK := schema.GroupVersionKind{
+		Group: sbrparams.NHCAPIGroup, Version: sbrparams.NHCAPIVersion, Kind: "NodeHealthCheck",
+	}
+	gone := helpers.DeleteRemediationCR(ctx, APIClient, nhcGVK, name, "",
+		sbrparams.DefaultPollInterval, sbrparams.NHCCleanupTimeout, GinkgoWriter.Printf)
+	if !gone {
+		AddReportEntry("sbr-nhc-cleanup-failed",
+			fmt.Sprintf("NodeHealthCheck %s still exists and may remediate nodes in later specs", name))
 	}
 }
 

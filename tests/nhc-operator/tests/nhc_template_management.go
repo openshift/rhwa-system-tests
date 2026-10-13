@@ -173,7 +173,14 @@ var _ = Describe("NHC Template Management -- Custom Remediation",
 		JustAfterEach(func() {
 			if CurrentSpecReport().Failed() {
 				logNHCControllerState()
+				helpers.LogNodeState(ctx, APIClient, GinkgoWriter.Printf, targetWorkerName)
 			}
+
+			// The NHC webhook rejects deleting an NHC while it has an ongoing
+			// remediation, so recover the node before deleting the NHC CR.
+			// Deleting first leaves a stale NHC that owns remediation CRs for
+			// other nodes in later specs.
+			defer cleanupNHCCR(ctx, nhcparams.NHCCustomTemplateTestName)
 
 			if targetWorkerName == "" {
 				return
@@ -202,8 +209,6 @@ var _ = Describe("NHC Template Management -- Custom Remediation",
 				AddReportEntry("safety-net-recovery-failed",
 					fmt.Sprintf("node %s did not recover: %v", targetWorkerName, err))
 			}
-
-			cleanupNHCCR(ctx, nhcparams.NHCCustomTemplateTestName)
 		})
 
 		It("Verifying NHC triggers remediation with custom TestRemediationTemplate (TRT)",

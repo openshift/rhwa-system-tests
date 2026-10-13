@@ -171,13 +171,13 @@ var _ = Describe(
 			if nhcCreatedByTest {
 				By("AfterAll: removing NodeHealthCheck CR created by this test")
 
-				cleanupNHCCR(sbrparams.NHCSBRTestName)
+				cleanupNHCCR(context.Background(), sbrparams.NHCSBRTestName)
 			}
 
 			By("AfterAll: force-deleting any leftover StorageBasedRemediation CRs")
 
 			if targetNodeName != "" {
-				cleanupSBRCR(targetNodeName)
+				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 		})
 
