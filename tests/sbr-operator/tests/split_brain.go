@@ -261,6 +261,9 @@ var _ = Describe(
 				if _, delErr := cleanupPod.Delete(); delErr != nil {
 					GinkgoWriter.Printf("Warning: delete injector pod in AfterAll: %v\n", delErr)
 				}
+
+				By("AfterAll: removing the injector image from the fenced target node")
+				purgeInjectorImageAfterReboot(targetNodeName)
 			}
 		})
 

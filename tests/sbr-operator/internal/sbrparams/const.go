@@ -178,6 +178,15 @@ const (
 	// NodeRebootPollInterval is the polling interval while waiting for a node to become NotReady then Ready.
 	NodeRebootPollInterval = 15 * time.Second
 
+	// NodeHangPanicRebootDelaySeconds is the kernel.panic value set before the node-hang crash.
+	// The panicked kernel waits this long before rebooting, so the node stays NotReady well past
+	// the node-monitor grace period plus the 60s NHC unhealthy duration. With the RHCOS default,
+	// an AWS node is Ready again in under a minute and NHC never creates a remediation.
+	NodeHangPanicRebootDelaySeconds = 180
+
+	// CrioCleanupTimeout bounds the oc debug call that removes the injector image from a rebooted node.
+	CrioCleanupTimeout = 2 * time.Minute
+
 	// SplitBrainHealthyNodeCheckDuration is how long to Consistently assert no SBR CR exists for healthy nodes.
 	SplitBrainHealthyNodeCheckDuration = 60 * time.Second
 

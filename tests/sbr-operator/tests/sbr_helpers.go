@@ -38,6 +38,28 @@ func getNodeBootID(nodeName string) (string, error) {
 	return bootID, nil
 }
 
+// nodeRebootStarted returns nil once the node is NotReady or its bootID differs from preBootID.
+// A fast reboot (e.g. on AWS) can finish inside the node-monitor grace period, so the node
+// never reports NotReady; the changed bootID is then the only evidence that it rebooted.
+func nodeRebootStarted(nodeName, preBootID string) error {
+	node, err := APIClient.CoreV1Interface.Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get node %s: %w", nodeName, err)
+	}
+
+	if bootID := node.Status.NodeInfo.BootID; bootID != "" && bootID != preBootID {
+		return nil
+	}
+
+	for _, cond := range node.Status.Conditions {
+		if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("node %s is still Ready with boot ID %s; waiting for reboot", nodeName, preBootID)
+}
+
 // cephFSRejectBidirectional defines nsenter + iptables REJECT rules for both INPUT and OUTPUT
 // chains covering all CephFS port groups: 3300 (msgr2), 6789 (msgr1 mon), 6800-7300 (OSD/MDS).
 var cephFSRejectBidirectional = [][]string{
@@ -356,6 +378,88 @@ func pickTargetWorkerNode() string {
 	}
 
 	return ""
+}
+
+// purgeInjectorImageAfterReboot removes the injector image from a node that was hard-rebooted.
+// An unclean reboot can corrupt the image's CRI-O overlay links, after which every new
+// container from that image fails with "readlink .../overlay/l: invalid argument" while the
+// node still reports Ready. Removing the image forces a clean pull for the next spec.
+// Containers still using the image (for example an injector pod whose container is being
+// restarted after the reboot) are removed first, since crictl rmi refuses an image in use.
+// Best effort: failures are logged, not asserted.
+func purgeInjectorImageAfterReboot(nodeName string) {
+	GinkgoWriter.Printf("Removing injector image %s from node %s to drop overlay layers written before the reboot\n",
+		sbrparams.InjectorImage, nodeName)
+	output, err := helpers.RunOnNode(context.Background(), nodeName, sbrparams.CrioCleanupTimeout,
+		"bash", "-c", fmt.Sprintf(
+			"crictl ps -a -q --image %[1]s | xargs -r crictl rm -f; crictl rmi %[1]s 2>/dev/null; echo done",
+			sbrparams.InjectorImage))
+	if err != nil {
+		GinkgoWriter.Printf("WARNING: injector image removal on node %s failed: %v (output: %s)\n",
+			nodeName, err, output)
+
+		return
+	}
+
+	GinkgoWriter.Printf("Injector image removed from node %s (output: %s)\n", nodeName, output)
+}
+
+// sbrCRObserver records the lifecycle of the StorageBasedRemediation CR for one node.
+// NHC deletes the CR as soon as the node is healthy again, so a fast reboot can complete the
+// whole remediation while the test waits for the node. Calling observe() inside every wait
+// loop captures the CR and its FencingSucceeded condition before that cleanup.
+type sbrCRObserver struct {
+	nodeName string
+	seen     bool
+	fenced   bool
+}
+
+// observe pulls the CR once and records whether it exists and whether fencing succeeded.
+// It returns the pull error so callers can tell NotFound from a transient API failure.
+func (o *sbrCRObserver) observe() error {
+	sbrCR, err := pullSBRCR(o.nodeName)
+	if err != nil {
+		return err
+	}
+
+	o.seen = true
+	cond := getSBRCRCondition(sbrCR, sbrparams.FencingSucceededCondition)
+	if cond != nil && cond["status"] == string(corev1.ConditionTrue) {
+		o.fenced = true
+	}
+
+	return nil
+}
+
+// crCreated is an Eventually body: nil once the CR has been observed.
+func (o *sbrCRObserver) crCreated() error {
+	if err := o.observe(); err != nil && !k8serrors.IsNotFound(err) {
+		return err
+	}
+
+	if o.seen {
+		return nil
+	}
+
+	return fmt.Errorf("StorageBasedRemediation/%s not yet created by NHC", o.nodeName)
+}
+
+// fencingSucceeded is an Eventually body: nil once FencingSucceeded=True was observed.
+// It stops retrying when the CR is gone without that observation.
+func (o *sbrCRObserver) fencingSucceeded() error {
+	wasSeen := o.seen
+	err := o.observe()
+
+	if o.fenced {
+		return nil
+	}
+
+	if k8serrors.IsNotFound(err) && wasSeen {
+		return StopTrying(fmt.Sprintf(
+			"StorageBasedRemediation/%s was removed before FencingSucceeded=True was observed", o.nodeName))
+	}
+
+	return fmt.Errorf("StorageBasedRemediation/%s: FencingSucceeded=True not observed yet", o.nodeName)
 }
 
 // getSBRCRCondition returns the named status condition from an unstructured SBR CR, or nil.

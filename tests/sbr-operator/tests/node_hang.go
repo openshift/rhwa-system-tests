@@ -15,7 +15,6 @@ import (
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
-	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -248,6 +247,9 @@ var _ = Describe(
 			if targetNodeName != "" {
 				By("Force-deleting any leftover StorageBasedRemediation CR for target node")
 				cleanupSBRCR(context.Background(), targetNodeName)
+
+				By("AfterAll: removing the injector image from the rebooted target node")
+				purgeInjectorImageAfterReboot(targetNodeName)
 			}
 		})
 
@@ -300,12 +302,19 @@ var _ = Describe(
 
 				if sysrqAvailable {
 					By("Triggering kernel panic via sysrq-trigger (primary path)")
-					GinkgoWriter.Printf("Executing kernel panic on node %s via sysrq\n", targetNodeName)
+					GinkgoWriter.Printf("Executing kernel panic on node %s via sysrq (reboot delayed %ds)\n",
+						targetNodeName, sbrparams.NodeHangPanicRebootDelaySeconds)
 
-					// Fire-and-forget: exec will fail because the node reboots immediately.
+					// Fire-and-forget: exec fails because the node panics.
+					// sync + sysrq-s flush dirty pages first; an unflushed crash corrupts CRI-O
+					// overlay links and breaks every later pod on this node.
+					// kernel.panic delays the automatic reboot so the node stays NotReady long
+					// enough for NHC (60s unhealthy duration) to create a remediation.
 					_, _ = injectorPod.ExecCommand([]string{
 						"nsenter", "-t", "1", "--pid", "--mount", "--", "sh", "-c",
-						"echo 1 > /proc/sys/kernel/sysrq && echo c > /proc/sysrq-trigger",
+						fmt.Sprintf("echo 1 > /proc/sys/kernel/sysrq && sync && echo s > /proc/sysrq-trigger && "+
+							"sleep 2 && echo %d > /proc/sys/kernel/panic && echo c > /proc/sysrq-trigger",
+							sbrparams.NodeHangPanicRebootDelaySeconds),
 					})
 				} else {
 					By("Triggering node hang via iptables DROP-all (fallback - sysrq not available)")
@@ -324,32 +333,27 @@ var _ = Describe(
 					})
 				}
 
-				By(fmt.Sprintf("Waiting for node %s to become NotReady (timeout %s)",
+				By(fmt.Sprintf("Waiting for node %s to reboot (NotReady or boot ID change, timeout %s)",
 					targetNodeName, sbrparams.NodeRebootTimeout))
 
+				// NHC deletes the CR once the node is healthy again, so sample it during every
+				// wait instead of only after the node is Ready.
+				sbrObserver := &sbrCRObserver{nodeName: targetNodeName}
+
 				Eventually(func() error {
-					node, nodeErr := APIClient.CoreV1Interface.Nodes().Get(
-						context.TODO(), targetNodeName, metav1.GetOptions{})
-					if nodeErr != nil {
-						return fmt.Errorf("get node %s: %w", targetNodeName, nodeErr)
-					}
+					_ = sbrObserver.observe()
 
-					for _, cond := range node.Status.Conditions {
-						if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-							return nil
-						}
-					}
-
-					return fmt.Errorf("node %s is still Ready", targetNodeName)
+					return nodeRebootStarted(targetNodeName, preCrashBootID)
 				}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).Should(Succeed(),
-					"Node %s must transition to NotReady after crash trigger", targetNodeName)
+					"Node %s must reboot after crash trigger", targetNodeName)
 
-				GinkgoWriter.Printf("Node %s is NotReady\n", targetNodeName)
+				GinkgoWriter.Printf("Node %s is NotReady or already rebooted\n", targetNodeName)
 
 				By(fmt.Sprintf("Waiting for node %s to recover and return Ready (timeout %s)",
 					targetNodeName, sbrparams.NodeRebootTimeout))
 
 				Eventually(func() error {
+					_ = sbrObserver.observe()
 					node, nodeErr := APIClient.CoreV1Interface.Nodes().Get(
 						context.TODO(), targetNodeName, metav1.GetOptions{})
 					if nodeErr != nil {
@@ -376,67 +380,20 @@ var _ = Describe(
 					targetNodeName, preCrashBootID)
 				GinkgoWriter.Printf("Boot-id changed: %q -> %q\n", preCrashBootID, postCrashBootID)
 
-				By("Waiting for NHC to create a StorageBasedRemediation CR for the target node")
+				By("Waiting for NHC to have created a StorageBasedRemediation CR for the target node")
 
-				Eventually(func() error {
-					_, pullErr := pullSBRCR(targetNodeName)
-
-					if k8serrors.IsNotFound(pullErr) {
-						return fmt.Errorf("StorageBasedRemediation/%s not yet created by NHC", targetNodeName)
-					}
-
-					return pullErr
-				}, sbrparams.NHCSBRCRCreationTimeout, sbrparams.NHCSBRCRCreationPollInterval).Should(Succeed(),
+				Eventually(sbrObserver.crCreated, sbrparams.NHCSBRCRCreationTimeout,
+					sbrparams.NHCSBRCRCreationPollInterval).Should(Succeed(),
 					"NHC must create StorageBasedRemediation CR for node %s within %s",
 					targetNodeName, sbrparams.NHCSBRCRCreationTimeout)
+				GinkgoWriter.Printf("StorageBasedRemediation/%s observed\n", targetNodeName)
 
-				GinkgoWriter.Printf("StorageBasedRemediation/%s found\n", targetNodeName)
+				By("Verifying FencingSucceeded=True was set on the StorageBasedRemediation CR")
 
-				By("Waiting for FencingSucceeded=True on the StorageBasedRemediation CR")
-
-				var fencingObserved bool
-
-				Eventually(func() error {
-					sbrCR, pullErr := pullSBRCR(targetNodeName)
-					if pullErr != nil {
-						if k8serrors.IsNotFound(pullErr) {
-							if fencingObserved {
-								return nil // CR cleaned up after confirmed fencing
-							}
-
-							return fmt.Errorf(
-								"StorageBasedRemediation/%s gone before FencingSucceeded=True was observed",
-								targetNodeName)
-						}
-
-						return fmt.Errorf("get StorageBasedRemediation/%s: %w", targetNodeName, pullErr)
-					}
-
-					conditions, _, _ := unstructured.NestedSlice(sbrCR.Object, "status", "conditions")
-
-					for _, raw := range conditions {
-						cond, ok := raw.(map[string]interface{})
-						if !ok {
-							continue
-						}
-
-						condType, _, _ := unstructured.NestedString(cond, "type")
-						condStatus, _, _ := unstructured.NestedString(cond, "status")
-
-						if condType == sbrparams.FencingSucceededCondition && condStatus == string(corev1.ConditionTrue) {
-							fencingObserved = true
-
-							return nil
-						}
-					}
-
-					return fmt.Errorf(
-						"StorageBasedRemediation/%s: %s not True yet; conditions: %v",
-						targetNodeName, sbrparams.FencingSucceededCondition, conditions)
-				}, sbrparams.SBRCRCleanupTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+				Eventually(sbrObserver.fencingSucceeded, sbrparams.SBRCRCleanupTimeout,
+					sbrparams.DefaultPollInterval).Should(Succeed(),
 					"StorageBasedRemediation/%s must reach %s=True",
 					targetNodeName, sbrparams.FencingSucceededCondition)
-
 				GinkgoWriter.Printf("FencingSucceeded=True on StorageBasedRemediation/%s\n", targetNodeName)
 
 				By("Waiting for the StorageBasedRemediation CR to be cleaned up")
