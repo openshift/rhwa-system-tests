@@ -257,3 +257,23 @@ lifecycle test (OCP-70636).
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="sbr" --focus="controller leadership" ./tests/sbr-operator/...`
 - **Pass criteria**: Lease `holderIdentity` changes to a different Running controller pod; deployment returns to full ready replicas
+
+### 12. Verify SBR Heartbeat Stability Under Node Load on Ceph RBD ([RHWA-1917](https://issues.redhat.com/browse/RHWA-1917))
+
+Validates that node CPU and disk load does not trip SBR's heartbeat when the configured
+`sbrTimeoutSeconds` is at the CRD minimum. The test runs an SBRC on Ceph RBD in Block mode,
+samples each agent's metrics across baseline, loaded, and recovery phases with a load DaemonSet
+on every worker, and checks that no device I/O errors are recorded and no node is marked
+unhealthy.
+
+Latency thresholds exist in the code but are inert — the agent exposes no heartbeat latency
+histogram, so the effective assertions are the I/O error count and the absence of a false
+`SBRStorageUnhealthy` condition. Full specification:
+[`../../docs/TESTCASES/rhwa-1917.md`](../../docs/TESTCASES/rhwa-1917.md).
+
+- **Operators**: SBR v0.3.0
+- **Cluster**: At least 2 worker nodes with agent pods Running
+- **Storage**: Ceph RBD block StorageClass (provisioner containing `rbd.csi.ceph.com`), auto-discovered or set with `SBR_RBD_STORAGE_CLASS`
+- **Environment**: Connected — the load pods pull `registry.fedoraproject.org/fedora:latest`. Non-destructive, but every worker is loaded for the duration of the run
+- **Standalone**: `ginkgo -v --focus="cephrbd perf" --timeout=30m ./tests/sbr-operator/`
+- **Pass criteria**: Zero `sbr_device_io_errors_total` across all three phases; no worker carries the `SBRStorageUnhealthy` condition; JSON report written to `ARTIFACT_DIR`; SBRC, load DaemonSet, ServiceAccount, and ClusterRoleBinding all cleaned up
