@@ -186,6 +186,19 @@ var _ = Describe(
 		})
 
 		AfterAll(func() {
+			// Remove the injected fault first: the NHC webhook refuses to delete an NHC
+			// while the fault keeps its remediation running.
+			By("AfterAll: ensuring injector pod iptables rules are removed")
+
+			cleanupPod, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs)
+			if pullErr == nil {
+				removeCephFSRejectBidirectional(cleanupPod)
+
+				if _, delErr := cleanupPod.Delete(); delErr != nil {
+					GinkgoWriter.Printf("Warning: delete injector pod in AfterAll: %v\n", delErr)
+				}
+			}
+
 			By("AfterAll: deleting StorageBasedRemediationConfig")
 
 			if testSBRC != nil {
@@ -249,18 +262,7 @@ var _ = Describe(
 					continue
 				}
 
-				cleanupSBRCR(nodeName)
-			}
-
-			By("AfterAll: ensuring injector pod iptables rules are removed")
-
-			cleanupPod, pullErr := pod.Pull(APIClient, injectorPodName, medik8sparams.OperatorNs)
-			if pullErr == nil {
-				removeCephFSRejectBidirectional(cleanupPod)
-
-				if _, delErr := cleanupPod.Delete(); delErr != nil {
-					GinkgoWriter.Printf("Warning: delete injector pod in AfterAll: %v\n", delErr)
-				}
+				cleanupSBRCR(context.Background(), nodeName)
 			}
 		})
 
@@ -290,7 +292,7 @@ var _ = Describe(
 
 					allNodes := append([]string{targetNodeName}, healthyNodes...)
 					for _, nodeName := range allNodes {
-						cleanupSBRCR(nodeName)
+						cleanupSBRCR(context.Background(), nodeName)
 					}
 				})
 

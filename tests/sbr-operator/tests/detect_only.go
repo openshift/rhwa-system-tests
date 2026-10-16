@@ -347,6 +347,8 @@ var _ = Describe(
 			dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrparams.SBRCDetectOnlyTestName
 
 			Eventually(func() error {
+				clearStaleODFFences()
+
 				return detectOnlyAgentPodsRunning(dsName)
 			}, sbrparams.SBRCReadyTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
 				func() string {

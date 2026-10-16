@@ -45,6 +45,7 @@ var _ = Describe(
 			testSBRC         *unstructured.Unstructured
 			nhcCreatedByTest bool
 			bootIDBeforeTest string
+			injectionStarted bool
 		)
 
 		BeforeAll(func() {
@@ -135,6 +136,11 @@ var _ = Describe(
 		})
 
 		AfterAll(func() {
+			By("AfterAll: removing injected CephFS REJECT rules before deleting the NHC")
+			if injectionStarted {
+				removeInjectedRejectRules(sbrparams.InjectorPodName+"-88880", removeCephFSRejectBidirectional)
+			}
+
 			By("AfterAll: removing StorageBasedRemediationConfig")
 
 			if testSBRC != nil {
@@ -171,13 +177,13 @@ var _ = Describe(
 			if nhcCreatedByTest {
 				By("AfterAll: removing NodeHealthCheck CR created by this test")
 
-				cleanupNHCCR(sbrparams.NHCSBRTestName)
+				cleanupNHCCR(context.Background(), sbrparams.NHCSBRTestName)
 			}
 
 			By("AfterAll: force-deleting any leftover StorageBasedRemediation CRs")
 
 			if targetNodeName != "" {
-				cleanupSBRCR(targetNodeName)
+				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 		})
 
@@ -248,6 +254,7 @@ var _ = Describe(
 				// The injector image ships nsenter but not iptables, so iptables must run
 				// on the host via nsenter (--target 1 --net --mount), not inside the
 				// container. This reuses the same helper as the other injection specs.
+				injectionStarted = true
 				injectCephFSRejectBidirectional(injectorPod, targetNodeName)
 				GinkgoWriter.Printf("CephFS REJECT rules injected on node %s\n", targetNodeName)
 
