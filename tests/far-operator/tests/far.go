@@ -114,7 +114,10 @@ var _ = Describe(
 
 				var annotationErrors []string
 
-				for annotationKey, expectedValue := range farparams.RequiredAnnotations {
+				expectedAnnotations := medik8sparams.ExpectedCSVAnnotations(farparams.RequiredAnnotations,
+					farCSV.Object.Spec.Version.Major, farCSV.Object.Spec.Version.Minor)
+
+				for annotationKey, expectedValue := range expectedAnnotations {
 					annotationValue, exists := farCSV.Object.Annotations[annotationKey]
 					if !exists {
 						annotationErrors = append(annotationErrors,

@@ -132,7 +132,8 @@ var _ = Describe(
 
 				var annotationErrors []string
 
-				for annotationKey, expectedValue := range nmoparams.RequiredAnnotations {
+				for annotationKey, expectedValue := range medik8sparams.ExpectedCSVAnnotations(nmoparams.RequiredAnnotations,
+					nmoCSV.Object.Spec.Version.Major, nmoCSV.Object.Spec.Version.Minor) {
 					annotationValue, exists := nmoCSV.Object.Annotations[annotationKey]
 					if !exists {
 						annotationErrors = append(annotationErrors,

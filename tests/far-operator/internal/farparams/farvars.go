@@ -56,8 +56,8 @@ var (
 	}
 
 	// RequiredAnnotations defines the required annotations and their expected values for FAR CSV.
+	// The tls-profiles annotation is version-dependent and checked separately (see medik8sparams.ExpectedCSVAnnotations).
 	RequiredAnnotations = map[string]string{
-		"features.operators.openshift.io/tls-profiles":     "false",
 		"features.operators.openshift.io/disconnected":     "true",
 		"features.operators.openshift.io/fips-compliant":   "true",
 		"features.operators.openshift.io/proxy-aware":      "false",

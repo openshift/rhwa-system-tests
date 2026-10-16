@@ -69,8 +69,9 @@ const (
 	// NodeReadyTimeout is how long to wait for a node to become Ready after reboot.
 	NodeReadyTimeout = 10 * time.Minute
 
-	// NodeRebootTimeout is how long to wait for a node reboot to complete.
-	NodeRebootTimeout = 6 * time.Minute
+	// NodeRebootTimeout is how long to wait for a node reboot to complete. It covers fence agent
+	// retries (each attempt can hit the agent timeout) plus a cloud stop/start cycle.
+	NodeRebootTimeout = 10 * time.Minute
 
 	// OcDebugTimeout is the timeout for oc debug node commands.
 	OcDebugTimeout = 60 * time.Second
