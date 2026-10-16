@@ -371,3 +371,20 @@ func getSBRCRCondition(sbrObj *unstructured.Unstructured, condType string) map[s
 
 	return nil
 }
+
+// agentPodCountMatchesWorkerCount reports whether the number of running SBR agent
+// pods equals the worker node count. It returns the result along with the actual and
+// expected counts so the caller can assert and compose its own failure message.
+// No assertion happens here, so it is safe to call inside Eventually.
+func agentPodCountMatchesWorkerCount() (match bool, actual, expected int, err error) {
+	agentPods, err := pod.List(APIClient, medik8sparams.OperatorNs,
+		metav1.ListOptions{LabelSelector: sbrparams.AgentPodLabelSelector})
+	if err != nil {
+		return false, 0, 0, err
+	}
+
+	actual = len(helpers.FilterRunningPods(agentPods))
+	expected = getWorkerNodeCount()
+
+	return actual == expected, actual, expected, nil
+}

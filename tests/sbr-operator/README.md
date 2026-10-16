@@ -273,3 +273,24 @@ Full specification: [`../../docs/TESTCASES/rhwa-1916.md`](../../docs/TESTCASES/r
 - **Environment**: Connected or disconnected. **Destructive** — the target node is fenced and hard-rebooted
 - **Standalone**: `ginkgo --label-filter="sbr" --focus="fencing state persists on Ceph RBD" ./tests/sbr-operator/...`
 - **Pass criteria**: `FencingSucceeded=True` on the SBR CR; node boot-id changes and the node returns Ready; node becomes schedulable again after the CR is deleted; agent pod returns to Running/ContainersReady; no new `StorageBasedRemediation` CR exists for the node
+
+### 13. Verify SBR Agents Write Concurrently to a Ceph RBD Block Device ([RHWA-1915](https://issues.redhat.com/browse/RHWA-1915))
+
+Validates SBR in Block volume mode: with `sharedStorageVolumeMode: Block` on a Ceph RBD
+StorageClass, agents on every worker node attach the same raw RWX device and write their
+heartbeats into it concurrently.
+
+Each agent pod reads the heartbeat region straight off the device with `dd` and O_DIRECT, so
+the page cache is bypassed and writes made by agents on other nodes are actually observed.
+
+Full test case: [docs/TESTCASES/rhwa-1915.md](../../docs/TESTCASES/rhwa-1915.md)
+
+- **Operators**: SBR v5.8.0
+- **Cluster**: Multi-node, at least 2 schedulable workers
+- **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by
+  provisioner (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the
+  cluster has none
+- **Environment**: Connected or disconnected. Self Node Remediation must not be running —
+  SNR and SBR both claim `/dev/watchdog`, and the test fails early with scale-down instructions
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="write concurrently to Ceph RBD block device" ./tests/sbr-operator/...`
+- **Pass criteria**: One Ready agent pod per worker node on the same Block device; every written slot parses with a valid CRC32; heartbeats present from at least 2 distinct node IDs with advancing sequence numbers; slot counts agree across pods

@@ -263,7 +263,8 @@ const (
 
 	// AgentPodLabelSelector selects SBR agent pods deployed by any SBRC.
 	AgentPodLabelSelector = "app=sbr-agent"
-
+	// SBRCBlockTestName is the SBRC name for the Ceph RBD block storage concurrency test.
+	SBRCBlockTestName = "test-sbrc-block-rbd"
 	// AgentMetricsPort is the port on which SBR agent pods expose custom Prometheus metrics.
 	// Port 8080 is controller-runtime's built-in metrics; port 8082 is the SBR agent's own metrics.
 	AgentMetricsPort = "8082"
