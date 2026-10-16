@@ -177,3 +177,23 @@ node joins the cluster.
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="mdr && disruption:destructive" --focus="Processing and Succeeded conditions" ./tests/mdr-operator/...`
 - **Pass criteria**: Processing=True with RemediationStarted reason, Succeeded=Unknown with RemediationStarted reason, replacement node Ready
+
+## Observability Tests
+
+### 11. Verify MDR Must-Gather Collects Diagnostic Data ([OCP-62581](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-62581))
+
+Creates a MachineDeletionRemediationTemplate and a MachineDeletionRemediation CR
+so the archive has MDR resources to collect, runs `oc adm must-gather` with the
+medik8s image, and validates the collected output. The remediation CR is named
+`mdr-must-gather-nonexistent-node`; MDR treats a remediation's name as the node
+it targets, so the test asserts no such node exists before creating it, which
+keeps the spec non-destructive.
+
+- **Operators**: MDR v0.7.0+
+- **Cluster**: Any topology (MNO or SNO)
+- **Storage**: None
+- **Environment**: Connected (must-gather image must be pullable), or disconnected with `MUST_GATHER_IMAGE` set to a mirrored reference
+- **Labels**: `disruption:nondestructive`, `platform:any`, `component:controller`, `tier:acceptance`, `frequency:weekly`
+- **Env vars (optional, has default)**: `MUST_GATHER_IMAGE` (overrides the default medik8s must-gather image)
+- **Standalone**: `ginkgo --label-filter="mdr" --focus="collects MDR data" ./tests/mdr-operator/...`
+- **Pass criteria**: MDR deployment Ready; node name `mdr-must-gather-nonexistent-node` confirmed absent from the cluster; MDRT and MDR CRs created; cluster has at least one node; at least one MDR controller pod found; `oc adm must-gather` exits successfully; collected output contains a node YAML for every cluster node, both MDR CRD definitions (`machinedeletionremediations` and `machinedeletionremediationtemplates`), the MDRT CR YAML, the MDR CR YAML, resources and at least one `.log` file for the MDR controller pod, and `openshift-machine-api` namespace resources; MDR controller pod still running after the test

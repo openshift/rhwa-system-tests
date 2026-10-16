@@ -130,4 +130,27 @@ const (
 
 	// MDRTInvalidTestNamespace is a syntactically valid namespace that does not exist.
 	MDRTInvalidTestNamespace = "mdr-test-nonexistent-ns"
+
+	// Must-gather test constants (RHWA-1249).
+
+	// MustGatherImageEnvVar is the environment variable that overrides the must-gather image.
+	MustGatherImageEnvVar = "MUST_GATHER_IMAGE"
+
+	// DefaultMustGatherImage is the default medik8s must-gather container image.
+	DefaultMustGatherImage = "quay.io/medik8s/must-gather:latest"
+
+	// MustGatherTimeout is how long to allow `oc adm must-gather` to run.
+	MustGatherTimeout = 10 * time.Minute
+
+	// MDRTMustGatherTestName is the MDRT created so must-gather has a template to collect.
+	MDRTMustGatherTestName = "mdr-must-gather-template"
+
+	// MDRMustGatherTestName is the MDR CR created so must-gather has a remediation to collect.
+	// MDR treats a remediation's name as the node it targets, so this must never match a real
+	// node; the spec asserts that before creating the CR.
+	MDRMustGatherTestName = "mdr-must-gather-nonexistent-node"
+
+	// MachineAPINamespace is the namespace holding Machine API resources, which MDR consumes
+	// and the must-gather image collects.
+	MachineAPINamespace = "openshift-machine-api"
 )
