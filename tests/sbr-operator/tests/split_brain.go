@@ -249,7 +249,7 @@ var _ = Describe(
 					continue
 				}
 
-				cleanupSBRCR(nodeName)
+				cleanupSBRCR(context.Background(), nodeName)
 			}
 
 			By("AfterAll: ensuring injector pod iptables rules are removed")
@@ -261,6 +261,9 @@ var _ = Describe(
 				if _, delErr := cleanupPod.Delete(); delErr != nil {
 					GinkgoWriter.Printf("Warning: delete injector pod in AfterAll: %v\n", delErr)
 				}
+
+				By("AfterAll: removing the injector image from the fenced target node")
+				purgeInjectorImageAfterReboot(targetNodeName)
 			}
 		})
 
@@ -290,7 +293,7 @@ var _ = Describe(
 
 					allNodes := append([]string{targetNodeName}, healthyNodes...)
 					for _, nodeName := range allNodes {
-						cleanupSBRCR(nodeName)
+						cleanupSBRCR(context.Background(), nodeName)
 					}
 				})
 

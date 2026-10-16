@@ -212,9 +212,9 @@ var _ = Describe("NHC Escalation -- Edit During Remediation",
 				Skip("SelfNodeRemediation CRD not found -- skipping escalation edit test")
 			}
 
-			By("Pre-cleaning stale NHC CR from previous interrupted runs")
+			By("Pre-cleaning stale NHC CRs from previous specs and interrupted runs")
 
-			cleanupNHCCR(ctx, nhcparams.NHCEscalationEditTestName)
+			sweepStaleTestNHCs(ctx, "Leftover test NHC CRs would own remediation CRs for the disrupted node")
 		})
 
 		JustAfterEach(func() {
