@@ -32,6 +32,7 @@ CLAUDE.local.md
 .DS_Store
 
 # Go
+/vendor/
 go.work
 go.work.sum
 bin/
