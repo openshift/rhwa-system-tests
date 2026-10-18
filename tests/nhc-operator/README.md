@@ -526,3 +526,43 @@ values. Verifies the webhook rejects the update while remediation is active.
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="nhc && disruption:destructive" --focus="order change is rejected" ./tests/nhc-operator/...`
 - **Pass criteria**: TestRemediation CR created, update rejected with error containing "escalating remediations", node recovers after kubelet restart
+
+## Destructive Tests -- Must-Gather Collection
+
+Verifies that `oc adm must-gather` collects NHC diagnostic data while a
+remediation is actively in flight. The gather is deliberately run between the
+NHC CR entering `Remediating` and the remediation completing: the NHC CRD and
+operator-namespace artifacts are collected on an idle cluster too, so the
+ordering is what makes the result meaningful. NHC works with any operator that
+provides a remediation template CRD; this test uses SNR as the remediator.
+
+### Prerequisites (Must-Gather)
+
+- NHC and SNR operators installed **and running** (SNR is used as the remediator;
+  the test checks the SNR controller deployment is Ready, not just that its CRD exists)
+- At least 2 Ready worker nodes
+- SSH access to worker nodes, used to stop kubelet. The key is located via
+  `ECO_SSH_KEY_PATH`; setting `MEDIK8S_KUBELET_STOP_OCDEBUG` switches the stop
+  mechanism to `oc debug` instead
+- `oc` on `PATH`, and the must-gather image pullable from the cluster
+  (`MUST_GATHER_IMAGE` overrides the default)
+- `KUBECONFIG` set with cluster-admin access
+
+### 27. NHC Must-Gather Collection During Active Remediation ([OCP-51086](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-51086))
+
+Selects a worker node that does not host an SNR controller pod, stops its
+kubelet via SSH to trigger remediation, waits for the NHC CR to reach
+`Remediating` and the SNR CR to be created, then runs `oc adm must-gather` and
+validates the collected artifacts. Finally waits for the node to reboot and the
+NHC CR to return to `Enabled`.
+
+- **Operators**: NHC v0.12.0+, SNR
+- **Cluster**: Multi-node (2+ workers), SSH access to worker nodes
+- **Environment**: Connected. `MUST_GATHER_IMAGE` must point at a mirrored ref on a
+  disconnected cluster -- `mustgather.Run` also resolves the image digest with
+  `oc image info`, which warns (without failing) when the ref is unreachable
+- **Standalone**: `ginkgo --label-filter="nhc && disruption:destructive" --focus="collects NHC data via oc adm must-gather" ./tests/nhc-operator/...`
+- **Skipped when**: no SSH key is available, the SelfNodeRemediation CRD is absent, the
+  SNR controller deployment is not Ready, or fewer than 2 worker nodes are Ready. Each
+  skip records a `skipped-reason` report entry
+- **Pass criteria**: A worker node hosting neither an SNR nor an NHC controller pod is selected, stale worker-selecting NHC CRs are cleared, kubelet stop succeeds, the NHC CR reaches `Enabled` before the break and `Remediating` after it, an SNR CR exists for the target node, at least one NHC controller pod is found, the resolved must-gather image contains a tag separator, `oc adm must-gather` exits successfully, and the output contains the target node's YAML, the NHC controller deployment YAML in the operator namespace, the `nhc-test-must-gather` CR YAML, a SelfNodeRemediation CR collected during the active remediation, the NHC CRD definition and collected data for every NHC controller pod; the node then reboots (boot ID changes), the SNR CR is removed and the NHC CR returns to `Enabled`
