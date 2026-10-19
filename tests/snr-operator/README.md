@@ -46,6 +46,9 @@ and destructive remediation (kubelet stop, node reboot via NHC detection).
 - For destructive worker tests (15-17): NHC operator installed, 2+ worker nodes
 - For destructive master tests (18-19): NHC operator installed, 1+ worker nodes,
   3+ master nodes for etcd quorum safety
+- For the control plane isolation test (20): 3+ master nodes, and **no** NHC
+  selecting control plane nodes (the test skips if one exists). NHC itself is not
+  required
 
 ## Running
 
@@ -303,3 +306,29 @@ concurrently -- both reboot and recover independently.
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="snr" --focus="simultaneously" ./tests/snr-operator/...`
 - **Pass criteria**: Both nodes rebooted (boot IDs changed), creation timestamps unchanged (not deleted/recreated), both recovered to Ready state
+
+### 20. Verify Control Plane Isolation Is Detected While readyz Still Passes ([RHWA-1927](https://issues.redhat.com/browse/RHWA-1927))
+
+Validates the control plane isolation gate that fixes
+[RHWA-1384](https://redhat.atlassian.net/browse/RHWA-1384): a control plane node
+whose local kube-apiserver still answers `/readyz` with 200, but whose SNR agent
+cannot reach any peer, must stop feeding the watchdog and reboot itself.
+
+The test rejects traffic on the SNR peer health port (`spec.hostPort`, default
+30001) **inside the victim agent's network namespace** — the agent DaemonSet sets
+`hostPID` but not `hostNetwork`, so host-level iptables rules would never match its
+Geneve-encapsulated peer traffic. The kube-apiserver connection is untouched, so
+the node stays Ready and `/readyz` keeps returning 200 for the whole run; that is
+what makes the reboot attributable to the isolation gate rather than to NHC or to
+the pre-existing API-error path. Skips when an NHC selects control plane nodes.
+
+Full specification: [`../../docs/TESTCASES/rhwa-1927.md`](../../docs/TESTCASES/rhwa-1927.md).
+
+- **Operators**: SNR v5.8.0 (NHC not required)
+- **Cluster**: Multi-node with 3+ Ready masters (etcd quorum safety)
+- **Storage**: None
+- **Environment**: Connected or disconnected; `SNR_INJECTOR_IMAGE` must be mirrored
+  when disconnected (falls back to `SBR_INJECTOR_IMAGE`). **Destructive** — one
+  control plane node is isolated and hard-reboots itself
+- **Standalone**: `ginkgo --label-filter="snr" --focus="isolated from its SNR peers" ./tests/snr-operator/...`
+- **Pass criteria**: Victim stays Ready for 45s after the block (proving `/readyz` still passes); agent logs peer consultation, the isolation detection, and the reboot trigger; boot ID changes within the RHWA-1384 budget of 4 minutes while creation timestamp is unchanged; no `SelfNodeRemediation` CR is created; peer masters keep their boot IDs; node returns Ready and the DaemonSet recovers
