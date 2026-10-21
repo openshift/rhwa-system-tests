@@ -18,6 +18,15 @@ var (
 	OperatorControllerPodLabelSelector = "app.kubernetes.io/component=controller-manager," +
 		"app.kubernetes.io/name=node-healthcheck-operator"
 
+	// ConsolePluginDeploymentName is the NHC console plugin deployment name (RHWA-1943).
+	ConsolePluginDeploymentName = "node-remediation-console-plugin"
+
+	// ConsolePluginPodLabelSelector selects NHC console plugin pods (RHWA-1943).
+	ConsolePluginPodLabelSelector = "app.kubernetes.io/component=node-remediation-console-plugin"
+
+	// ConsolePluginContainerName is the container name inside the console plugin pod (RHWA-1943).
+	ConsolePluginContainerName = "node-remediation-console-plugin"
+
 	// ReporterNamespacesToDump tells the reporter from where to collect logs.
 	ReporterNamespacesToDump = map[string]string{
 		medik8sparams.OperatorNs: medik8sparams.OperatorNs,

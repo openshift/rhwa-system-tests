@@ -283,4 +283,64 @@ var _ = Describe(
 						strings.Join(errorMessages, "\n- "))
 				}
 			})
+
+		It("Verify NHC console plugin container has readOnlyRootFilesystem enabled",
+			reportxml.ID("1943"),
+			Label(labels.OperatorNHC, labels.TierSmoke, labels.DisruptionNonDestructive,
+				labels.PlatformAny, labels.FrequencyPresubmit,
+				labels.ComponentController), func() {
+				By("Checking if NHC console plugin deployment is present")
+
+				_, err := deployment.Pull(
+					APIClient, nhcparams.ConsolePluginDeploymentName, medik8sparams.OperatorNs)
+				if err != nil {
+					Skip(fmt.Sprintf(
+						"NHC console plugin deployment %q not found in namespace %q: test requires console plugin",
+						nhcparams.ConsolePluginDeploymentName, medik8sparams.OperatorNs))
+				}
+
+				By("Waiting for console plugin pod to be running")
+
+				listOptions := metav1.ListOptions{
+					LabelSelector: nhcparams.ConsolePluginPodLabelSelector,
+				}
+				_, err = pod.WaitForAllPodsInNamespaceRunning(
+					APIClient,
+					medik8sparams.OperatorNs,
+					medik8sparams.DefaultTimeout,
+					listOptions,
+				)
+				Expect(err).ToNot(HaveOccurred(),
+					"console plugin pod in namespace %q must be Running within DefaultTimeout",
+					medik8sparams.OperatorNs)
+
+				By("Listing console plugin pods")
+
+				consolePods, err := pod.List(APIClient, medik8sparams.OperatorNs, listOptions)
+				Expect(err).ToNot(HaveOccurred(), "failed to list console plugin pods in namespace %q",
+					medik8sparams.OperatorNs)
+				runningPods := helpers.FilterRunningPods(consolePods)
+				Expect(runningPods).ToNot(BeEmpty(),
+					"no Running console plugin pods found in namespace %q", medik8sparams.OperatorNs)
+
+				By("Verifying console plugin container has readOnlyRootFilesystem=true")
+
+				for _, consolePod := range runningPods {
+					for _, container := range consolePod.Object.Spec.Containers {
+						if container.Name != nhcparams.ConsolePluginContainerName {
+							continue
+						}
+
+						Expect(container.SecurityContext).NotTo(BeNil(),
+							"pod %q container %q must have a SecurityContext",
+							consolePod.Object.Name, container.Name)
+						Expect(container.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil(),
+							"pod %q container %q SecurityContext.ReadOnlyRootFilesystem must be set",
+							consolePod.Object.Name, container.Name)
+						Expect(*container.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue(),
+							"pod %q container %q must have ReadOnlyRootFilesystem=true",
+							consolePod.Object.Name, container.Name)
+					}
+				}
+			})
 	})
