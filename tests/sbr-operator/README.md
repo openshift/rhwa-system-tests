@@ -688,3 +688,44 @@ make run-tests
 Live validation passed on 2026-10-22 against SBR v5.8.0 with CephFS, including
 same-volume recreation, zero agent restarts during the stability window, and
 complete test cleanup. A before/after comparison still requires a pre-fix build.
+
+### 25. Verify Total Storage I/O Loss Reboots a Ceph RBD Block-Mode Node via the Watchdog ([RHWA-1944](https://issues.redhat.com/browse/RHWA-1944))
+
+Proves the watchdog path in Block mode: a privileged injector pod blocks Ceph traffic on one victim
+worker in **both** directions (ports 3300, 6789, 6800–7300 on the OUTPUT and INPUT chains), with no
+time limit, so the victim can neither write its heartbeat nor read the fence message peers write into
+its own fence slot. The only mechanism left to reboot it is its watchdog — its agent sees a
+`StorageBasedRemediation` CR for its own node and stops petting.
+
+A peer sets `SBRStorageUnhealthy=True` (reason `HeartbeatTimeout`); NHC creates the CR; the
+reconciler proves death from storage, applies the `node.kubernetes.io/out-of-service` taint and sets
+`FencingSucceeded=True` / `Succeeded=True`; the victim's boot-id changes, it returns Ready with a
+Ready agent pod, holds that boot-id for 90s, and is uncordoned with the taint removed once NHC
+deletes the CR.
+
+The block-mode counterpart of the Filesystem total storage I/O loss test (`storage_loss_watchdog.go`,
+OCP-88880), with its own ID. The fencing proof is awaited **before** the reboot: death is proven from
+the already-stale heartbeat slot long before kubelet reports a new boot-id, and once the victim is
+back its iptables rules are gone with the reboot, so NHC deletes the CR and the taint goes with it.
+The CR is looked up by node name on every poll because it can be recreated when `SBRStorageUnhealthy`
+cycles to `Unknown`; `FencingInProgress` is deliberately not asserted because the 60s fencing window
+and 60s staleness threshold make it flap.
+
+Full test case: [docs/TESTCASES/rhwa-1944.md](../../docs/TESTCASES/rhwa-1944.md)
+
+- **Operators**: SBR v5.8.0, NHC (skips when the NodeHealthCheck CRD is absent)
+- **Cluster**: Multi-node, at least one schedulable worker not hosting an SBR controller pod; skips
+  otherwise
+- **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by
+  provisioner (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the
+  cluster has none
+- **Environment**: Connected or disconnected; `SBR_INJECTOR_IMAGE` must be mirrored when
+  disconnected. **Destructive** — one worker loses Ceph entirely and is rebooted by its watchdog.
+  Self Node Remediation must not be running. Skips when another `NodeHealthCheck` already remediates
+  through the SBR template, or when iptables is unusable in the victim's host namespaces
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="the isolated Ceph RBD node is rebooted by its watchdog" ./tests/sbr-operator/...`
+- **Pass criteria**: victim reaches `SBRStorageUnhealthy=True` (reason `HeartbeatTimeout`); NHC
+  creates a `StorageBasedRemediation` CR for it; the CR reaches `FencingSucceeded=True` /
+  `Succeeded=True` and the victim carries the `out-of-service` taint; the victim's boot-id changes
+  (the watchdog rebooted it), it returns Ready with a Ready agent pod and holds that boot-id for 90s;
+  NHC deletes the CR and the node becomes schedulable with the taint gone
