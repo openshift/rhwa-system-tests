@@ -130,14 +130,23 @@ var cephRBDRejectMatches = []string{
 	"-p tcp --match multiport --dports 6800:7300",
 }
 
-// cephRBDRuleScript returns one iptables command per Ceph port match for the given chain
-// operation, "-I" to insert the REJECT rules or "-D" to remove them. Removals tolerate a missing
-// rule so a flush can run whatever state the node is in.
-func cephRBDRuleScript(operation string) string {
+// cephRBDRejectReplyMatches are the same Ceph ports matched as sources, for the INPUT chain.
+// Rejecting only OUTPUT still lets the replies of an already-established session reach the node, so
+// a test that has to take a node's storage away completely blocks both directions.
+var cephRBDRejectReplyMatches = []string{
+	"-p tcp --sport 3300",
+	"-p tcp --sport 6789",
+	"-p tcp --match multiport --sports 6800:7300",
+}
+
+// cephRBDChainRuleScript returns one iptables command per match on the named chain for the given
+// chain operation, "-I" to insert the REJECT rules or "-D" to remove them. Removals tolerate a
+// missing rule so a flush can run whatever state the node is in.
+func cephRBDChainRuleScript(operation, chain string, matches []string) string {
 	var script strings.Builder
 
-	for _, match := range cephRBDRejectMatches {
-		fmt.Fprintf(&script, "%s %s OUTPUT %s -j REJECT", nsenterIPTables, operation, match)
+	for _, match := range matches {
+		fmt.Fprintf(&script, "%s %s %s %s -j REJECT", nsenterIPTables, operation, chain, match)
 
 		if operation == "-D" {
 			fmt.Fprint(&script, " || true")
@@ -147,6 +156,20 @@ func cephRBDRuleScript(operation string) string {
 	}
 
 	return script.String()
+}
+
+// cephRBDRuleScript returns the outbound-only Ceph REJECT rules for the given chain operation.
+// Blocking OUTPUT is enough to cut a node off from Ceph; the callers that must also keep inbound
+// replies out use cephRBDBidirectionalRuleScript.
+func cephRBDRuleScript(operation string) string {
+	return cephRBDChainRuleScript(operation, "OUTPUT", cephRBDRejectMatches)
+}
+
+// cephRBDBidirectionalRuleScript returns the Ceph REJECT rules on both the OUTPUT and the INPUT
+// chain for the given chain operation, so neither a request nor a reply crosses the node's boundary.
+func cephRBDBidirectionalRuleScript(operation string) string {
+	return cephRBDRuleScript(operation) +
+		cephRBDChainRuleScript(operation, "INPUT", cephRBDRejectReplyMatches)
 }
 
 // cephRBDPartitionScript blocks Ceph traffic on the host for the length of the outage and then
@@ -163,9 +186,10 @@ wait $!
 }
 
 // cephRBDFlushScript removes the Ceph REJECT rules and always exits 0, so teardown reports success
-// on a node that has no rules left to remove.
+// on a node that has no rules left to remove. It deletes both directions so one flusher cleans up
+// after either injection; a rule that was never inserted is tolerated.
 func cephRBDFlushScript() string {
-	return cephRBDRuleScript("-D") + "exit 0\n"
+	return cephRBDBidirectionalRuleScript("-D") + "exit 0\n"
 }
 
 // cephRBDIPTablesProbeScript lists the host OUTPUT chain. It fails on a node where iptables cannot
@@ -253,6 +277,8 @@ func hostCommandPodLog(builder *pod.Builder) string {
 
 // runHostCommandPod runs script to completion on nodeName and returns the pod's final phase and
 // log, removing the pod before returning.
+//
+//nolint:unparam // timeout is kept explicit so each call site states the bound its script needs.
 func runHostCommandPod(nodeName, podName, script string, timeout time.Duration) (corev1.PodPhase, string) {
 	createHostCommandPod(nodeName, podName, script)
 
@@ -603,15 +629,30 @@ func splitBrainBaselineFor(victimBootID string, witnessNodes []string) (splitBra
 	return baseline, nil
 }
 
-// injectCephRBDRules inserts the Ceph port REJECT rules through an already-running injector pod and
-// returns the command output alongside the error so the caller can report it. The block persists (no
-// self-terminating window), so the node stays isolated until a reboot clears the host's iptables
-// rules. The rules are the same RBD REJECT set the transient partition test uses, so
+// injectCephRBDRules inserts the outbound Ceph port REJECT rules through an already-running injector
+// pod and returns the command output alongside the error so the caller can report it. The block
+// persists (no self-terminating window), so the node stays isolated until a reboot clears the host's
+// iptables rules. The rules are the same RBD REJECT set the transient partition test uses, so
 // flushCephRBDRules removes exactly what was inserted.
 func injectCephRBDRules(injectorPod *pod.Builder) (string, error) {
-	injectOut, injectErr := injectorPod.ExecCommand([]string{"sh", "-c", "set -e\n" + cephRBDRuleScript("-I")})
+	return execCephRBDRuleScript(injectorPod, cephRBDRuleScript("-I"))
+}
 
-	return injectOut.String(), injectErr
+// injectCephRBDRulesBidirectional inserts the Ceph port REJECT rules on both the OUTPUT and the
+// INPUT chain, so the node can neither reach Ceph nor receive anything back from it. Callers that
+// need total storage loss use this rather than injectCephRBDRules, whose outbound-only rules leave
+// inbound traffic of an established session flowing.
+func injectCephRBDRulesBidirectional(injectorPod *pod.Builder) (string, error) {
+	return execCephRBDRuleScript(injectorPod, cephRBDBidirectionalRuleScript("-I"))
+}
+
+// execCephRBDRuleScript runs an iptables rule script in the injector pod and returns its output
+// alongside the error. "set -e" makes the first failing iptables call abort the script, so a
+// partially applied rule set surfaces as an error instead of a half-isolated node.
+func execCephRBDRuleScript(injectorPod *pod.Builder, script string) (string, error) {
+	out, execErr := injectorPod.ExecCommand([]string{"sh", "-c", "set -e\n" + script})
+
+	return out.String(), execErr
 }
 
 // splitBrainHeartbeatState looks every involved node's heartbeat slot up in the on-device node map,
@@ -843,4 +884,61 @@ func witnessesUntouched(witnessNodes []string, baseline splitBrainBaseline) erro
 	}
 
 	return nil
+}
+
+// setupBlockModeNHCScenario brings up everything a Block-mode fencing test needs: a Ceph RBD
+// StorageBasedRemediationConfig whose agents are Ready and whose shared storage is confirmed
+// concurrent-writeable, and a NodeHealthCheck that remediates SBRStorageUnhealthy nodes through the
+// SBR template. It returns the SBRC so the caller can delete it in AfterAll.
+//
+// The SBRC is built from the sub-helpers rather than setupBlockModeSBRC so the init Job can be
+// waited on before the DaemonSet readiness wait: an init failure then surfaces as "init Job failed"
+// instead of an opaque "DaemonSet not ready" timeout.
+func setupBlockModeNHCScenario(sbrcName, nhcName string) *unstructured.Unstructured {
+	// Remove this test's own NodeHealthCheck from a crashed prior run first: it references the SBR
+	// template, so requireNoSBRNodeHealthCheck would otherwise see it and skip the test.
+	By("Removing any NodeHealthCheck left by a previous run of this test")
+	deleteNHCAndWait(nhcName)
+
+	By("Verifying no other NodeHealthCheck already remediates through the SBR template")
+	requireNoSBRNodeHealthCheck()
+	failIfSNRRunning()
+
+	By("Discovering the Ceph RBD block storage class")
+
+	rbdStorageClass := discoverCephRBDStorageClass()
+
+	By(fmt.Sprintf("Pre-cleaning any stale SBRC %q", sbrcName))
+	deleteSBRCAndWait(buildSBRC(sbrcName, map[string]interface{}{}), sbrcName)
+
+	By("Creating the Block-mode StorageBasedRemediationConfig on Ceph RBD")
+
+	sbrc := buildSBRC(sbrcName, buildBlockModeSBRC(rbdStorageClass, nil))
+	Expect(APIClient.Create(context.TODO(), sbrc)).To(Succeed(),
+		"StorageBasedRemediationConfig %q must be created", sbrcName)
+
+	By("Waiting for the Block device-init Job to succeed")
+	waitForBlockInitJobSucceeded(sbrcName, sbrc.GetUID())
+
+	By("Waiting for the agent DaemonSet to be ready")
+	waitForSBRCReady(sbrcName)
+
+	By("Asserting the SBRC reports concurrent-writeable shared storage")
+
+	Eventually(func() (bool, error) {
+		return sbrcConcurrentWriteable(sbrcName)
+	}, sbrparams.StorageInjectionTimeout, sbrparams.DefaultPollInterval).Should(BeTrue(),
+		"SBRC %q must report status.storageValidation.concurrentWriteable=true before fencing "+
+			"can proceed", sbrcName)
+
+	By("Creating the NodeHealthCheck CR that remediates SBRStorageUnhealthy nodes through SBR")
+	ensureSBRTemplate()
+
+	// maxUnhealthy: 1 (rather than the shared builder's minHealthy: "51%") so exactly one node may
+	// be unhealthy regardless of cluster size — "51%" can block remediation on a small cluster.
+	nhc := buildNHCWithMaxUnhealthy(nhcName, 1)
+	Expect(APIClient.Create(context.TODO(), nhc)).To(Succeed(),
+		"NodeHealthCheck CR %q must be created", nhcName)
+
+	return sbrc
 }

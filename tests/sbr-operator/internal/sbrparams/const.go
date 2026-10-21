@@ -570,6 +570,19 @@ const (
 	// taken moments after the baseline can legitimately show a slot that has not ticked yet.
 	BlockWitnessProgressTimeout = 2 * time.Minute
 
+	// SBRCBlockStorageLossTestName is the SBRC name for the Ceph RBD block-mode total storage I/O
+	// loss test (RHWA-1944).
+	SBRCBlockStorageLossTestName = "test-sbrc-block-storage-loss"
+
+	// NHCBlockStorageLossTestName is the NodeHealthCheck CR name for the block-mode total storage
+	// I/O loss test (RHWA-1944).
+	NHCBlockStorageLossTestName = "nhc-sbr-block-storage-loss"
+
+	// BlockStorageLossInjectorPodName is the privileged pod that blocks Ceph traffic in both
+	// directions on the victim node, with no time limit, so the victim cannot reach the shared
+	// device at all and only its watchdog can reboot it.
+	BlockStorageLossInjectorPodName = "sbr-rbd-storage-loss-injector"
+
 	// BlockInspectionMaxSkew bounds how old the newest heartbeat on the device may look from the
 	// machine running the test. It is deliberately loose: its job is to catch a device nobody is
 	// writing to any more, not to measure cadence, which BlockHeartbeatSlotMaxAge does on
