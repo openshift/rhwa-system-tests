@@ -609,3 +609,71 @@ Full test case: [docs/TESTCASES/rhwa-2031.md](../../docs/TESTCASES/rhwa-2031.md)
   later than the victim's last heartbeat; the victim carries the `out-of-service` taint, reboots with
   a changed boot-id and returns Ready; after the CR is deleted it is schedulable with the taint gone
   and its agent pod is Ready again
+
+### 24. Verify SBRC Node Map Cleanup and Recreation (RHWA-1929)
+
+Creates a filesystem-mode SBRC, records the live node map, and verifies that its
+deletion runs a successful cleanup Job and removes the map from the original
+volume. It then recreates the same name and spec, requires the same PVC UID and
+PV name, and checks agent readiness, restart counts, and ghost-peer log events.
+
+Design: [test plan PR #63](https://github.com/openshift/rhwa-system-tests/pull/63).
+Test task: [RHWA-1929](https://redhat.atlassian.net/browse/RHWA-1929).
+Product fix: [SBR #69](https://github.com/medik8s/storage-based-remediation/pull/69).
+
+- **Operators**: SBR v5.8.0 already installed. This is not an operator-upgrade test.
+- **Cluster**: At least two Ready, schedulable workers. SNR agents must not be
+  running or scheduled. The SNR operator itself may remain installed. No NHC may
+  reference an SBR template, directly or through escalating remediation.
+- **Storage**: Existing RWX filesystem storage. `SBR_STORAGE_CLASS` selects it,
+  otherwise CephFS is auto-discovered. The test does not install ODF.
+- **Environment**: Connected or disconnected. For a disconnected cluster,
+  `SBR_INJECTOR_IMAGE` must provide `sh`, `sleep`, `dd`, and `base64` from a reachable
+  registry. It defaults to `registry.access.redhat.com/ubi9/ubi:latest`.
+- **Standalone**: `ginkgo -vv --label-filter="operator:sbr && tier:acceptance" --focus="SBRC deletion removes the node map" ./tests/sbr-operator`
+- **Pass criteria**: Exactly one spec with ID `1929` passes. The original map is
+  gone after cleanup. The recreated agents become Ready within three minutes
+  with at most one restart, then keep their UIDs and restart counts for three
+  minutes. No ghost peer is reported as unhealthy, and the SBRC reports Ready.
+  Test-owned resources are removed, including the retained PVC.
+
+#### Storage identity and cleanup
+
+The test deliberately retains its own PVC across SBRC deletion. A test-only
+finalizer briefly holds the SBRC while the operator completes its own cleanup
+finalizer. The test then removes only that SBRC's owner reference from the PVC
+and releases its hold. Normal garbage collection removes the old agents and
+init Job. No operator finalizer is forcibly removed.
+
+This is necessary because recreating against the same StorageClass does not
+guarantee reuse of the same data, and the controller changes the PV reclaim
+policy to `Delete`. The read-only observer mounts the original PVC before
+deletion and remains on it through verification. Both its PVC UID and PV name
+must remain unchanged on recreation.
+
+The implementation retains the original PVC until final cleanup, rather than
+waiting for its deletion as originally proposed in PR #63. This proves cleanup
+of the original map and healthy recreation on the same storage, not a guaranteed
+reproduction of the historical restart loop.
+
+The test removes only resources bearing its own marker or belonging to its
+uniquely named SBRC. It never uninstalls operators, disables SNR, or sweeps all
+cleanup Jobs in the namespace. A missing SNR/storage prerequisite is a skip,
+not evidence that the regression passed.
+
+Local invocation after prerequisites are satisfied:
+
+```bash
+export KUBECONFIG=/absolute/path/to/kubeconfig
+export ECO_TEST_FEATURES=sbr-operator
+export ECO_TEST_LABELS='operator:sbr && tier:acceptance'
+export ECO_TEST_FOCUS='SBRC deletion removes the node map'
+export ECO_TEST_VERBOSE=true
+export WORKLOAD_IMAGE=unused-by-sbr-node-map-cleanup
+export SBR_STORAGE_CLASS=ocs-external-storagecluster-cephfs
+export ECO_REPORTS_DUMP_DIR="$(mktemp -d)"
+make run-tests
+```
+
+Cluster validation is pending. A before/after comparison also requires running
+the same test on a pre-fix operator build.

@@ -17,6 +17,36 @@ const (
 	// GhostPeerCleanupTimeout bounds normal SBRC and operand removal.
 	GhostPeerCleanupTimeout = 6 * time.Minute
 
+	// SBRCNodeMapTestName is the prefix for the isolated filesystem node-map regression config.
+	SBRCNodeMapTestName = "test-sbrc-node-map"
+
+	// NodeMapTestLabel marks only resources created by the node-map regression test.
+	NodeMapTestLabel = "test.medik8s.io/node-map-cleanup"
+
+	// NodeMapTestFinalizer retains the test config until its original PVC can be preserved.
+	NodeMapTestFinalizer = "test.medik8s.io/node-map-storage-hold"
+
+	// SBRCOperatorCleanupFinalizer is removed by the SBR operator's deletion path.
+	SBRCOperatorCleanupFinalizer = "sbr-operator.medik8s.io/cleanup"
+
+	// NodeMapCleanupTimeout outlasts the controller's four-minute cleanup-job wait.
+	NodeMapCleanupTimeout = 6 * time.Minute
+
+	// NodeMapExecTimeout bounds reads through the read-only PVC observer.
+	NodeMapExecTimeout = 30 * time.Second
+
+	// NodeMapRecreateReadyTimeout allows a warm restart without the old ten-minute convergence loop.
+	NodeMapRecreateReadyTimeout = 3 * time.Minute
+
+	// NodeMapConvergenceDuration exceeds the approximately 105-second stale-peer timeout.
+	NodeMapConvergenceDuration = 3 * time.Minute
+
+	// NodeMapMaxAgentRestarts is the startup restart budget before the stability observation.
+	NodeMapMaxAgentRestarts = 1
+
+	// NodeMapPeerUnhealthyMessage identifies peer-health transitions in the agent's JSON logs.
+	NodeMapPeerUnhealthyMessage = "Peer node became unhealthy"
+
 	// DefaultPollInterval is the polling interval used with Eventually calls.
 	DefaultPollInterval = 5 * time.Second
 
