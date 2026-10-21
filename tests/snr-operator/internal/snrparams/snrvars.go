@@ -28,6 +28,14 @@ var (
 	//   app.kubernetes.io/name=self-node-remediation, app.kubernetes.io/component=agent
 	DaemonSetPodLabelSelector = "app.kubernetes.io/name=self-node-remediation,app.kubernetes.io/component=agent"
 
+	// AgentPodSelectorMatchLabels is the map form of DaemonSetPodLabelSelector,
+	// matching the podSelector/peer selectors rendered into the
+	// self-node-remediation-ds-np NetworkPolicy.
+	AgentPodSelectorMatchLabels = map[string]string{
+		"app.kubernetes.io/name":      "self-node-remediation",
+		"app.kubernetes.io/component": "agent",
+	}
+
 	operatorNs = medik8sparams.OperatorNs
 
 	// ReporterNamespacesToDump tells the reporter from where to collect logs.

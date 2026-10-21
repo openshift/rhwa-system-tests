@@ -59,6 +59,8 @@ const (
 	ComponentRemediation = "component:remediation"
 	// ComponentMetrics marks tests for the metrics component.
 	ComponentMetrics = "component:metrics"
+	// ComponentNetworkPolicy marks tests for the NetworkPolicy component.
+	ComponentNetworkPolicy = "component:network-policy"
 	// ComponentPostDeploy marks post-deploy validation tests that do not require
 	// functional remediation infrastructure (safe for disconnected environments).
 	ComponentPostDeploy = "component:post-deploy"

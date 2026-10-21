@@ -303,3 +303,19 @@ concurrently -- both reboot and recover independently.
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="snr" --focus="simultaneously" ./tests/snr-operator/...`
 - **Pass criteria**: Both nodes rebooted (boot IDs changed), creation timestamps unchanged (not deleted/recreated), both recovered to Ready state
+
+### 20. Verify SNR Manages the Agent DaemonSet NetworkPolicy ([RHWA-1645](https://redhat.atlassian.net/browse/RHWA-1645))
+
+Validates that the operator renders, owns, and reconciles the
+`self-node-remediation-ds-np` `NetworkPolicy` for the agent DaemonSet: automatic
+creation and ownership by the default `SelfNodeRemediationConfig`, the static
+ingress/egress rules (peer hostPort, DNS, HTTPS, own-node kubelet check),
+recreation after manual deletion, and correct/stable `ipBlock` egress rules
+derived from `EndpointHealthCheckUrl` across resolution, a simulated DNS flip,
+and rapid successive changes.
+
+- **Operators**: SNR v5.8.0
+- **Cluster**: Any topology
+- **Environment**: Connected or disconnected
+- **Standalone**: `ginkgo --label-filter="operator:snr && tier:smoke" --focus="manages the agent DaemonSet NetworkPolicy" ./tests/snr-operator/...`
+- **Pass criteria**: `NetworkPolicy` exists, owned by the config CR, with the expected static rules; recreated after deletion; `ipBlock` egress rule tracks `EndpointHealthCheckUrl` through resolution, a DNS flip, and rapid changes, converging to and holding a single rule with no allow-all fallback. See [docs/TESTCASES/rhwa-1645.md](../../docs/TESTCASES/rhwa-1645.md).
