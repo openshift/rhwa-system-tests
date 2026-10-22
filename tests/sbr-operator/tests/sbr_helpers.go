@@ -1055,52 +1055,62 @@ func clearCephOSDBlocklist() {
 // injector pod and removes any residual Ceph REJECT rules found. This prevents iptables
 // rule leakage between test suites that can cause inter-test pollution.
 func verifyCephFSIPTablesClean(injectorPod *pod.Builder) {
-	outputRules, outputErr := injectorPod.ExecCommand([]string{
-		"nsenter", "--target", "1", "--net", "--mount", "--",
-		"iptables", "-S", "OUTPUT",
-	})
-	if outputErr != nil {
-		GinkgoWriter.Printf("Warning: cannot list OUTPUT chain for iptables verification: %v\n", outputErr)
-
-		return
-	}
-
-	inputRules, inputErr := injectorPod.ExecCommand([]string{
-		"nsenter", "--target", "1", "--net", "--mount", "--",
-		"iptables", "-S", "INPUT",
-	})
-	if inputErr != nil {
-		GinkgoWriter.Printf("Warning: cannot list INPUT chain for iptables verification: %v\n", inputErr)
-
-		return
-	}
-
+	const maxRemovalAttempts = 10
 	cephPorts := []string{"3300", "6789", "6800:7300"}
-	residualFound := false
-	allRules := outputRules.String() + "\n" + inputRules.String()
 
-	for _, line := range strings.Split(allRules, "\n") {
-		if !strings.Contains(line, "REJECT") {
-			continue
+	for attempt := 1; attempt <= maxRemovalAttempts; attempt++ {
+		outputRules, outputErr := injectorPod.ExecCommand([]string{
+			"nsenter", "--target", "1", "--net", "--mount", "--",
+			"iptables", "-S", "OUTPUT",
+		})
+		if outputErr != nil {
+			GinkgoWriter.Printf("Warning: cannot list OUTPUT chain for iptables verification: %v\n", outputErr)
+
+			return
 		}
 
-		for _, port := range cephPorts {
-			if strings.Contains(line, port) {
-				GinkgoWriter.Printf("Warning: residual Ceph iptables REJECT rule found after teardown: %s\n",
-					strings.TrimSpace(line))
-				residualFound = true
+		inputRules, inputErr := injectorPod.ExecCommand([]string{
+			"nsenter", "--target", "1", "--net", "--mount", "--",
+			"iptables", "-S", "INPUT",
+		})
+		if inputErr != nil {
+			GinkgoWriter.Printf("Warning: cannot list INPUT chain for iptables verification: %v\n", inputErr)
 
-				break
+			return
+		}
+
+		residualFound := false
+		allRules := outputRules.String() + "\n" + inputRules.String()
+
+		for _, line := range strings.Split(allRules, "\n") {
+			if !strings.Contains(line, "REJECT") {
+				continue
+			}
+
+			for _, port := range cephPorts {
+				if strings.Contains(line, port) {
+					GinkgoWriter.Printf("Warning: residual Ceph iptables REJECT rule found after teardown "+
+						"(attempt %d/%d): %s\n", attempt, maxRemovalAttempts, strings.TrimSpace(line))
+					residualFound = true
+
+					break
+				}
 			}
 		}
+
+		if !residualFound {
+			GinkgoWriter.Printf("Verified: no residual CephFS iptables REJECT rules remain after teardown\n")
+
+			return
+		}
+
+		GinkgoWriter.Printf("Removing residual CephFS iptables REJECT rules (attempt %d/%d)\n",
+			attempt, maxRemovalAttempts)
+		removeCephFSRejectBidirectional(injectorPod)
 	}
 
-	if residualFound {
-		GinkgoWriter.Printf("Removing residual CephFS iptables REJECT rules\n")
-		removeCephFSRejectBidirectional(injectorPod)
-	} else {
-		GinkgoWriter.Printf("Verified: no residual CephFS iptables REJECT rules remain after teardown\n")
-	}
+	GinkgoWriter.Printf("Warning: residual CephFS iptables REJECT rules still present after %d removal attempts\n",
+		maxRemovalAttempts)
 }
 
 func odfFenceNodeRecovered(ctx context.Context, nodeName string) error {

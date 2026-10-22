@@ -531,6 +531,9 @@ var _ = Describe(
 					if pullErr == nil {
 						removeCephFSRejectBidirectional(cleanupPod)
 
+						By("DeferCleanup: verifying no residual CephFS iptables REJECT rules remain")
+						verifyCephFSIPTablesClean(cleanupPod)
+
 						if _, delErr := cleanupPod.Delete(); delErr != nil && !k8serrors.IsNotFound(delErr) {
 							GinkgoWriter.Printf("Warning: delete injector pod %s: %v\n", injectorPodName, delErr)
 						}
@@ -682,6 +685,9 @@ var _ = Describe(
 					_, flushErr := injectorPod.ExecCommand(rule)
 					Expect(flushErr).ToNot(HaveOccurred(), "iptables flush must succeed")
 				}
+
+				By("Verifying no residual CephFS iptables REJECT rules remain before deleting injector pod")
+				verifyCephFSIPTablesClean(injectorPod)
 
 				if _, delErr := injectorPod.Delete(); delErr != nil && !k8serrors.IsNotFound(delErr) {
 					GinkgoWriter.Printf("Warning: delete injector pod %s: %v\n", injectorPodName, delErr)
