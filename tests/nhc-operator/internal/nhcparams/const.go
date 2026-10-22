@@ -270,6 +270,34 @@ const (
 	// escalating remediations while remediation is in progress.
 	EscalationWebhookOngoingRemediation = "prohibited due to running remediation"
 
+	// Must-gather collection test constants (RHWA-1247, OCP-51086).
+
+	// NHCMustGatherTestName is the NHC CR name used by the must-gather collection test.
+	NHCMustGatherTestName = "nhc-test-must-gather"
+
+	// MinWorkersForMustGather is the minimum number of Ready worker nodes the
+	// must-gather test needs: one to break, and at least one left over so the
+	// healthy count stays at or above minHealthy (1) and NHC still remediates.
+	MinWorkersForMustGather = 2
+
+	// SNRDeploymentName is the SNR controller-manager deployment. The must-gather
+	// test checks it is Ready, not merely that the SNR CRD is registered, because
+	// buildNHCForWorkers points at an SNR template and NHC goes Disabled if the
+	// remediator is installed but not running.
+	SNRDeploymentName = "self-node-remediation-controller-manager"
+
+	// MustGatherTimeout bounds the whole `oc adm must-gather` subprocess.
+	// The image reference and the digest-lookup bound come from the shared
+	// mustgather package (ImageEnvVar, DefaultImage, DefaultImageInfoTimeout).
+	// The shared DefaultOCTimeout (14m) is not reused because it exceeds this
+	// bound, so it could never fire -- see MustGatherOCTimeout.
+	MustGatherTimeout = 10 * time.Minute
+
+	// MustGatherOCTimeout is rendered as `--timeout` on `oc adm must-gather`, and
+	// is deliberately shorter than MustGatherTimeout so oc self-terminates and
+	// tears down its namespace before the outer context SIGKILLs it.
+	MustGatherOCTimeout = 8 * time.Minute
+
 	// NHCEscalationTestName is the base name for NHC CRs in escalation E2E tests (RHWA-1245).
 	NHCEscalationTestName = "nhc-test-escalation"
 	// EscalationSNRStepTimeout is the SNR step timeout used in escalation E2E tests.

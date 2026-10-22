@@ -363,13 +363,24 @@ func listSNRCRsForNode(ctx context.Context, nodeName string) ([]unstructured.Uns
 
 	for i := range list.Items {
 		item := list.Items[i]
-		if item.GetName() == nodeName ||
-			item.GetAnnotations()["remediation.medik8s.io/node-name"] == nodeName {
+		if snrCRMatchesNode(item.GetName(), item.GetAnnotations(), nodeName) {
 			items = append(items, item)
 		}
 	}
 
 	return items, nil
+}
+
+// snrCRMatchesNode reports whether an SNR CR belongs to the named node. NHC
+// creates SNR CRs named either exactly after the node or with a random suffix
+// (e.g. "worker-0-8lwbf"), so both forms must match -- the separator is required
+// so that node "worker-0" does not claim a CR belonging to "worker-01".
+// listSNRCRsForNode and snrCRExists share this so the create-gate, the cleanup
+// and the completion wait cannot disagree about which CRs exist.
+func snrCRMatchesNode(crName string, annotations map[string]string, nodeName string) bool {
+	return crName == nodeName ||
+		strings.HasPrefix(crName, nodeName+"-") ||
+		annotations["remediation.medik8s.io/node-name"] == nodeName
 }
 
 // getNHCPhase returns the current .status.phase of the named NHC CR.
@@ -1182,7 +1193,8 @@ func snrCRExists(ctx context.Context, nodeName string) (bool, error) {
 	}
 
 	for i := range snrList.Items {
-		if strings.HasPrefix(snrList.Items[i].GetName(), nodeName) {
+		if snrCRMatchesNode(
+			snrList.Items[i].GetName(), snrList.Items[i].GetAnnotations(), nodeName) {
 			return true, nil
 		}
 	}
