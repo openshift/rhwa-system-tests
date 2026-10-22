@@ -41,16 +41,13 @@ var _ = Describe("SBR Functional - Node map cleanup", Ordered, Serial,
 		BeforeAll(func(ctx SpecContext) {
 			storageClass = nodeMapCleanupPreflight(ctx)
 		})
-		It("Verify SBRC deletion removes the node map before recreation on the same volume",
+		It("Verify SBRC deletion clears the node map before recreation on the same volume",
 			reportxml.ID("1929"), func(ctx SpecContext) {
 				test := &nodeMapCleanupTest{config: buildSBRC("", map[string]interface{}{
 					"sharedStorageClass": storageClass,
 				})}
 				test.config.SetGenerateName(sbrparams.SBRCNodeMapTestName + "-")
 				test.config.SetLabels(map[string]string{sbrparams.NodeMapTestLabel: "true"})
-				// Hold only our own deletion until the operator's finalizer finishes.
-				// This lets us preserve the original PVC without bypassing its cleanup.
-				test.config.SetFinalizers([]string{sbrparams.NodeMapTestFinalizer})
 				DeferCleanup(test.cleanupClaim, NodeTimeout(sbrparams.NodeMapCleanupTimeout))
 
 				By("Creating the StorageBasedRemediationConfig and waiting for its agent DaemonSet to be ready")
@@ -76,17 +73,8 @@ var _ = Describe("SBR Functional - Node map cleanup", Ordered, Serial,
 				By("Deleting the StorageBasedRemediationConfig and waiting for the cleanup job to complete")
 				test.deleteAndRetainClaim(ctx)
 
-				By("Verifying the node map file no longer exists on the shared storage")
-				test.expectOriginalClaim(ctx, Default)
-				output, err := test.observer.ExecCommandWithTimeout([]string{
-					"sh", "-ec", "test -r /sbr-data && test -x /sbr-data\n" +
-						"dd if=/sbr-data/sbr-device of=/dev/null bs=1 count=1 status=none\n" +
-						"if [ -e /sbr-data/sbr-device-nodemap ]; then\n" +
-						"  echo 'RHWA-1056: stale node map remains on the original volume'\n  exit 1\nfi\n" +
-						"echo 'Node map removed from the original volume'",
-				}, sbrparams.NodeMapExecTimeout)
-				Expect(err).NotTo(HaveOccurred(), "Node map cleanup failed: %s", output.String())
-				AddReportEntry("node-map-after-deletion", output.String())
+				By("Verifying the node map is absent or empty on the original shared storage")
+				test.expectNodeMapCleared(ctx)
 
 				By("Recreating the StorageBasedRemediationConfig with the name and spec captured in step 1")
 				recreated := buildSBRC(test.config.GetName(), nil)
@@ -160,16 +148,45 @@ func nodeMapCleanupPreflight(ctx context.Context) string {
 	class, err := APIClient.StorageV1Interface.StorageClasses().Get(ctx, storageClass, metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred(), "The selected RWX StorageClass must exist")
 	AddReportEntry("node-map-storage-class", class.Name)
-	AddReportEntry("node-map-storage-reclaim-policy", class.ReclaimPolicy)
+	Expect(class.ReclaimPolicy).NotTo(BeNil())
+	AddReportEntry("node-map-storage-reclaim-policy", *class.ReclaimPolicy)
 
 	return storageClass
+}
+
+func (test *nodeMapCleanupTest) expectNodeMapCleared(ctx context.Context) {
+	test.expectOriginalClaim(ctx, Default)
+	// SBR's O_CREATE lock can recreate an empty file during shutdown, but no
+	// mapping data may survive. Require readable original storage, not an empty mount.
+	output, err := test.observer.ExecCommandWithTimeout([]string{"sh", "-ec", `
+device=/sbr-data/sbr-device
+node_map=/sbr-data/sbr-device-nodemap
+
+test -r /sbr-data && test -x /sbr-data
+test -s "$device"
+dd if="$device" of=/dev/null bs=1 count=1 status=none
+
+if [ -e "$node_map" ] || [ -L "$node_map" ]; then
+    test -f "$node_map"
+    test -r "$node_map"
+    if [ -s "$node_map" ]; then
+        echo 'RHWA-1056: nonempty node map remains after cleanup and agent shutdown'
+        ls -l "$node_map"
+        exit 1
+    fi
+fi
+
+echo 'Node map absent or empty on the original volume'
+`}, sbrparams.NodeMapExecTimeout)
+	AddReportEntry("node-map-after-deletion", output.String())
+	Expect(err).NotTo(HaveOccurred(), "Node map cleanup failed: %s", output.String())
 }
 
 func (test *nodeMapCleanupTest) readNodeMap() (*blockNodeMap, string, error) {
 	output, err := test.observer.ExecCommandWithTimeout(
 		[]string{"base64", "/sbr-data/sbr-device-nodemap"}, sbrparams.NodeMapExecTimeout)
 	if err != nil {
-		return nil, "", fmt.Errorf("read original node map: %w", err)
+		return nil, "", fmt.Errorf("read original node map: %w: %s", err, strings.TrimSpace(output.String()))
 	}
 	payload, err := base64.StdEncoding.DecodeString(strings.TrimSpace(output.String()))
 	if err != nil {

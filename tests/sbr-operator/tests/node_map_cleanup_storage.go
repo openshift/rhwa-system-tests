@@ -49,6 +49,7 @@ func (test *nodeMapCleanupTest) mountOriginalClaim(ctx context.Context) {
 	reader := pod.NewBuilder(APIClient, "sbr-map-reader-"+string(test.config.GetUID())[:8],
 		medik8sparams.OperatorNs, sbrparams.InjectorImage).
 		WithCommand([]string{"sleep", "infinity"}).
+		WithPrivilegedFlag().
 		WithVolume(corev1.Volume{Name: "shared", VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name, ReadOnly: true},
 		}})
@@ -56,11 +57,10 @@ func (test *nodeMapCleanupTest) mountOriginalClaim(ctx context.Context) {
 		{Name: "shared", MountPath: "/sbr-data", ReadOnly: true},
 	}
 	reader.Definition.Labels = map[string]string{sbrparams.NodeMapTestLabel: "true"}
-	reader.Definition.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
-		RunAsNonRoot: ptr.To(true), AllowPrivilegeEscalation: ptr.To(false),
-		Capabilities:   &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-	}
+	// SBR's files carry SELinux labels that restricted pods cannot read.
+	// Reuse its existing SCC access, without host mounts or an API token.
+	reader.Definition.Spec.ServiceAccountName = daemonSet.Spec.Template.Spec.ServiceAccountName
+	reader.Definition.Spec.AutomountServiceAccountToken = ptr.To(false)
 	Expect(APIClient.Create(ctx, reader.Definition)).To(Succeed())
 	reader.Object = reader.Definition.DeepCopy()
 	test.observer = reader
@@ -69,6 +69,26 @@ func (test *nodeMapCleanupTest) mountOriginalClaim(ctx context.Context) {
 		Expect(err).NotTo(HaveOccurred(), "The read-only observer pod must be removed")
 	})
 	Expect(reader.WaitUntilRunning(medik8sparams.DefaultTimeout)).To(Succeed())
+	// A second, non-controller owner retains only the PVC. The SBRC and agents
+	// follow normal deletion, without a test finalizer delaying their shutdown.
+	claim = test.claim.DeepCopy()
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := APIClient.Get(ctx, client.ObjectKeyFromObject(claim), claim); err != nil {
+			return err
+		}
+		if claim.UID != test.claim.UID {
+			return fmt.Errorf("refusing to retain a replacement PVC %s", claim.Name)
+		}
+		if !slices.ContainsFunc(claim.OwnerReferences, func(owner metav1.OwnerReference) bool {
+			return owner.UID == reader.Object.UID
+		}) {
+			claim.OwnerReferences = append(claim.OwnerReferences, metav1.OwnerReference{
+				APIVersion: "v1", Kind: "Pod", Name: reader.Object.Name, UID: reader.Object.UID,
+			})
+		}
+
+		return APIClient.Update(ctx, claim)
+	})).To(Succeed(), "The observer must retain the original PVC without delaying SBRC deletion")
 }
 
 func (test *nodeMapCleanupTest) expectOriginalClaim(ctx context.Context, assertion Gomega) {
@@ -80,7 +100,8 @@ func (test *nodeMapCleanupTest) expectOriginalClaim(ctx context.Context, asserti
 }
 
 func (test *nodeMapCleanupTest) deleteAndRetainClaim(ctx context.Context) {
-	Expect(APIClient.Delete(ctx, test.config)).To(Succeed())
+	Expect(APIClient.Delete(ctx, test.config,
+		client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
 	deleting := test.config.DeepCopy()
 	Expect(APIClient.Get(ctx, client.ObjectKeyFromObject(deleting), deleting)).To(Succeed())
 	Expect(deleting.GetDeletionTimestamp()).NotTo(BeNil())
@@ -115,53 +136,9 @@ func (test *nodeMapCleanupTest) deleteAndRetainClaim(ctx context.Context) {
 		}
 	}
 	Expect(mountsOriginalClaim).To(BeTrue(), "The successful cleanup Job must mount the original PVC")
-	Eventually(func(assertion Gomega) {
-		config := buildSBRC(test.config.GetName(), nil)
-		assertion.Expect(APIClient.Get(ctx, client.ObjectKeyFromObject(config), config)).To(Succeed())
-		assertion.Expect(config.GetUID()).To(Equal(test.config.GetUID()))
-		assertion.Expect(config.GetDeletionTimestamp()).NotTo(BeNil())
-		assertion.Expect(config.GetFinalizers()).To(ContainElement(sbrparams.NodeMapTestFinalizer))
-		assertion.Expect(config.GetFinalizers()).NotTo(ContainElement(sbrparams.SBRCOperatorCleanupFinalizer))
-	}, sbrparams.NodeMapCleanupTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-		"The operator must finish its own deletion finalizer before the test retains storage")
-
-	// The deleting SBRC can no longer reconcile ensurePVC and reattach ownership.
-	// Remove only its owner reference, then release our hold so normal GC removes
-	// the DaemonSet and init job. The fixture never patches a PV or changes storage data.
-	claim := test.claim.DeepCopy()
-	Expect(APIClient.Get(ctx, client.ObjectKeyFromObject(claim), claim)).To(Succeed())
-	Expect(claim.UID).To(Equal(test.claim.UID))
-	if claim.Labels == nil {
-		claim.Labels = make(map[string]string)
-	}
-	claim.Labels[sbrparams.NodeMapTestLabel] = "true"
-	claim.OwnerReferences = slices.DeleteFunc(claim.OwnerReferences, func(owner metav1.OwnerReference) bool {
-		return owner.UID == test.config.GetUID()
-	})
-	Expect(APIClient.Update(ctx, claim)).To(Succeed())
-	Expect(test.releaseHold(ctx)).To(Succeed())
 	By("Waiting for every agent pod, the DaemonSet, the SBRC and the owned init job to be fully gone")
 	test.waitForConfigDeletion(ctx)
-}
-
-func (test *nodeMapCleanupTest) releaseHold(ctx context.Context) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		config := buildSBRC(test.config.GetName(), nil)
-		if err := APIClient.Get(ctx, client.ObjectKeyFromObject(config), config); err != nil {
-			return client.IgnoreNotFound(err)
-		}
-		if config.GetUID() != test.config.GetUID() {
-			return fmt.Errorf("refusing to change a replacement SBRC %s", config.GetName())
-		}
-		if !slices.Contains(config.GetFinalizers(), sbrparams.NodeMapTestFinalizer) {
-			return nil
-		}
-		config.SetFinalizers(slices.DeleteFunc(config.GetFinalizers(), func(finalizer string) bool {
-			return finalizer == sbrparams.NodeMapTestFinalizer
-		}))
-
-		return APIClient.Update(ctx, config)
-	})
+	test.expectOriginalClaim(ctx, Default)
 }
 
 func (test *nodeMapCleanupTest) waitForConfigDeletion(ctx context.Context) {
@@ -199,17 +176,38 @@ func (test *nodeMapCleanupTest) waitForConfigDeletion(ctx context.Context) {
 func (test *nodeMapCleanupTest) cleanupConfig(ctx context.Context) {
 	By("Cleaning up the test-owned SBRC and its agents")
 	Expect(client.IgnoreNotFound(APIClient.Delete(ctx, test.config,
-		client.Preconditions{UID: ptr.To(test.config.GetUID())}))).To(Succeed())
-	Expect(test.releaseHold(ctx)).To(Succeed())
+		client.Preconditions{UID: ptr.To(test.config.GetUID())},
+		client.PropagationPolicy(metav1.DeletePropagationBackground)))).To(Succeed())
 	test.waitForConfigDeletion(ctx)
+	selector := "app.kubernetes.io/component=sbr-cleanup,sbrconfig=" + test.config.GetName()
 	jobs, err := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(ctx,
-		metav1.ListOptions{LabelSelector: "app.kubernetes.io/component=sbr-cleanup,sbrconfig=" + test.config.GetName()})
+		metav1.ListOptions{LabelSelector: selector})
 	Expect(err).NotTo(HaveOccurred())
 	for idx := range jobs.Items {
 		job := &jobs.Items[idx]
 		Expect(client.IgnoreNotFound(APIClient.Delete(ctx, job,
-			client.Preconditions{UID: ptr.To(job.UID)}))).To(Succeed())
+			client.Preconditions{UID: ptr.To(job.UID)},
+			client.PropagationPolicy(metav1.DeletePropagationBackground)))).To(Succeed())
 	}
+	// Also remove pods orphaned by a previous interrupted cleanup. Even completed
+	// pods can keep this claim protected while they still reference it.
+	pods, err := APIClient.Pods(medik8sparams.OperatorNs).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	Expect(err).NotTo(HaveOccurred())
+	for idx := range pods.Items {
+		cleanupPod := &pods.Items[idx]
+		Expect(client.IgnoreNotFound(APIClient.Delete(ctx, cleanupPod,
+			client.Preconditions{UID: ptr.To(cleanupPod.UID)}))).To(Succeed())
+	}
+	Expect(wait.PollUntilContextTimeout(ctx, sbrparams.DefaultPollInterval,
+		sbrparams.NodeMapCleanupTimeout, true, func(ctx context.Context) (bool, error) {
+			remaining, err := APIClient.Pods(medik8sparams.OperatorNs).List(ctx,
+				metav1.ListOptions{LabelSelector: selector})
+			if err != nil {
+				return false, err
+			}
+
+			return len(remaining.Items) == 0, nil
+		})).To(Succeed(), "Cleanup pods for SBRC %s must be gone before deleting its PVC", test.config.GetName())
 }
 
 func (test *nodeMapCleanupTest) cleanupClaim(ctx context.Context) {

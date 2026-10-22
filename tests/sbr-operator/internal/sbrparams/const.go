@@ -23,12 +23,6 @@ const (
 	// NodeMapTestLabel marks only resources created by the node-map regression test.
 	NodeMapTestLabel = "test.medik8s.io/node-map-cleanup"
 
-	// NodeMapTestFinalizer retains the test config until its original PVC can be preserved.
-	NodeMapTestFinalizer = "test.medik8s.io/node-map-storage-hold"
-
-	// SBRCOperatorCleanupFinalizer is removed by the SBR operator's deletion path.
-	SBRCOperatorCleanupFinalizer = "sbr-operator.medik8s.io/cleanup"
-
 	// NodeMapCleanupTimeout outlasts the controller's four-minute cleanup-job wait.
 	NodeMapCleanupTimeout = 6 * time.Minute
 
