@@ -971,6 +971,138 @@ func verifyODFFenceRemoved(out, fenceRange string) error {
 	return nil
 }
 
+// clearCephOSDBlocklist removes all Ceph OSD blocklist entries left by destructive fencing
+// tests. Residual blocklist entries from prior test suites can cause heartbeat regression in
+// subsequent tests (e.g. heartbeat sequence drops from ~13 to ~7 under CPU stress). Call
+// this in AfterAll teardown to ensure a clean slate. Failures are logged as warnings; cleanup
+// is best-effort so it never masks the test result.
+func clearCephOSDBlocklist() {
+	rookPods, err := pod.List(APIClient, sbrparams.ODFNamespace,
+		metav1.ListOptions{LabelSelector: sbrparams.RookOperatorPodLabelSelector})
+
+	var rookPod *pod.Builder
+
+	for _, candidate := range rookPods {
+		if candidate.Object.Status.Phase == corev1.PodRunning && candidate.Object.DeletionTimestamp == nil {
+			rookPod = candidate
+
+			break
+		}
+	}
+
+	if err != nil || rookPod == nil {
+		GinkgoWriter.Printf("Warning: Ceph OSD blocklist clear skipped: "+
+			"no running Rook operator pod in %s (err: %v)\n",
+			sbrparams.ODFNamespace, err)
+
+		return
+	}
+
+	cephCmd := func(args ...string) (string, error) {
+		cmd := append([]string{"ceph", "--conf", sbrparams.RookCephConfig, "--connect-timeout", "30"}, args...)
+		out, execErr := rookPod.ExecCommandWithTimeout(cmd, sbrparams.StaleODFFenceTimeout,
+			sbrparams.RookOperatorContainer)
+
+		return out.String(), execErr
+	}
+
+	out, lsErr := cephCmd("osd", "blocklist", "ls", "--format", "json")
+	if lsErr != nil {
+		GinkgoWriter.Printf("Warning: ceph osd blocklist ls failed during teardown: %v: %s\n", lsErr, out)
+
+		return
+	}
+
+	entries, parsed := parseODFBlocklist(out)
+	if !parsed {
+		GinkgoWriter.Printf("Warning: cannot parse Ceph OSD blocklist output during teardown: %q\n", out)
+
+		return
+	}
+
+	if len(entries) == 0 {
+		GinkgoWriter.Printf("Ceph OSD blocklist is empty; no teardown cleanup needed\n")
+
+		return
+	}
+
+	GinkgoWriter.Printf("Clearing %d Ceph OSD blocklist entries left by fencing test\n", len(entries))
+
+	for _, entry := range entries {
+		if entry.Range != "" {
+			cidr := strings.Replace(entry.Range, ":0/", "/", 1)
+			rmOut, rmErr := cephCmd("osd", "blocklist", "range", "rm", cidr)
+			if rmErr != nil {
+				GinkgoWriter.Printf("Warning: ceph osd blocklist range rm %s: %v: %s\n", cidr, rmErr, rmOut)
+			} else {
+				GinkgoWriter.Printf("Removed Ceph OSD blocklist range %s (until %s)\n", cidr, entry.Until)
+			}
+		} else if entry.Addr != "" {
+			rmOut, rmErr := cephCmd("osd", "blocklist", "rm", entry.Addr)
+			if rmErr != nil {
+				GinkgoWriter.Printf("Warning: ceph osd blocklist rm %s: %v: %s\n",
+					entry.Addr, rmErr, rmOut)
+			} else {
+				GinkgoWriter.Printf("Removed Ceph OSD blocklist entry %s (until %s)\n",
+					entry.Addr, entry.Until)
+			}
+		}
+	}
+}
+
+// verifyCephFSIPTablesClean verifies that no test-injected CephFS REJECT rules remain in
+// the host iptables on the target node. It lists the OUTPUT and INPUT chains through the
+// injector pod and removes any residual Ceph REJECT rules found. This prevents iptables
+// rule leakage between test suites that can cause inter-test pollution.
+func verifyCephFSIPTablesClean(injectorPod *pod.Builder) {
+	outputRules, outputErr := injectorPod.ExecCommand([]string{
+		"nsenter", "--target", "1", "--net", "--mount", "--",
+		"iptables", "-S", "OUTPUT",
+	})
+	if outputErr != nil {
+		GinkgoWriter.Printf("Warning: cannot list OUTPUT chain for iptables verification: %v\n", outputErr)
+
+		return
+	}
+
+	inputRules, inputErr := injectorPod.ExecCommand([]string{
+		"nsenter", "--target", "1", "--net", "--mount", "--",
+		"iptables", "-S", "INPUT",
+	})
+	if inputErr != nil {
+		GinkgoWriter.Printf("Warning: cannot list INPUT chain for iptables verification: %v\n", inputErr)
+
+		return
+	}
+
+	cephPorts := []string{"3300", "6789", "6800:7300"}
+	residualFound := false
+	allRules := outputRules.String() + "\n" + inputRules.String()
+
+	for _, line := range strings.Split(allRules, "\n") {
+		if !strings.Contains(line, "REJECT") {
+			continue
+		}
+
+		for _, port := range cephPorts {
+			if strings.Contains(line, port) {
+				GinkgoWriter.Printf("Warning: residual Ceph iptables REJECT rule found after teardown: %s\n",
+					strings.TrimSpace(line))
+				residualFound = true
+
+				break
+			}
+		}
+	}
+
+	if residualFound {
+		GinkgoWriter.Printf("Removing residual CephFS iptables REJECT rules\n")
+		removeCephFSRejectBidirectional(injectorPod)
+	} else {
+		GinkgoWriter.Printf("Verified: no residual CephFS iptables REJECT rules remain after teardown\n")
+	}
+}
+
 func odfFenceNodeRecovered(ctx context.Context, nodeName string) error {
 	node, err := APIClient.CoreV1Interface.Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {

@@ -371,6 +371,9 @@ var _ = Describe(
 			if pullErr == nil {
 				removeCephFSRejectBidirectional(cleanupPod)
 
+				By("AfterAll: verifying no residual CephFS iptables REJECT rules remain")
+				verifyCephFSIPTablesClean(cleanupPod)
+
 				if _, delErr := cleanupPod.Delete(); delErr != nil && !k8serrors.IsNotFound(delErr) {
 					GinkgoWriter.Printf("Warning: delete injector pod %s: %v\n", injectorPodName, delErr)
 				}
