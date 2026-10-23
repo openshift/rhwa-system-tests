@@ -81,15 +81,16 @@ func dumpGatherNamespace(
 ) {
 	safeNS := sanitizeFileName(namespace)
 	podsOut, podsErr := runOC(ctx, "get", "pods", "-n", namespace, "-o", "wide")
-	if podsErr != nil {
+	switch {
+	case podsErr != nil:
 		msg := fmt.Sprintf("oc get pods -n %s failed: %v\n%s\n", namespace, podsErr, podsOut)
 		writeDumpFile(diagDir, safeNS+"-pods.txt", []byte(msg), logf)
 		logf("WARNING: failure dump: no pods listed in %s: %v\n", namespace, podsErr)
-	} else if strings.TrimSpace(podsOut) == "" || strings.Contains(podsOut, "No resources found") {
+	case strings.TrimSpace(podsOut) == "" || strings.Contains(podsOut, "No resources found"):
 		msg := fmt.Sprintf("no pods in gather namespace %s\n%s\n", namespace, podsOut)
 		writeDumpFile(diagDir, safeNS+"-pods.txt", []byte(msg), logf)
 		logf("failure dump: %s", msg)
-	} else {
+	default:
 		writeDumpFile(diagDir, safeNS+"-pods.txt", []byte(podsOut), logf)
 		logf("failure dump: pods in %s:\n%s\n", namespace, strings.TrimSpace(podsOut))
 	}
