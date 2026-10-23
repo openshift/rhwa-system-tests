@@ -126,6 +126,61 @@ const (
 	// MinReadyMasterNodes is the minimum number of Ready master nodes
 	// required for master remediation tests (etcd quorum safety).
 	MinReadyMasterNodes = 3
+
+	// NetworkPolicyName is the name of the NetworkPolicy the operator
+	// renders and reconciles for the SNR agent DaemonSet pods.
+	NetworkPolicyName = "self-node-remediation-ds-np"
+
+	// DefaultHostPort is the kubebuilder default for SelfNodeRemediationConfig
+	DefaultHostPort = 30001
+
+	// NetworkPolicyDNSPort is the DNS port allowed in the NetworkPolicy's
+	// static DNS egress rule.
+	NetworkPolicyDNSPort = int32(53)
+
+	// NetworkPolicyDNSServicePort is the OVN-Kubernetes Service->pod DNAT
+	// target port also allowed in the static DNS egress rule.
+	NetworkPolicyDNSServicePort = int32(5353)
+
+	// NetworkPolicyHTTPSPort is the HTTPS port allowed in the NetworkPolicy's
+	// static HTTPS egress rule (reaching the Kubernetes API service).
+	NetworkPolicyHTTPSPort = int32(443)
+
+	// NetworkPolicyAPIServerPort is the Kubernetes API server port also
+	// allowed in the static HTTPS egress rule.
+	NetworkPolicyAPIServerPort = int32(6443)
+
+	// NetworkPolicyKubeletPort is the port allowed in the NetworkPolicy's
+	// static egress rule for the control-plane agent's own-node kubelet check.
+	NetworkPolicyKubeletPort = int32(10250)
+
+	// EndpointTestIPv4A is an RFC 5737 TEST-NET-3 literal used as a stand-in
+	// EndpointHealthCheckUrl. IP literals resolve immediately via net.LookupIP
+	// without an actual DNS lookup, keeping the test deterministic and
+	// network-independent while still exercising the real resolution path.
+	EndpointTestIPv4A = "203.0.113.5"
+
+	// EndpointTestIPv4ACIDR is the /32 CIDR the controller renders for
+	// EndpointTestIPv4A.
+	EndpointTestIPv4ACIDR = EndpointTestIPv4A + "/32"
+
+	// EndpointTestIPv4B is a second RFC 5737 TEST-NET-3 literal, used to
+	// simulate EndpointHealthCheckUrl resolving to a different address
+	// (a "DNS flip").
+	EndpointTestIPv4B = "203.0.113.6"
+
+	// EndpointTestIPv4BCIDR is the /32 CIDR the controller renders for
+	// EndpointTestIPv4B.
+	EndpointTestIPv4BCIDR = EndpointTestIPv4B + "/32"
+
+	// NetworkPolicyRaceIterations is the number of rapid, alternating
+	// EndpointHealthCheckUrl patches applied in the sole-writer stability
+	// (race) step.
+	NetworkPolicyRaceIterations = 6
+
+	// NetworkPolicyStabilityWindow is how long the NetworkPolicy's resolved
+	// ipBlock egress rule must remain unchanged after the rapid changes settle.
+	NetworkPolicyStabilityWindow = 30 * time.Second
 )
 
 // WorkloadTestImage is the container image used for test workload pods.
