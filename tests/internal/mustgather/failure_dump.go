@@ -43,7 +43,6 @@ func DumpFailureDiagnostics(
 	}
 
 	logf("failure dump: writing diagnostics under %s\n", diagDir)
-
 	namespaces, listErr := listGatherNamespacesSince(dumpCtx, since)
 	if listErr != nil {
 		msg := fmt.Sprintf("failed to list gather namespaces: %v\n", listErr)
