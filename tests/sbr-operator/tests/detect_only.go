@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -201,6 +200,7 @@ var _ = Describe(
 			targetNodeName  string
 			injectorPodName string
 			keepalivePods   []string // pod names, one per worker node
+			workerNodes     []string // node names, shared with the RHWA-1184 regression spec below
 		)
 
 		BeforeAll(func() {
@@ -227,8 +227,6 @@ var _ = Describe(
 				LabelSelector: "node-role.kubernetes.io/worker",
 			})
 			Expect(listErr).ToNot(HaveOccurred(), "Failed to list worker nodes")
-
-			var workerNodes []string
 
 			for i := range nodeList.Items {
 				node := &nodeList.Items[i]
@@ -291,36 +289,29 @@ var _ = Describe(
 			}, sbrparams.SBRCReadyTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
 				"Stale SBRC must be fully gone before recreating")
 
-			if os.Getenv("SBR_TEST_RHWA1068") == "true" {
-				By("Creating watchdog-keepalive pods on all worker nodes (RHWA-1068 precondition)")
+			By("Creating watchdog-keepalive pods on all worker nodes (RHWA-1184 precondition)")
 
-				for _, nodeName := range workerNodes {
-					podName := keepalivePodName(nodeName)
-					keepalivePod, createErr := pod.NewBuilder(
-						APIClient, podName, medik8sparams.OperatorNs, sbrparams.WatchdogDebugImage).
-						DefineOnNode(nodeName).
-						WithHostPid(true).
-						WithPrivilegedFlag().
-						RedefineDefaultCMD([]string{
-							"/bin/bash", "-c",
-							"nsenter --target 1 --mount -- sh -c " +
-								"'exec 200>/dev/watchdog 2>/dev/null; " +
-								"while true; do printf V >&200 2>/dev/null; sleep 10; done' " +
-								"|| sleep 999999",
-						}).
-						CreateAndWaitUntilRunning(sbrparams.WatchdogKeepaliveTimeout)
-					if createErr != nil {
-						GinkgoT().Logf("Warning: keepalive pod %s on node %s: %v; "+
-							"watchdog contention may not be simulated on this node", podName, nodeName, createErr)
-					} else {
-						GinkgoWriter.Printf("Keepalive pod %s Running on node %s\n",
-							keepalivePod.Definition.Name, nodeName)
-						keepalivePods = append(keepalivePods, podName)
-					}
-				}
-			} else {
-				GinkgoWriter.Printf("Skipping watchdog-keepalive pods — " +
-					"SBR_TEST_RHWA1068 not set (RHWA-1068 regression test will be skipped)\n")
+			for _, nodeName := range workerNodes {
+				podName := keepalivePodName(nodeName)
+				keepalivePods = append(keepalivePods, podName)
+				keepalivePod, createErr := pod.NewBuilder(
+					APIClient, podName, medik8sparams.OperatorNs, sbrparams.WatchdogDebugImage).
+					DefineOnNode(nodeName).
+					WithHostPid(true).
+					WithPrivilegedFlag().
+					RedefineDefaultCMD([]string{
+						"/bin/bash", "-c",
+						"exec nsenter --target 1 --mount -- sh -c " +
+							"\"exec 200>/dev/watchdog || exit 1; " +
+							"trap 'printf V >&200 || true' EXIT; " +
+							"trap 'exit 0' TERM INT HUP; " +
+							"while true; do printf . >&200 || exit 1; sleep 10; done\"",
+					}).
+					CreateAndWaitUntilRunning(sbrparams.WatchdogKeepaliveTimeout)
+				Expect(createErr).ToNot(HaveOccurred(),
+					"Watchdog keepalive pod %s on worker %s must start", podName, nodeName)
+				GinkgoWriter.Printf("Keepalive pod %s Running on node %s\n",
+					keepalivePod.Definition.Name, nodeName)
 			}
 
 			By("Creating StorageBasedRemediationConfig with detectOnlyMode: Enabled")
@@ -407,29 +398,21 @@ var _ = Describe(
 			}
 		})
 
-		// RHWA-1068: SBR agent crashes on startup in detect-only mode when watchdog device is busy.
+		// RHWA-1184: SBR agent crashes on startup in detect-only mode when watchdog device is busy.
 		// The keepalive pods created in BeforeAll hold /dev/watchdog open to simulate the condition.
-		// This test is guarded by SBR_TEST_RHWA1068=true because the bug is not yet fixed in the
-		// current operator version. Enable it once the operator fix ships.
-		It("RHWA-1068 regression: agent pods reach Ready despite /dev/watchdog held by another process",
+		// The 5.0 recurrence of the closed RHWA-1068; see docs/TESTCASES/rhwa-1933.md.
+		It("RHWA-1184 regression: agent pods reach Ready despite /dev/watchdog held by another process",
+			reportxml.ID("1933"),
 			Label(
 				labels.OperatorSBR,
 				labels.TierAcceptance,
 				labels.FrequencyNightly,
 				labels.DisruptionNonDestructive,
 				labels.PlatformAny,
-				labels.ComponentController,
+				labels.ComponentDaemonSet,
 			), func() {
-				if os.Getenv("SBR_TEST_RHWA1068") != "true" {
-					GinkgoWriter.Printf("WARNING: skipping RHWA-1068 regression check — " +
-						"bug not yet fixed in current operator version. " +
-						"Set SBR_TEST_RHWA1068=true once the operator fix ships.\n")
-					Skip("RHWA-1068 not yet fixed; set SBR_TEST_RHWA1068=true to enable this check")
-				}
-
-				Expect(keepalivePods).ToNot(BeEmpty(),
-					"RHWA-1068 regression requires at least one keepalive pod holding /dev/watchdog; "+
-						"none were successfully created")
+				Expect(keepalivePods).To(HaveLen(len(workerNodes)),
+					"RHWA-1184 regression requires a keepalive pod on every schedulable worker")
 
 				DeferCleanup(func() {
 					By("DeferCleanup: deleting watchdog-keepalive pods to release /dev/watchdog")
@@ -441,7 +424,7 @@ var _ = Describe(
 				dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrparams.SBRCDetectOnlyTestName
 
 				By("Asserting ALL agent DaemonSet pods are Ready — none should be in CrashLoopBackOff")
-				// Without the RHWA-1068 fix the watchdog preflight runs unconditionally before the
+				// Without the RHWA-1184 fix the watchdog preflight runs unconditionally before the
 				// agent checks detectOnlyMode. All pods fail with "watchdog device is not available"
 				// and NumberReady stays at 0 until this Eventually times out.
 				Eventually(func() error {
@@ -459,56 +442,128 @@ var _ = Describe(
 
 					return nil
 				}, sbrparams.DetectOnlyAllPodsReadyTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"All agent pods must be Ready; detect-only mode must skip the watchdog preflight (RHWA-1068)")
+					"All agent pods must be Ready; detect-only mode must skip the watchdog preflight (RHWA-1184)")
 
-				By("Verifying no agent pod log contains the RHWA-1068 crash message")
+				By("Recording agent pod identities and restart counts before the observation window")
 
 				agentDS, dsErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
 					context.TODO(), dsName, metav1.GetOptions{})
 				Expect(dsErr).ToNot(HaveOccurred(), "Failed to get agent DaemonSet %s", dsName)
-
-				var selectorParts []string
-
-				for k, v := range agentDS.Spec.Selector.MatchLabels {
-					selectorParts = append(selectorParts, k+"="+v)
-				}
-
+				agentSelector, selectorErr := metav1.LabelSelectorAsSelector(agentDS.Spec.Selector)
+				Expect(selectorErr).ToNot(HaveOccurred(), "Failed to build agent pod selector for DaemonSet %s", dsName)
 				agentPodList, listErr := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).List(
-					context.TODO(), metav1.ListOptions{LabelSelector: strings.Join(selectorParts, ",")})
+					context.TODO(), metav1.ListOptions{LabelSelector: agentSelector.String()})
 				Expect(listErr).ToNot(HaveOccurred(), "Failed to list agent pods for DaemonSet %s", dsName)
-
-				const crashMsg = "Pre-flight checks failed: watchdog device is not available"
+				Expect(len(agentPodList.Items)).To(Equal(int(agentDS.Status.DesiredNumberScheduled)),
+					"Every desired agent pod must exist before the observation window")
+				agentPodUIDs := make(map[string]types.UID, len(agentPodList.Items))
+				agentRestartCounts := make(map[string]map[string]int32, len(agentPodList.Items))
 
 				for i := range agentPodList.Items {
 					agentPod := &agentPodList.Items[i]
-					rawLogs, logsErr := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).
-						GetLogs(agentPod.Name, &corev1.PodLogOptions{}).DoRaw(context.TODO())
-					if logsErr != nil {
-						GinkgoWriter.Printf("Warning: could not fetch logs for agent pod %s: %v\n",
-							agentPod.Name, logsErr)
+					Expect(agentPod.Status.Phase).To(Equal(corev1.PodRunning),
+						"Agent pod %s must be Running before the observation window", agentPod.Name)
+					agentPodUIDs[agentPod.Name] = agentPod.UID
+					agentRestartCounts[agentPod.Name] = make(map[string]int32, len(agentPod.Status.ContainerStatuses))
 
-						continue
-					}
-
-					Expect(string(rawLogs)).ToNot(ContainSubstring(crashMsg),
-						"Agent pod %s must not log watchdog preflight failure in detect-only mode (RHWA-1068)",
-						agentPod.Name)
-
-					// If the pod restarted, the crash is in the previous (terminated) container.
 					for _, cs := range agentPod.Status.ContainerStatuses {
-						if cs.RestartCount > 0 {
-							prevLogs, prevErr := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).
-								GetLogs(agentPod.Name, &corev1.PodLogOptions{Previous: true}).DoRaw(context.TODO())
-							if prevErr == nil {
-								Expect(string(prevLogs)).ToNot(ContainSubstring(crashMsg),
-									"Agent pod %s previous container must not log watchdog preflight failure (RHWA-1068)",
-									agentPod.Name)
-							}
-
-							break
-						}
+						Expect(cs.RestartCount).To(BeZero(),
+							"Agent pod %s container %s must not have restarted before the observation window (RHWA-1184)",
+							agentPod.Name, cs.Name)
+						agentRestartCounts[agentPod.Name][cs.Name] = cs.RestartCount
 					}
 				}
+
+				By(fmt.Sprintf(
+					"Consistently asserting agent and keepalive health and no worker "+
+						"SBRStorageUnhealthy=True for %s while the watchdog is held",
+					sbrparams.DetectOnlySuppressionCheckDuration))
+
+				Consistently(func() error {
+					agentDS, dsErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
+						context.TODO(), dsName, metav1.GetOptions{})
+					if dsErr != nil {
+						return fmt.Errorf("failed to get agent DaemonSet %s: %w", dsName, dsErr)
+					}
+					if agentDS.Status.DesiredNumberScheduled == 0 ||
+						agentDS.Status.NumberReady < agentDS.Status.DesiredNumberScheduled {
+						return fmt.Errorf("DaemonSet %s has %d/%d agent pods Ready", dsName,
+							agentDS.Status.NumberReady, agentDS.Status.DesiredNumberScheduled)
+					}
+
+					agentPodList, listErr := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).List(
+						context.TODO(), metav1.ListOptions{LabelSelector: agentSelector.String()})
+					if listErr != nil {
+						return fmt.Errorf("failed to list agent pods for DaemonSet %s: %w", dsName, listErr)
+					}
+					if len(agentPodList.Items) != int(agentDS.Status.DesiredNumberScheduled) {
+						return fmt.Errorf("DaemonSet %s has %d agent pods, want %d",
+							dsName, len(agentPodList.Items), agentDS.Status.DesiredNumberScheduled)
+					}
+
+					for i := range agentPodList.Items {
+						agentPod := &agentPodList.Items[i]
+						expectedUID, found := agentPodUIDs[agentPod.Name]
+						if !found || agentPod.UID != expectedUID {
+							return fmt.Errorf("agent pod %s was replaced during watchdog contention", agentPod.Name)
+						}
+						if agentPod.Status.Phase != corev1.PodRunning {
+							return fmt.Errorf("agent pod %s is %s, want Running", agentPod.Name, agentPod.Status.Phase)
+						}
+
+						podReady := false
+						for _, condition := range agentPod.Status.Conditions {
+							if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+								podReady = true
+
+								break
+							}
+						}
+						if !podReady {
+							return fmt.Errorf("agent pod %s is not Ready", agentPod.Name)
+						}
+
+						expectedRestarts := agentRestartCounts[agentPod.Name]
+						if len(agentPod.Status.ContainerStatuses) != len(expectedRestarts) {
+							return fmt.Errorf("agent pod %s container statuses changed during watchdog contention",
+								agentPod.Name)
+						}
+						for _, cs := range agentPod.Status.ContainerStatuses {
+							expectedCount, found := expectedRestarts[cs.Name]
+							if !found || cs.RestartCount != expectedCount {
+								return fmt.Errorf("agent pod %s container %s restart count changed from %d to %d",
+									agentPod.Name, cs.Name, expectedCount, cs.RestartCount)
+							}
+						}
+					}
+
+					for _, podName := range keepalivePods {
+						keepalivePod, getErr := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).Get(
+							context.TODO(), podName, metav1.GetOptions{})
+						if getErr != nil {
+							return fmt.Errorf("failed to get watchdog keepalive pod %s: %w", podName, getErr)
+						}
+						if keepalivePod.Status.Phase != corev1.PodRunning ||
+							len(keepalivePod.Status.ContainerStatuses) == 0 {
+							return fmt.Errorf("watchdog keepalive pod %s is not Running", podName)
+						}
+						for _, cs := range keepalivePod.Status.ContainerStatuses {
+							if cs.State.Running == nil || cs.RestartCount != 0 {
+								return fmt.Errorf("watchdog keepalive pod %s container %s is not running cleanly",
+									podName, cs.Name)
+							}
+						}
+					}
+
+					for _, nodeName := range workerNodes {
+						if condErr := transientNodeHasCondition(nodeName, false); condErr != nil {
+							return condErr
+						}
+					}
+
+					return nil
+				}, sbrparams.DetectOnlySuppressionCheckDuration, sbrparams.DetectOnlySuppressionCheckInterval).Should(Succeed(),
+					"No worker node may report SBRStorageUnhealthy=True while /dev/watchdog is held (RHWA-1184)")
 			})
 
 		It("Verify SBRC detectOnlyMode field: spec reflection, storage-fault suppression, toggle, and DaemonSet GC",

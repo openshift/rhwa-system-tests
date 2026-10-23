@@ -300,6 +300,19 @@ The SBR test suite is organized in the `/tests/sbr-operator/tests/` directory wi
 - **Override**: Set `SBR_STORAGE_CLASS` env var
 - **Requirement**: ReadWriteMany (RWX) access mode
 
+#### Test ID: 1933 - Detect-Only Startup With Watchdog Held Open (`detect_only.go`)
+**Purpose**: Verify SBR agents remain Ready in detect-only mode while another process holds `/dev/watchdog` open
+**Description**:
+- Starts a privileged watchdog keepalive pod on every schedulable worker before creating the detect-only configuration
+- Verifies all agent pods stay Ready with the same pod identities and restart counts during a 90-second observation window
+- Verifies keepalive containers remain running and no worker reports `SBRStorageUnhealthy=True`
+- Does not assert specific preflight log messages
+**Expected**: Watchdog contention does not prevent agent startup or stability in detect-only mode
+**Storage Class**:
+- **Auto-discovered RWX**: CephFS-based (searches for provisioner containing "cephfs")
+- **Override**: Set `SBR_STORAGE_CLASS` env var
+- **Requirement**: ReadWriteMany (RWX) access mode
+
 ### 8. Observability Tests
 
 #### Test ID: 89202 - Prometheus Metrics (metrics.go)

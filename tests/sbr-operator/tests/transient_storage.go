@@ -57,16 +57,16 @@ func findTransientRWXStorageClass() string {
 	return ""
 }
 
-// transientNodeHasCondition returns nil when the named node condition matches wantTrue; error otherwise.
-// A missing condition is treated as False.
-func transientNodeHasCondition(nodeName, condType string, wantTrue bool) error {
+// transientNodeHasCondition returns nil when the node's SBRStorageUnhealthy condition matches
+// wantTrue; error otherwise. A missing condition is treated as False.
+func transientNodeHasCondition(nodeName string, wantTrue bool) error {
 	node, err := APIClient.CoreV1Interface.Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
 
 	for _, cond := range node.Status.Conditions {
-		if string(cond.Type) != condType {
+		if string(cond.Type) != sbrparams.SBRStorageUnhealthyCondition {
 			continue
 		}
 
@@ -76,14 +76,14 @@ func transientNodeHasCondition(nodeName, condType string, wantTrue bool) error {
 		}
 
 		return fmt.Errorf("node %s condition %s status=%s; want true=%v",
-			nodeName, condType, cond.Status, wantTrue)
+			nodeName, sbrparams.SBRStorageUnhealthyCondition, cond.Status, wantTrue)
 	}
 
 	if !wantTrue {
 		return nil
 	}
 
-	return fmt.Errorf("node %s: condition %s not present", nodeName, condType)
+	return fmt.Errorf("node %s: condition %s not present", nodeName, sbrparams.SBRStorageUnhealthyCondition)
 }
 
 // sbrCRCount returns the number of StorageBasedRemediation CRs in the cluster.
@@ -314,7 +314,7 @@ func verifyTransientStorageSelfHealing(targetNodeName *string, injectorPod **pod
 		sbrparams.SBRStorageUnhealthyCondition, *targetNodeName))
 
 	Eventually(func() error {
-		return transientNodeHasCondition(*targetNodeName, sbrparams.SBRStorageUnhealthyCondition, true)
+		return transientNodeHasCondition(*targetNodeName, true)
 	}, sbrparams.StorageInjectionTimeout, sbrparams.StorageInjectionPollInterval).Should(Succeed(),
 		"Node %q must report %q=True when CephFS ports are blocked",
 		*targetNodeName, sbrparams.SBRStorageUnhealthyCondition)
@@ -335,7 +335,7 @@ func verifyTransientStorageSelfHealing(targetNodeName *string, injectorPod **pod
 		sbrparams.SBRStorageUnhealthyCondition, *targetNodeName))
 
 	Eventually(func() error {
-		return transientNodeHasCondition(*targetNodeName, sbrparams.SBRStorageUnhealthyCondition, false)
+		return transientNodeHasCondition(*targetNodeName, false)
 	}, sbrparams.StorageInjectionTimeout, sbrparams.StorageInjectionPollInterval).Should(Succeed(),
 		"Node %q condition %q must clear after storage is restored",
 		*targetNodeName, sbrparams.SBRStorageUnhealthyCondition)

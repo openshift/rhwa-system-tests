@@ -206,8 +206,7 @@ func assertNoAgentUnhealthyUnderLoad(baselines []agentBaseline) {
 
 	Consistently(func() error {
 		for _, baseline := range baselines {
-			if condErr := transientNodeHasCondition(baseline.nodeName,
-				sbrparams.SBRStorageUnhealthyCondition, false); condErr != nil {
+			if condErr := transientNodeHasCondition(baseline.nodeName, false); condErr != nil {
 				return condErr
 			}
 		}
