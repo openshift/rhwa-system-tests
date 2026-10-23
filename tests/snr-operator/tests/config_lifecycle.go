@@ -81,7 +81,7 @@ var _ = Describe(
 
 						Eventually(func() error {
 							return APIClient.Patch(context.TODO(),
-								snrcForPatch(snrparams.SNRConfigName),
+								snrcForPatch(),
 								client.RawPatch(types.MergePatchType, restorePatch))
 						}, medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
 							"Failed to restore original watchdog path on SNRC")
@@ -101,7 +101,7 @@ var _ = Describe(
 
 					invalidPatch := []byte(`{"spec":{"watchdogFilePath":"/dev/foo"}}`)
 					err = APIClient.Patch(context.TODO(),
-						snrcForPatch(snrparams.SNRConfigName),
+						snrcForPatch(),
 						client.RawPatch(types.MergePatchType, invalidPatch))
 					Expect(err).ToNot(HaveOccurred(),
 						"Failed to patch SNRC with invalid watchdog path")

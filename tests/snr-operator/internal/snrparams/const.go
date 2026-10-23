@@ -126,7 +126,84 @@ const (
 	// MinReadyMasterNodes is the minimum number of Ready master nodes
 	// required for master remediation tests (etcd quorum safety).
 	MinReadyMasterNodes = 3
+
+	// --- preferredAddressTypes (RHWA-1928) constants ---.
+
+	// AgentDaemonSetName is the name of the SNR agent DaemonSet the
+	// SelfNodeRemediationConfig controller reconciles.
+	AgentDaemonSetName = "self-node-remediation-ds"
+
+	// AgentNetworkPolicyName is the NetworkPolicy the SNRC controller
+	// reconciles alongside the agent DaemonSet. Its egress allowance for
+	// KubeletSecurePort is what lets the control-plane self-diagnostics
+	// reach the kubelet at all.
+	AgentNetworkPolicyName = "self-node-remediation-ds-np"
+
+	// PreferredAddressTypesEnvVar is the agent container environment
+	// variable rendered from SelfNodeRemediationConfig.spec.preferredAddressTypes.
+	// An empty value means the agent falls back to ["NodeName"].
+	PreferredAddressTypesEnvVar = "PREFERRED_ADDRESS_TYPES"
+
+	// PreferredAddressTypesInvalid is a value outside the CRD enum, used to
+	// prove the API server rejects anything undocumented.
+	PreferredAddressTypesInvalid = "NotAnAddressType"
+
+	// KubeletSecurePort is the port the control-plane self-diagnostics probe.
+	// Named "secure" and not "read-only": 10250 is the kubelet's
+	// authenticated HTTPS port, 10255 is the read-only one. A string
+	// because it is passed to net.JoinHostPort.
+	KubeletSecurePort = "10250"
+
+	// KubeletDownMessage is the agent log line emitted when the
+	// self-diagnostics kubelet check fails for an address.
+	KubeletDownMessage = "kubelet service is down"
+
+	// KubeletProbeTimeout bounds the in-cluster curl probe of the kubelet
+	// port. Matches the 10s http.Client timeout the agent itself uses.
+	KubeletProbeTimeout = 10 * time.Second
+
+	// KubeletProbePodTimeout is how long to wait for a kubelet probe pod to
+	// be scheduled, pull its image and run to completion.
+	KubeletProbePodTimeout = 5 * time.Minute
+
+	// PreferredAddressNoRemediationDuration is the window over which no
+	// control-plane node may be remediated after the agent DaemonSet rolls.
+	//
+	// Four minutes, set from measurement rather than derivation. SNR's own
+	// timings suggest a false self-remediation should fire ~90s after the
+	// agents restart (maxApiErrorThreshold 3 x apiCheckInterval 15s = 45s to
+	// give up on the API, plus maxTimeForNoPeersResponse 30s). Reality is
+	// slower and more variable -- two observed reboots fired at 79s and 169s
+	// after the rollout completed, so the arithmetic understates it by up to
+	// 2x and two samples are not enough to claim a bound. 240s leaves ~200s
+	// for the node to go down after the ~40s node-monitor-grace-period
+	// detection cost, against an observed worst case of 169s.
+	//
+	// Do not shorten this on the strength of the arithmetic alone; a 3 minute
+	// window cleared the 169s event by 11 seconds, which was luck. Detection
+	// latency is what decides whether a reset is caught at all -- see the
+	// Ready check in noControlPlaneRemediation, and note that boot IDs lag the
+	// reset by ~3m40s and so cannot be the detector at any window length.
+	PreferredAddressNoRemediationDuration = 4 * time.Minute
 )
 
 // WorkloadTestImage is the container image used for test workload pods.
 var WorkloadTestImage = medik8sparams.WorkloadImage
+
+// PreferredAddressTypesValid is the enum the SelfNodeRemediationConfig CRD
+// must accept for spec.preferredAddressTypes, in the order the upstream
+// kubebuilder marker declares it.
+var PreferredAddressTypesValid = []string{
+	"NodeName",
+	"Hostname",
+	"InternalDNS",
+	"ExternalDNS",
+	"InternalIP",
+	"ExternalIP",
+}
+
+// PreferredAddressTypesConfigured is the list the test configures. InternalIP
+// first because that is the address type the fix exists to make usable;
+// NodeName second to prove the ordering survives rendering, since order is
+// the agent's fallback precedence.
+var PreferredAddressTypesConfigured = []string{"InternalIP", "NodeName"}

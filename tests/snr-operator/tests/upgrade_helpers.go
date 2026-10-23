@@ -15,8 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const upgradeSNRDaemonSetName = "self-node-remediation-ds"
-
 func upgradeSNRC() *unstructured.Unstructured {
 	return buildSNRCR("SelfNodeRemediationConfig", snrparams.SNRConfigName, nil)
 }
@@ -64,7 +62,7 @@ func (hooks *snrUpgradeOperatorFBCTest) waitForAgents(
 	Eventually(func() error {
 		daemonSet := &appsv1.DaemonSet{}
 		if err := APIClient.Get(ctx, client.ObjectKey{
-			Name: upgradeSNRDaemonSetName, Namespace: hooks.owned.Name,
+			Name: snrparams.AgentDaemonSetName, Namespace: hooks.owned.Name,
 		}, daemonSet); err != nil {
 			return err
 		}

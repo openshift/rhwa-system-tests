@@ -237,13 +237,36 @@ and the Disabled condition disappears.
 - **Standalone**: `ginkgo --label-filter="snr" --focus="SNRC deletion disables" ./tests/snr-operator/...`
 - **Pass criteria**: DS pods deleted after SNRC removal; SNR CR shows Disabled/ConfigurationNotFound; after SNRC recreation DS pods return and Disabled condition is absent
 
+### 15. Verify preferredAddressTypes Is Validated and Causes No Remediation ([RHWA-1928](https://redhat.atlassian.net/browse/RHWA-1928))
+
+Validates `SelfNodeRemediationConfig.spec.preferredAddressTypes`, the field
+added by [self-node-remediation#331](https://github.com/medik8s/self-node-remediation/pull/331)
+to fix [RHWA-1596](https://redhat.atlassian.net/browse/RHWA-1596) (control plane
+self-diagnostics failing on clusters where node names are not DNS-resolvable,
+causing false self-remediation). Checks the installed CRD enum, rejects an
+undocumented value and accepts all six documented ones via server-side dry-run,
+probes the kubelet from the pod network, then sets the field and confirms the
+agents roll, render `PREFERRED_ADDRESS_TYPES=InternalIP,NodeName`, and leave the
+cluster un-remediated. Patches and restores the **default** SNRC, so it is
+`Serial`. **Labelled destructive**: the spec reboots nothing itself, but rolling the agent
+DaemonSet has driven control plane nodes into watchdog self-remediation on two unrelated
+clusters ([RHWA-1942](https://redhat.atlassian.net/browse/RHWA-1942)), so it is not safe
+for a non-destructive lane until that is fixed. Full specification: [docs/TESTCASES/rhwa-1928.md](../../docs/TESTCASES/rhwa-1928.md).
+
+- **Operators**: SNR v5.8.0+
+- **Cluster**: Any topology with at least one control plane node; every control plane node needs an InternalIP
+- **Environment**: Connected or disconnected. `WORKLOAD_IMAGE` must be a real image with `curl` — the kubelet probe pod runs from it
+- **Standalone**: `ginkgo --label-filter="operator:snr && tier:acceptance" --focus="preferredAddressTypes" ./tests/snr-operator/...`
+- **Pass criteria**: CRD enum matches the six documented values; invalid value rejected and all six accepted by dry-run; kubelet answers on each control plane InternalIP from the pod network; after the patch every agent pod is replaced and renders `InternalIP,NodeName`; no SelfNodeRemediation CR, no control plane node leaving Ready, and no boot ID change for 3 minutes; original SNRC spec restored
+- **Skips when**: a control plane node has no InternalIP, or a NodeHealthCheck selects control plane nodes (it could create a remediation during the observation window)
+
 ### Destructive Tests
 
 Tests that stop kubelet on nodes, triggering NHC-based health detection
 and SNR remediation with node reboots. Require NHC operator installed,
 2+ worker nodes, and 3+ master nodes. Run time: ~5-10 minutes per test.
 
-### 15. Verify Worker Node Remediation After Kubelet Stop ([OCP-52416](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-52416))
+### 16. Verify Worker Node Remediation After Kubelet Stop ([OCP-52416](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-52416))
 
 Stops kubelet on a worker node, NHC detects the unhealthy node and
 creates an SNR CR, SNR remediates by rebooting the node, then verifies
@@ -256,7 +279,7 @@ was auto-selected (OCP 4.15+) via controller-manager logs.
 - **Standalone**: `ginkgo --label-filter="snr" --focus="worker node after kubelet stop" ./tests/snr-operator/...`
 - **Pass criteria**: Node rebooted (boot ID changed), creation timestamp unchanged (not deleted/recreated), OutOfServiceTaint auto-selected log message found
 
-### 16. Verify ResourceDeletion Strategy Evicts Workload Pod ([OCP-50772](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-50772))
+### 17. Verify ResourceDeletion Strategy Evicts Workload Pod ([OCP-50772](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-50772))
 
 Creates a ResourceDeletion SNRT, deploys a test workload pod on the
 target worker, stops kubelet, and verifies the pod is evicted from the
@@ -268,7 +291,7 @@ remediated node after SNR completes the remediation cycle.
 - **Standalone**: `ginkgo --label-filter="snr" --focus="ResourceDeletion" ./tests/snr-operator/...`
 - **Pass criteria**: Node rebooted, creation timestamp unchanged, workload pod evicted (deleted or moved off remediated node)
 
-### 17. Verify OutOfServiceTaint Strategy Evicts Workload Pod ([OCP-61594](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-61594))
+### 18. Verify OutOfServiceTaint Strategy Evicts Workload Pod ([OCP-61594](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-61594))
 
 Creates an OutOfServiceTaint SNRT, deploys a test workload pod on the
 target worker, stops kubelet, and verifies the pod is evicted from the
@@ -280,7 +303,7 @@ remediated node after SNR completes the remediation cycle.
 - **Standalone**: `ginkgo --label-filter="snr" --focus="OutOfServiceTaint" ./tests/snr-operator/...`
 - **Pass criteria**: Node rebooted, creation timestamp unchanged, workload pod evicted (deleted or moved off remediated node)
 
-### 18. Verify Master Node Remediation After Kubelet Stop ([OCP-55059](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-55059))
+### 19. Verify Master Node Remediation After Kubelet Stop ([OCP-55059](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-55059))
 
 Stops kubelet on a master/control-plane node, NHC detects the unhealthy
 node and creates an SNR CR, SNR remediates by rebooting the node, then
@@ -292,7 +315,7 @@ verifies the node recovers and was not deleted/recreated.
 - **Standalone**: `ginkgo --label-filter="snr" --focus="master node after kubelet stop" ./tests/snr-operator/...`
 - **Pass criteria**: Master rebooted (boot ID changed), creation timestamp unchanged (not deleted/recreated), node returns to Ready
 
-### 19. Verify Simultaneous Master and Worker Remediation ([OCP-56069](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-56069))
+### 20. Verify Simultaneous Master and Worker Remediation ([OCP-56069](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-56069))
 
 Stops kubelet on both a master and a worker node simultaneously, creates
 separate NHC CRs for each role, and verifies both nodes are remediated

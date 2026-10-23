@@ -104,11 +104,14 @@ var snrcGVK = schema.GroupVersionKind{
 	Kind:    "SelfNodeRemediationConfig",
 }
 
-// snrcForPatch returns a minimal unstructured object suitable for client.Patch calls.
-func snrcForPatch(name string) *unstructured.Unstructured {
+// snrcForPatch returns a minimal unstructured object suitable for client.Patch
+// calls against the default SNRC. It takes no name: SNR's webhook rejects any
+// SelfNodeRemediationConfig not called snrparams.SNRConfigName, so there is
+// never another one to patch.
+func snrcForPatch() *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(snrcGVK)
-	obj.SetName(name)
+	obj.SetName(snrparams.SNRConfigName)
 	obj.SetNamespace(medik8sparams.OperatorNs)
 
 	return obj
