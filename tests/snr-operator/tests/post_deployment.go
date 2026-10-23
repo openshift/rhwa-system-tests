@@ -128,6 +128,11 @@ var _ = Describe(
 				}, medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
 					"SNR DaemonSet pods are not all running and ready")
 
+				By("Verifying SNR DaemonSet pods do not set hostPort (KSV024)")
+
+				Expect(verifyDSPodsNoHostPort()).To(Succeed(),
+					"SNR DaemonSet pods should not expose hostPort per pod security standard")
+
 				By("Verifying SNR controller-manager pods are running")
 
 				ctrlListOptions := metav1.ListOptions{

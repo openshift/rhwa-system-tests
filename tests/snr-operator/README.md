@@ -73,13 +73,13 @@ make run-tests
 ### 1. Verify SNR Resources Are Installed and Running ([OCP-54205](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-54205))
 
 Validates that the SelfNodeRemediationConfig CR exists, DaemonSet pods
-are running, and controller-manager pods are in Running state.
+are running with no hostPort set (KSV024), and controller-manager pods are in Running state.
 
 - **Operators**: SNR v0.13.0+
 - **Cluster**: Any topology (MNO or SNO)
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="snr" --focus="resources are installed" ./tests/snr-operator/...`
-- **Pass criteria**: SNRC exists by name, at least one DS pod running, all controller pods running
+- **Pass criteria**: SNRC exists by name, at least one DS pod running, no DS pod container sets hostPort, all controller pods running
 
 ### 2. Verify Only Automatic Remediation Template Exists ([OCP-71010](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-71010))
 
