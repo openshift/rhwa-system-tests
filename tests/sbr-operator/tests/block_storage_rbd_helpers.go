@@ -19,6 +19,7 @@ import (
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -462,20 +463,7 @@ func setupBlockModeSBRC(sbrcName string) *unstructured.Unstructured {
 func setupBlockModeSBRCWithSpec(
 	sbrcName string, additionalSpec map[string]interface{},
 ) *unstructured.Unstructured {
-	By("Checking if Self Node Remediation (SNR) operator is running")
-
-	snrRunning, snrPodCount := checkSNRRunning()
-	if snrRunning {
-		Fail(fmt.Sprintf("CANNOT RUN SBR BLOCK STORAGE TEST: Self Node Remediation (SNR) is running with %d pods.\n"+
-			"SNR and SBR cannot both use the watchdog device simultaneously (resource conflict).\n"+
-			"SBR requires detectOnlyMode: disabled (default) which needs exclusive watchdog access.\n\n"+
-			"To run this test, you must scale down SNR:\n"+
-			"  oc scale daemonset self-node-remediation-ds -n openshift-workload-availability --replicas=0\n\n"+
-			"Alternatively, configure SBR with detectOnlyMode: enabled (but this changes test behavior).",
-			snrPodCount))
-	}
-
-	GinkgoWriter.Printf("✓ SNR is not running - SBR can safely access watchdog device\n")
+	failIfSNRRunning()
 
 	By("Discovering Ceph RBD block storage class for Ceph RBD tests")
 
@@ -496,6 +484,82 @@ func setupBlockModeSBRCWithSpec(
 	waitForSBRCReady(sbrcName)
 
 	return sbrc
+}
+
+// failIfSNRRunning fails the suite when Self Node Remediation is running, because SNR and SBR cannot
+// both own the watchdog device at once. Shared by every Block-mode setup path.
+func failIfSNRRunning() {
+	By("Checking if Self Node Remediation (SNR) operator is running")
+
+	snrRunning, snrPodCount := checkSNRRunning()
+	if snrRunning {
+		Fail(fmt.Sprintf("CANNOT RUN SBR BLOCK STORAGE TEST: Self Node Remediation (SNR) is running with %d pods.\n"+
+			"SNR and SBR cannot both use the watchdog device simultaneously (resource conflict).\n"+
+			"SBR requires detectOnlyMode: disabled (default) which needs exclusive watchdog access.\n\n"+
+			"To run this test, you must scale down SNR:\n"+
+			"  oc scale daemonset self-node-remediation-ds -n openshift-workload-availability --replicas=0\n\n"+
+			"Alternatively, configure SBR with detectOnlyMode: enabled (but this changes test behavior).",
+			snrPodCount))
+	}
+
+	GinkgoWriter.Printf("✓ SNR is not running - SBR can safely access watchdog device\n")
+}
+
+// waitForBlockInitJobSucceeded blocks until the block device-init Job owned by the given SBRC reports
+// completion. The operator runs one init Job per SBRC and gates the agent DaemonSet on it, so waiting
+// on the Job directly turns an init failure into an explicit "init Job failed" error rather than an
+// opaque "DaemonSet not ready" timeout.
+//
+// The Job is matched by owner UID, not by name: the pre-clean waits for the old SBRC to be deleted but
+// not for its Job, and a stale succeeded Job from a previous run shares the name. Completion is read
+// from the Job's Complete/Failed conditions rather than the Succeeded/Failed counts, because the
+// operator sets BackoffLimit: 1, so a Job that fails one pod and succeeds on retry ends with both
+// Failed=1 and Succeeded=1 — a healthy outcome the counts alone cannot distinguish from a real failure.
+func waitForBlockInitJobSucceeded(sbrcName string, ownerUID types.UID) {
+	Eventually(func() error {
+		jobList, listErr := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(
+			context.TODO(), metav1.ListOptions{})
+		if listErr != nil {
+			return fmt.Errorf("list Jobs in %s: %w", medik8sparams.OperatorNs, listErr)
+		}
+
+		for idx := range jobList.Items {
+			job := &jobList.Items[idx]
+			if !ownedBy(job.OwnerReferences, ownerUID) {
+				continue
+			}
+
+			for _, cond := range job.Status.Conditions {
+				if cond.Status != corev1.ConditionTrue {
+					continue
+				}
+
+				if cond.Type == batchv1.JobComplete {
+					return nil
+				}
+
+				if cond.Type == batchv1.JobFailed {
+					return fmt.Errorf("block init Job %s failed: %s", job.Name, cond.Message)
+				}
+			}
+
+			return fmt.Errorf("block init Job %s not complete yet (active=%d)", job.Name, job.Status.Active)
+		}
+
+		return fmt.Errorf("no block init Job owned by SBRC %s yet", sbrcName)
+	}, sbrparams.SBRCReadyTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+		"Block device-init Job for SBRC %q must complete successfully", sbrcName)
+}
+
+// ownedBy reports whether any of the owner references carries the given UID.
+func ownedBy(owners []metav1.OwnerReference, ownerUID types.UID) bool {
+	for _, owner := range owners {
+		if owner.UID == ownerUID {
+			return true
+		}
+	}
+
+	return false
 }
 
 // deleteSBRCAndWait deletes an SBRC and blocks until it is gone. Deletion failures are logged

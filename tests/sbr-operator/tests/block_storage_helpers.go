@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,9 @@ import (
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // discoverCephRBDStorageClass returns the Ceph RBD block storage class name.
@@ -311,6 +314,35 @@ func agentPodNameByNode(sbrcName, nodeName string, onNode bool) (string, error) 
 	return "", fmt.Errorf("SBRC %s has no Running agent pod %s node %s", sbrcName, location, nodeName)
 }
 
+// agentPodReadyOnNode returns nil once the SBRC's own agent pod on nodeName reports Ready.
+// agentPodNameByNode restricts the match to this SBRC's Running agents, and the Ready condition is
+// what matters: it is gated on the agent's preflight-ok file, so Ready means the block write test
+// passed. A missing Ready condition counts as not ready. Intended as an Eventually body.
+func agentPodReadyOnNode(sbrcName, nodeName string) error {
+	podName, nameErr := agentPodNameByNode(sbrcName, nodeName, true)
+	if nameErr != nil {
+		// No Running agent on the node yet: expected while it is still rebooting.
+		return nameErr
+	}
+
+	agentPod, pullErr := pod.Pull(APIClient, podName, medik8sparams.OperatorNs)
+	if pullErr != nil {
+		return fmt.Errorf("pull agent pod %s: %w", podName, pullErr)
+	}
+
+	for _, cond := range agentPod.Object.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			if cond.Status == corev1.ConditionTrue {
+				return nil
+			}
+
+			return fmt.Errorf("agent pod %s is not Ready (status=%s)", podName, cond.Status)
+		}
+	}
+
+	return fmt.Errorf("agent pod %s has no Ready condition yet", podName)
+}
+
 // fetchAgentMetrics returns the raw Prometheus exposition body from an SBR agent pod's own metrics
 // endpoint. The API server cannot proxy to that port in OVN-K clusters, so, as in the metrics
 // suite, it is fetched from inside the container. Callers that need several counters from the same
@@ -335,6 +367,8 @@ func fetchAgentMetrics(agentPodName string) (string, error) {
 
 // readAgentCounter returns the sum of every sample of metricName on an SBR agent pod's own metrics
 // endpoint.
+//
+//nolint:unparam // metricName is kept explicit so callers read at the call site which counter they sample.
 func readAgentCounter(agentPodName, metricName string) (float64, error) {
 	body, fetchErr := fetchAgentMetrics(agentPodName)
 	if fetchErr != nil {
@@ -412,6 +446,34 @@ func heartbeatSequences(observerPodName string) (map[uint16]uint64, error) {
 	return sequences, nil
 }
 
+// victimHeartbeatTimestamp reads the heartbeat region through the observer and returns the UnixNano
+// timestamp written in the slot the given node ID owns. The slot is located by position (index
+// nodeID-1, the Block-mode geometry the agent and reconciler share) and must carry that node ID, so a
+// heartbeat written to the wrong offset fails here instead of being found by its payload.
+func victimHeartbeatTimestamp(observerPodName string, victimNodeID uint16) (int64, error) {
+	slots, readErr := readSlotDataFromPod(observerPodName)
+	if readErr != nil {
+		return 0, readErr
+	}
+
+	slotIdx := int(victimNodeID) - 1
+
+	for _, slot := range slots {
+		if slot.SlotIndex != slotIdx {
+			continue
+		}
+
+		if slot.NodeID != victimNodeID {
+			return 0, fmt.Errorf("heartbeat slot at index %d (node ID %d's position) holds node ID %d",
+				slotIdx, victimNodeID, slot.NodeID)
+		}
+
+		return slot.Timestamp, nil
+	}
+
+	return 0, fmt.Errorf("no valid heartbeat at slot index %d for node ID %d", slotIdx, victimNodeID)
+}
+
 // stalledNodeIDs returns, in ascending order, the node IDs whose heartbeat sequence did not advance
 // between two reads of the region. A node whose slot is missing from the later read counts as
 // stalled too: either way it is not writing.
@@ -427,4 +489,251 @@ func stalledNodeIDs(before, after map[uint16]uint64) []uint16 {
 	slices.Sort(stalled)
 
 	return stalled
+}
+
+// splitBrainState is the victim's heartbeat slot, identified in the on-device node map while the
+// victim is cut off from storage, and the UnixNano timestamp of the last heartbeat it wrote. The
+// timestamp anchors the ordering assertion: fencing may only be proven after the victim actually
+// went silent, so the FencingSucceeded transition must be later than this.
+type splitBrainState struct {
+	victimNodeID uint16
+	heartbeatTS  int64
+}
+
+// splitBrainBaseline is the pre-partition state the test proves the fencing left the witnesses in:
+// their boot-ids and self-fence counters must be untouched when only the victim is isolated.
+type splitBrainBaseline struct {
+	victimBootID    string
+	witnessBootIDs  map[string]string  // witness node name -> boot-id
+	witnessAgents   map[string]string  // witness node name -> its SBR agent pod name
+	witnessFenced   map[string]float64 // witness node name -> sbr_self_fenced_total
+	witnessRestarts map[string]int32   // witness node name -> agent container restart count
+}
+
+// splitBrainNodes returns one victim and every other schedulable worker node as a witness. The
+// victim must not host an SBR controller pod, so the fencing reboot does not take the operator down
+// mid-test; witnesses may, since a spurious fence on any worker is exactly what the test looks for.
+// It returns ("", nil) when fewer than MinWorkersForBlockSplitBrain workers are schedulable or none of
+// them can be the victim. The workers are sorted so the victim is chosen deterministically across runs.
+func splitBrainNodes() (string, []string, error) {
+	controllerNodes := controllerPodNodes()
+	nodeList, listErr := APIClient.CoreV1Interface.Nodes().List(context.TODO(), metav1.ListOptions{
+		LabelSelector: "node-role.kubernetes.io/worker",
+	})
+	if listErr != nil {
+		return "", nil, fmt.Errorf("list worker nodes: %w", listErr)
+	}
+
+	var schedulable []string
+
+	for nodeIdx := range nodeList.Items {
+		if isNodeSchedulable(&nodeList.Items[nodeIdx]) {
+			schedulable = append(schedulable, nodeList.Items[nodeIdx].Name)
+		}
+	}
+
+	if len(schedulable) < sbrparams.MinWorkersForBlockSplitBrain {
+		return "", nil, nil
+	}
+
+	sort.Strings(schedulable)
+
+	victimIdx := slices.IndexFunc(schedulable, func(name string) bool { return !controllerNodes[name] })
+	if victimIdx < 0 {
+		return "", nil, nil
+	}
+
+	victim := schedulable[victimIdx]
+
+	return victim, slices.Delete(schedulable, victimIdx, victimIdx+1), nil
+}
+
+// splitBrainBaselineFor records, for every witness, its boot-id, agent pod name,
+// sbr_self_fenced_total counter and agent restart count — the state fencing the isolated victim must
+// leave untouched. The victim's own boot-id is read by the caller and carried through.
+func splitBrainBaselineFor(victimBootID string, witnessNodes []string) (splitBrainBaseline, error) {
+	baseline := splitBrainBaseline{
+		victimBootID:    victimBootID,
+		witnessBootIDs:  make(map[string]string, len(witnessNodes)),
+		witnessAgents:   make(map[string]string, len(witnessNodes)),
+		witnessFenced:   make(map[string]float64, len(witnessNodes)),
+		witnessRestarts: make(map[string]int32, len(witnessNodes)),
+	}
+
+	for _, witness := range witnessNodes {
+		witnessBootID, witnessBootErr := getNodeBootID(witness)
+		if witnessBootErr != nil {
+			return baseline, fmt.Errorf("read the boot-id of witness node %s: %w", witness, witnessBootErr)
+		}
+
+		baseline.witnessBootIDs[witness] = witnessBootID
+		agentPodName, agentErr := agentPodNameByNode(sbrparams.SBRCBlockSplitBrainTestName, witness, true)
+		if agentErr != nil {
+			return baseline, fmt.Errorf("an SBR agent pod must be Running on witness node %s: %w",
+				witness, agentErr)
+		}
+
+		baseline.witnessAgents[witness] = agentPodName
+		selfFenced, metricErr := readAgentCounter(agentPodName, sbrparams.SelfFencedMetricName)
+		if metricErr != nil {
+			return baseline, fmt.Errorf("read %s from witness agent pod %s: %w",
+				sbrparams.SelfFencedMetricName, agentPodName, metricErr)
+		}
+
+		baseline.witnessFenced[witness] = selfFenced
+		restarts, restartErr := agentRestartCount(agentPodName)
+		if restartErr != nil {
+			return baseline, fmt.Errorf("read the restart count of witness agent pod %s: %w",
+				agentPodName, restartErr)
+		}
+
+		baseline.witnessRestarts[witness] = restarts
+	}
+
+	return baseline, nil
+}
+
+// injectCephRBDRules inserts the Ceph port REJECT rules through an already-running injector pod and
+// returns the command output alongside the error so the caller can report it. The block persists (no
+// self-terminating window), so the node stays isolated until a reboot clears the host's iptables
+// rules. The rules are the same RBD REJECT set the transient partition test uses, so
+// flushCephRBDRules removes exactly what was inserted.
+func injectCephRBDRules(injectorPod *pod.Builder) (string, error) {
+	injectOut, injectErr := injectorPod.ExecCommand([]string{"sh", "-c", "set -e\n" + cephRBDRuleScript("-I")})
+
+	return injectOut.String(), injectErr
+}
+
+// victimHeartbeatSlotState looks the victim's heartbeat node ID up in the on-device node map, read through the
+// observer pod, and reads the last heartbeat that slot holds. Both come from the device, not the
+// Kubernetes API.
+func victimHeartbeatSlotState(observerPodName, victimNodeName string) (splitBrainState, error) {
+	nodeMap, jsonPayload, mapErr := readNodeMapFromPod(observerPodName)
+	if mapErr != nil {
+		return splitBrainState{}, fmt.Errorf("read the node map through observer pod %s (payload: %s): %w",
+			observerPodName, jsonPayload, mapErr)
+	}
+
+	victimEntry, mapped := nodeMap.Entries[victimNodeName]
+	if !mapped {
+		return splitBrainState{}, fmt.Errorf("the node map holds no entry for victim node %s", victimNodeName)
+	}
+
+	heartbeatTS, tsErr := victimHeartbeatTimestamp(observerPodName, victimEntry.NodeID)
+	if tsErr != nil {
+		return splitBrainState{}, fmt.Errorf(
+			"read the victim's heartbeat slot (node ID %d) through observer pod %s: %w",
+			victimEntry.NodeID, observerPodName, tsErr)
+	}
+
+	return splitBrainState{victimNodeID: victimEntry.NodeID, heartbeatTS: heartbeatTS}, nil
+}
+
+// witnessesStillHealthy returns nil while no witness node is flagged SBRStorageUnhealthy=True and
+// none has a StorageBasedRemediation CR. Intended as a Consistently body for the window in which NHC
+// decides to act on the victim: a witness flagged or remediated there means the fence landed on the
+// wrong geometry.
+func witnessesStillHealthy(witnessNodes []string) error {
+	for _, witness := range witnessNodes {
+		if condErr := transientNodeHasCondition(witness,
+			sbrparams.SBRStorageUnhealthyCondition, false); condErr != nil {
+			return condErr
+		}
+
+		_, pullErr := pullSBRCR(witness)
+		if pullErr == nil {
+			return fmt.Errorf("witness node %q unexpectedly received a StorageBasedRemediation CR "+
+				"— split-brain isolation is broken", witness)
+		}
+
+		if !k8serrors.IsNotFound(pullErr) {
+			return fmt.Errorf("get StorageBasedRemediation/%s: %w", witness, pullErr)
+		}
+	}
+
+	return nil
+}
+
+// fencingProvenAfterHeartbeat checks that the victim's FencingSucceeded condition transitioned to True
+// only after the last heartbeat it wrote — death is proven from the heartbeat going stale, so the
+// proof cannot predate the silence. It reads the CR snapshot taken at the moment fencing was proven
+// rather than re-pulling, so NHC deleting the CR after recovery cannot race it.
+func fencingProvenAfterHeartbeat(provenCR *unstructured.Unstructured, state splitBrainState) error {
+	lastHeartbeat := time.Unix(0, state.heartbeatTS)
+	transition, transitionErr := fencingSucceededTransitionTime(provenCR)
+	if transitionErr != nil {
+		return fmt.Errorf("read the FencingSucceeded transition time from StorageBasedRemediation/%s: %w",
+			provenCR.GetName(), transitionErr)
+	}
+
+	if !transition.After(lastHeartbeat) {
+		return fmt.Errorf("FencingSucceeded for node %q transitioned at %s, which must be after its "+
+			"last heartbeat at %s", provenCR.GetName(), transition.UTC().Format(time.RFC3339),
+			lastHeartbeat.UTC().Format(time.RFC3339Nano))
+	}
+
+	return nil
+}
+
+// witnessesUntouched proves the fence hit only the victim: every witness is Ready, schedulable, still
+// on its original boot-id, and its agent never self-fenced. The agent must also be the same pod with
+// the same restart count, because a restarted or replaced agent starts its counter from zero and
+// would read as "unchanged".
+func witnessesUntouched(witnessNodes []string, baseline splitBrainBaseline) error {
+	for _, witness := range witnessNodes {
+		node, getErr := APIClient.CoreV1Interface.Nodes().Get(context.TODO(), witness, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("read witness node %s for post-fence verification: %w", witness, getErr)
+		}
+
+		if !isNodeSchedulable(node) {
+			return fmt.Errorf("witness node %q must remain schedulable while only the victim is fenced",
+				witness)
+		}
+
+		if readyErr := nodeConditionIs(witness, string(corev1.NodeReady), corev1.ConditionTrue, ""); readyErr != nil {
+			return fmt.Errorf("witness node %q must stay Ready while only the victim is fenced: %w",
+				witness, readyErr)
+		}
+
+		if node.Status.NodeInfo.BootID != baseline.witnessBootIDs[witness] {
+			return fmt.Errorf("witness node %q boot-id must not change (pre=%q, post=%q "+
+				"— it was spuriously fenced)",
+				witness, baseline.witnessBootIDs[witness], node.Status.NodeInfo.BootID)
+		}
+
+		agentPodName, agentErr := agentPodNameByNode(sbrparams.SBRCBlockSplitBrainTestName, witness, true)
+		if agentErr != nil {
+			return fmt.Errorf("an SBR agent pod must still be Running on witness node %s: %w",
+				witness, agentErr)
+		}
+
+		if agentPodName != baseline.witnessAgents[witness] {
+			return fmt.Errorf("witness node %q agent pod must not be replaced (pre=%q, post=%q)",
+				witness, baseline.witnessAgents[witness], agentPodName)
+		}
+
+		restarts, restartErr := agentRestartCount(agentPodName)
+		if restartErr != nil {
+			return fmt.Errorf("read the restart count of witness agent pod %s: %w", agentPodName, restartErr)
+		}
+
+		if restarts != baseline.witnessRestarts[witness] {
+			return fmt.Errorf("witness agent pod %q must not restart: restart count went from %d to %d",
+				agentPodName, baseline.witnessRestarts[witness], restarts)
+		}
+
+		selfFenced, metricErr := readAgentCounter(baseline.witnessAgents[witness], sbrparams.SelfFencedMetricName)
+		if metricErr != nil {
+			return fmt.Errorf("read %s from witness agent pod %s: %w",
+				sbrparams.SelfFencedMetricName, baseline.witnessAgents[witness], metricErr)
+		}
+
+		if selfFenced != baseline.witnessFenced[witness] {
+			return fmt.Errorf("witness agent on node %q must not self-fence: %s went from %v to %v",
+				witness, sbrparams.SelfFencedMetricName, baseline.witnessFenced[witness], selfFenced)
+		}
+	}
+
+	return nil
 }

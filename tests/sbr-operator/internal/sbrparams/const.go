@@ -387,6 +387,30 @@ const (
 	// BlockFencingStateCheckInterval is the polling interval for block device slot state checks.
 	BlockFencingStateCheckInterval = 10 * time.Second
 
+	// SBRCBlockNodeHangTestName is the SBRC name for the Ceph RBD block-mode node hang test (OCP-88738).
+	SBRCBlockNodeHangTestName = "test-sbrc-block-node-hang"
+
+	// NHCBlockNodeHangTestName is the NodeHealthCheck CR name for the block-mode node hang test (OCP-88738).
+	NHCBlockNodeHangTestName = "nhc-sbr-block-node-hang"
+
+	// BlockNodeHangInjectorPodName is the privileged pod used to trigger a kernel panic on the victim
+	// node in the Ceph RBD block-mode node hang test.
+	BlockNodeHangInjectorPodName = "sbr-rbd-node-hang-injector"
+
+	// FencingProvenTimeout is how long to wait for a victim's StorageBasedRemediation CR to report
+	// both FencingSucceeded=True and Succeeded=True. Proof is storage-only (the victim's heartbeat
+	// slot going stale) but the 60s fencing window can flap and retry, so this is generous.
+	FencingProvenTimeout = 10 * time.Minute
+
+	// SucceededCondition is the standard medik8s remediation outcome condition on a
+	// StorageBasedRemediation CR; NHC escalation reads it. Set True alongside FencingSucceeded once
+	// the reconciler has proved the victim is dead and applied the out-of-service taint.
+	SucceededCondition = "Succeeded"
+
+	// OutOfServiceTaintKey is the taint the reconciler applies to a fenced node once death is proven
+	// (node.kubernetes.io/out-of-service=nodeshutdown:NoExecute), and removes again on CR deletion.
+	OutOfServiceTaintKey = "node.kubernetes.io/out-of-service"
+
 	// SBRCBlockTransientTestName is the SBRC name for the Ceph RBD transient network partition test.
 	SBRCBlockTransientTestName = "test-sbrc-block-transient"
 
@@ -487,6 +511,22 @@ const (
 	// agents rewrite both 64 KB buffers continuously, and a read that lands mid-write fails the
 	// buffer's checksum, so a first attempt failing says nothing about the device.
 	BlockNodeMapReadAttempts = 5
+
+	// SBRCBlockSplitBrainTestName is the SBRC name for the Ceph RBD block-mode split-brain test (RHWA-1934).
+	SBRCBlockSplitBrainTestName = "test-sbrc-block-split-brain"
+
+	// NHCBlockSplitBrainTestName is the NodeHealthCheck CR name for the block-mode split-brain test (RHWA-1934).
+	NHCBlockSplitBrainTestName = "nhc-sbr-block-split-brain"
+
+	// BlockSplitBrainInjectorPodName is the privileged pod that blocks Ceph traffic on the victim node
+	// for the whole split-brain scenario, so the one storage-isolated node is fenced while its peers
+	// keep their device access.
+	BlockSplitBrainInjectorPodName = "sbr-rbd-split-brain-injector"
+
+	// MinWorkersForBlockSplitBrain is the number of schedulable worker nodes the split-brain test
+	// needs: one victim (which must not host an SBR controller pod) plus at least two witnesses, so a
+	// single spurious fence stands out against more than one untouched peer.
+	MinWorkersForBlockSplitBrain = 3
 
 	// BlockInspectionMaxSkew bounds how old the newest heartbeat on the device may look from the
 	// machine running the test. It is deliberately loose: its job is to catch a device nobody is
