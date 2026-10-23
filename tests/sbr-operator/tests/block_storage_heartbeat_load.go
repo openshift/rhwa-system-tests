@@ -73,6 +73,9 @@ var _ = Describe(
 		})
 
 		AfterAll(func() {
+			By("Clearing any residual Ceph OSD blocklist entries from load test")
+			clearCephOSDBlocklist()
+
 			if testSBRC != nil {
 				By(fmt.Sprintf("Removing StorageBasedRemediationConfig %q", sbrparams.SBRCBlockLoadTestName))
 				deleteSBRCAndWait(testSBRC, sbrparams.SBRCBlockLoadTestName)

@@ -80,6 +80,9 @@ var _ = Describe(
 		})
 
 		AfterAll(func() {
+			By("Clearing any residual Ceph OSD blocklist entries from partition test")
+			clearCephOSDBlocklist()
+
 			if victimNodeName != "" {
 				By("Removing any StorageBasedRemediation CR left for the victim node")
 				cleanupSBRCR(context.Background(), victimNodeName)

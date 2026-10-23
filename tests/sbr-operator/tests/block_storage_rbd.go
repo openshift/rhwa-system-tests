@@ -69,6 +69,9 @@ var _ = Describe(
 		})
 
 		AfterAll(func() {
+			By("Clearing any residual Ceph OSD blocklist entries from fencing")
+			clearCephOSDBlocklist()
+
 			if setupSBRC != nil {
 				By("Deleting SBRC created for block persistent fencing test")
 
