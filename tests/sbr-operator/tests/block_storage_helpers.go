@@ -311,6 +311,35 @@ func agentPodNameByNode(sbrcName, nodeName string, onNode bool) (string, error) 
 	return "", fmt.Errorf("SBRC %s has no Running agent pod %s node %s", sbrcName, location, nodeName)
 }
 
+// agentPodReadyOnNode returns nil once the SBRC's own agent pod on nodeName reports Ready.
+// agentPodNameByNode restricts the match to this SBRC's Running agents, and the Ready condition is
+// what matters: it is gated on the agent's preflight-ok file, so Ready means the block write test
+// passed. A missing Ready condition counts as not ready. Intended as an Eventually body.
+func agentPodReadyOnNode(sbrcName, nodeName string) error {
+	podName, nameErr := agentPodNameByNode(sbrcName, nodeName, true)
+	if nameErr != nil {
+		// No Running agent on the node yet: expected while it is still rebooting.
+		return nameErr
+	}
+
+	agentPod, pullErr := pod.Pull(APIClient, podName, medik8sparams.OperatorNs)
+	if pullErr != nil {
+		return fmt.Errorf("pull agent pod %s: %w", podName, pullErr)
+	}
+
+	for _, cond := range agentPod.Object.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			if cond.Status == corev1.ConditionTrue {
+				return nil
+			}
+
+			return fmt.Errorf("agent pod %s is not Ready (status=%s)", podName, cond.Status)
+		}
+	}
+
+	return fmt.Errorf("agent pod %s has no Ready condition yet", podName)
+}
+
 // fetchAgentMetrics returns the raw Prometheus exposition body from an SBR agent pod's own metrics
 // endpoint. The API server cannot proxy to that port in OVN-K clusters, so, as in the metrics
 // suite, it is fetched from inside the container. Callers that need several counters from the same
