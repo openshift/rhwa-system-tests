@@ -89,9 +89,10 @@ make lint                        # golangci-lint version pinned in scripts/golan
 make fmt                         # apply gofumpt/goimports and compact straight-line spacing
 make lint-blanklines              # check compact spacing without modifying files
 make test                        # unit tests — no cluster needed
-make vet                         # go vet all non-vendor packages
-make deps-update                 # go mod tidy && go mod vendor
-make install                     # deps-update + install ginkgo v2
+make vet                         # go vet all packages
+make deps-download               # download and verify pinned Go modules
+make deps-update                 # go mod tidy
+make install                     # deps-download + install pinned ginkgo v2
 make run-tests                   # execute test-runner.sh (requires ECO_TEST_FEATURES)
 make sync-eco-goinfra            # bump eco-goinfra dep (ECO_GOINFRA_BRANCH=release-4.20 optional)
 make build-docker-image          # build podman image system-tests:latest
@@ -186,7 +187,9 @@ All `It`/`DescribeTable` specs should be labelled using constants from `tests/in
 - Document test steps with `By("description")` blocks inside each `It`.
 - Use `Eventually`/`Consistently` with explicit timeout + poll interval from `<op>params`/`medik8sparams` — never `time.Sleep`.
 - Gomega assertions belong only in test files, never in `internal/` packages.
-- Always run `go mod vendor` after any dependency change.
+- After a dependency change, run `go mod tidy` and commit `go.mod` and `go.sum`.
+- Dependencies are not vendored. CI uses `GOFLAGS=-mod=readonly` and checks that module files stay unchanged.
+- Prepare offline source runs with `make deps-download ginkgo` while network access is available. Retain `GOMODCACHE` (module source) and use a writable `GOCACHE` (compiled packages). Published test images include the module cache, Go toolchain, and Ginkgo.
 - To update eco-goinfra: use the GitHub Actions "eco-goinfra-bump" workflow, or run `make sync-eco-goinfra ECO_GOINFRA_BRANCH=release-4.20`.
 - CI gates: lint, `ECO_DRY_RUN=true` dry-run, unit tests. ≥2 reviewer approvals required to merge.
 

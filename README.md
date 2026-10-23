@@ -7,8 +7,20 @@ The [system-tests](https://github.com/medik8s/system-tests) repository contains 
 The project is based on golang+[ginkgo](https://onsi.github.io/ginkgo) framework. It was forked from [eco-gotests](https://github.com/rh-ecosystem-edge/eco-gotests).
 
 ### Project requirements
-* golang v1.26.x
+* Go version specified in `go.mod`
 * ginkgo v2.x
+
+Run `make install` to download the pinned modules, verify them, and install the
+matching Ginkgo executable. `make deps-download` prepares only the modules. These
+commands use `go.mod` and `go.sum` without updating dependencies. CI builds use
+`GOFLAGS=-mod=readonly` and reject changes to those files.
+
+A fresh checkout needs access to the configured Go proxy and checksum service.
+The published test image retains the module cache and Ginkgo so suites can compile
+offline with the included Go toolchain. For a source checkout, prepare modules and
+Ginkgo before disconnecting: `GOFLAGS=-mod=readonly make deps-download ginkgo`.
+Keep the same `GOMODCACHE` when running tests; it stores downloaded module source.
+`GOCACHE` stores compiled packages and must be writable by the test runner.
 
 ## Prerequisites
 The test framework is designed to test a pre-installed OCP cluster which meets the following requirements:
@@ -177,7 +189,7 @@ The project uses a development method - forking workflow
     │   └── TESTCASES                      # Per-ticket test case documents
     ├── images                             # Container images artifacts
     ├── scripts                            # Makefile scripts
-    ├── tests                              # Test cases directory
+    └── tests                              # Test cases directory
     │   ├── internal                       # Common packages used across framework
     │   │   ├── config                     # Common config struct
     │   │   ├── medik8sconfig              # Medik8s-specific configuration
@@ -189,7 +201,6 @@ The project uses a development method - forking workflow
     │   ├── nmo-operator                   # Node Maintenance Operator tests
     │   ├── sbr-operator                   # Storage-Based Remediation tests
     │   └── snr-operator                   # Self Node Remediation tests
-    └── vendor                             # Dependencies folder
 ### Code conventions
 #### Lint
 Push requested are tested in a pipeline with golangci-lint. It is advised to add [Golangci-lint integration](https://golangci-lint.run/usage/integrations/) to your development editor. It's recommended to run `make lint` before uploading a PR.
@@ -262,4 +273,5 @@ func Function(
 
 #### Note: To start using the new package for the first time:
 1. Add it to the import section of your test
-2. Run `go mod vendor`
+2. Run `go get <module>@<version>` if the module is not already required, then `go mod tidy`.
+3. Commit `go.mod` and `go.sum` with the source change. Dependencies are not vendored.
