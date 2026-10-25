@@ -773,6 +773,64 @@ func splitBrainHeartbeatProgress(observerPodName string, state splitBrainState) 
 	return nil
 }
 
+// blockNodeIDOf looks a node's SBR node ID up in the on-device node map, read through an agent pod
+// on another node. The node map is the only place the mapping exists: node IDs are hash-assigned by
+// the agents and never surface on the Kubernetes API, so every slot-geometry lookup starts here.
+func blockNodeIDOf(observerPodName, nodeName string) (uint16, error) {
+	nodeMap, jsonPayload, mapErr := readNodeMapFromPod(observerPodName)
+	if mapErr != nil {
+		return 0, fmt.Errorf("read the node map through observer pod %s (payload: %s): %w",
+			observerPodName, jsonPayload, mapErr)
+	}
+
+	entry, mapped := nodeMap.Entries[nodeName]
+	if !mapped {
+		return 0, fmt.Errorf("the node map holds no entry for node %s", nodeName)
+	}
+
+	return entry.NodeID, nil
+}
+
+// liveFenceMessageFor returns the fence message standing in nodeName's own fence slot, read through
+// an agent pod on another node. It is an error when the slot is empty, when it holds a retracted
+// fence (reason NONE, which is what the agent writes to disarm a stale one), or when the message
+// targets another node — any of those means nobody has asked for this node to be fenced.
+//
+// The slot is located by position: in Block mode node N owns fence slot index N-1, the geometry the
+// agent and the reconciler share. Intended as an Eventually body.
+func liveFenceMessageFor(observerPodName, nodeName string) (FenceSlot, error) {
+	nodeID, idErr := blockNodeIDOf(observerPodName, nodeName)
+	if idErr != nil {
+		return FenceSlot{}, idErr
+	}
+
+	fenceSlots, readErr := readFenceSlotsFromPod(observerPodName)
+	if readErr != nil {
+		return FenceSlot{}, fmt.Errorf("read the fence region through observer pod %s: %w",
+			observerPodName, readErr)
+	}
+
+	slot, written := fenceSlots[int(nodeID)-1]
+	if !written {
+		return FenceSlot{}, fmt.Errorf("fence slot %d (node %s, node ID %d) holds no fence message yet",
+			int(nodeID)-1, nodeName, nodeID)
+	}
+
+	if slot.Reason == fenceReasonNone {
+		return FenceSlot{}, fmt.Errorf(
+			"fence slot %d (node %s, node ID %d) holds a reason-NONE message: nothing is asking for "+
+				"this node to be fenced", slot.SlotIndex, nodeName, nodeID)
+	}
+
+	if slot.TargetNodeID != nodeID {
+		return FenceSlot{}, fmt.Errorf(
+			"fence slot %d (node %s) holds a fence for node ID %d, not %d: the fence was written to "+
+				"the wrong slot", slot.SlotIndex, nodeName, slot.TargetNodeID, nodeID)
+	}
+
+	return slot, nil
+}
+
 // witnessesStillHealthy returns nil while no witness node is flagged SBRStorageUnhealthy=True and
 // none has a StorageBasedRemediation CR. It is checked on every poll of every wait that runs while
 // the victim is isolated, rather than over one window: the condition cycles True -> Unknown -> True
@@ -886,22 +944,17 @@ func witnessesUntouched(witnessNodes []string, baseline splitBrainBaseline) erro
 	return nil
 }
 
-// setupBlockModeNHCScenario brings up everything a Block-mode fencing test needs: a Ceph RBD
-// StorageBasedRemediationConfig whose agents are Ready and whose shared storage is confirmed
-// concurrent-writeable, and a NodeHealthCheck that remediates SBRStorageUnhealthy nodes through the
-// SBR template. It returns the SBRC so the caller can delete it in AfterAll.
+// createBlockModeSBRCAndWaitReady creates a Ceph RBD Block-mode StorageBasedRemediationConfig with
+// additionalSpec merged into its spec, and returns once its agents are Ready. It fails the suite
+// when SNR is running (both operators claim the watchdog) and skips it when the cluster has no Ceph
+// RBD StorageClass. The returned object is the created SBRC, for the caller to delete in AfterAll.
 //
-// The SBRC is built from the sub-helpers rather than setupBlockModeSBRC so the init Job can be
-// waited on before the DaemonSet readiness wait: an init failure then surfaces as "init Job failed"
-// instead of an opaque "DaemonSet not ready" timeout.
-func setupBlockModeNHCScenario(sbrcName, nhcName string) *unstructured.Unstructured {
-	// Remove this test's own NodeHealthCheck from a crashed prior run first: it references the SBR
-	// template, so requireNoSBRNodeHealthCheck would otherwise see it and skip the test.
-	By("Removing any NodeHealthCheck left by a previous run of this test")
-	deleteNHCAndWait(nhcName)
-
-	By("Verifying no other NodeHealthCheck already remediates through the SBR template")
-	requireNoSBRNodeHealthCheck()
+// Unlike setupBlockModeSBRCWithSpec it waits on the Block device-init Job before the DaemonSet
+// readiness wait, so an init failure surfaces as "init Job failed" instead of an opaque "DaemonSet
+// not ready" timeout.
+func createBlockModeSBRCAndWaitReady(
+	sbrcName string, additionalSpec map[string]interface{},
+) *unstructured.Unstructured {
 	failIfSNRRunning()
 
 	By("Discovering the Ceph RBD block storage class")
@@ -913,7 +966,7 @@ func setupBlockModeNHCScenario(sbrcName, nhcName string) *unstructured.Unstructu
 
 	By("Creating the Block-mode StorageBasedRemediationConfig on Ceph RBD")
 
-	sbrc := buildSBRC(sbrcName, buildBlockModeSBRC(rbdStorageClass, nil))
+	sbrc := buildSBRC(sbrcName, buildBlockModeSBRC(rbdStorageClass, additionalSpec))
 	Expect(APIClient.Create(context.TODO(), sbrc)).To(Succeed(),
 		"StorageBasedRemediationConfig %q must be created", sbrcName)
 
@@ -922,6 +975,27 @@ func setupBlockModeNHCScenario(sbrcName, nhcName string) *unstructured.Unstructu
 
 	By("Waiting for the agent DaemonSet to be ready")
 	waitForSBRCReady(sbrcName)
+
+	return sbrc
+}
+
+// setupBlockModeNHCScenario brings up everything a Block-mode fencing test needs: a Ceph RBD
+// StorageBasedRemediationConfig whose agents are Ready and whose shared storage is confirmed
+// concurrent-writeable, and a NodeHealthCheck that remediates SBRStorageUnhealthy nodes through the
+// SBR template. It returns the SBRC so the caller can delete it in AfterAll.
+//
+// A test that drives fencing without an NHC, or that needs a non-default SBRC spec, should call
+// createBlockModeSBRCAndWaitReady directly and add the pieces it wants.
+func setupBlockModeNHCScenario(sbrcName, nhcName string) *unstructured.Unstructured {
+	// Remove this test's own NodeHealthCheck from a crashed prior run first: it references the SBR
+	// template, so requireNoSBRNodeHealthCheck would otherwise see it and skip the test.
+	By("Removing any NodeHealthCheck left by a previous run of this test")
+	deleteNHCAndWait(nhcName)
+
+	By("Verifying no other NodeHealthCheck already remediates through the SBR template")
+	requireNoSBRNodeHealthCheck()
+
+	sbrc := createBlockModeSBRCAndWaitReady(sbrcName, nil)
 
 	By("Asserting the SBRC reports concurrent-writeable shared storage")
 

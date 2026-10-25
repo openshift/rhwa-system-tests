@@ -106,8 +106,7 @@ var _ = Describe(
 				By("Asserting SBRStorageUnhealthy is not True on the victim node")
 
 				// Absent, False or Unknown all pass; only True is a failed precondition.
-				Expect(transientNodeHasCondition(victimNodeName,
-					sbrparams.SBRStorageUnhealthyCondition, false)).To(Succeed(),
+				Expect(transientNodeHasCondition(victimNodeName, false)).To(Succeed(),
 					"Node %q must not report %s=True before its Ceph traffic is blocked",
 					victimNodeName, sbrparams.SBRStorageUnhealthyCondition)
 

@@ -583,6 +583,52 @@ const (
 	// device at all and only its watchdog can reboot it.
 	BlockStorageLossInjectorPodName = "sbr-rbd-storage-loss-injector"
 
+	// SBRCBlockDetectOnlyTestName is the SBRC name for the Ceph RBD block-mode detection-only test.
+	SBRCBlockDetectOnlyTestName = "test-sbrc-block-detect-only"
+
+	// NHCBlockDetectOnlyTestName is the NodeHealthCheck CR name for the block-mode detection-only
+	// test. It is created only for the watchdog-path half of the test: the fence-read half runs with
+	// no NHC at all, so the StorageBasedRemediation CR the test writes itself is the only one.
+	NHCBlockDetectOnlyTestName = "nhc-sbr-block-detect-only"
+
+	// BlockDetectOnlyInjectorPodName is the privileged pod that blocks Ceph traffic in both
+	// directions on the victim node of the detection-only test, with no time limit, so the victim
+	// loses the shared device entirely and only its watchdog could still reboot it.
+	BlockDetectOnlyInjectorPodName = "sbr-rbd-detect-only-injector"
+
+	// SBRUnhealthyDetectOnlyReason is the event an agent emits, instead of stopping to pet its
+	// watchdog, when its own SBR storage is unhealthy while detectOnlyMode is Enabled.
+	SBRUnhealthyDetectOnlyReason = "SBRUnhealthyDetectOnly"
+
+	// BlockFenceMessageTimeout is how long to wait for a peer agent to write the fence message into
+	// the victim's own fence slot once a StorageBasedRemediation CR exists. The peer has to cordon
+	// the node and pass the storage write gate first, so it is sized well above one reconcile.
+	BlockFenceMessageTimeout = 3 * time.Minute
+
+	// BlockDetectOnlyWatchdogFireAllowance is the time a disarmed watchdog would have needed to
+	// fire: the agent's own grace before it stops petting plus the device's timeout. SBR does not
+	// expose either, so this is a loose upper bound rather than a measured value.
+	BlockDetectOnlyWatchdogFireAllowance = 2 * time.Minute
+
+	// BlockDetectOnlyRebootAllowance is the time a bare-metal node needs to go all the way down and
+	// report back in. It is the second half of the no-reboot window: a reboot that started but has
+	// not finished still shows as NotReady, which the window asserts on directly.
+	BlockDetectOnlyRebootAllowance = 8 * time.Minute
+
+	// BlockDetectOnlyNoRebootWindow is how long a storage-isolated victim must stay up and Ready to
+	// prove detect-only mode never let anything reboot it. It is counted from the moment its
+	// remediation CR appears, because that is when both reboot routes open, and it covers the
+	// watchdog firing plus a full reboot so a slow node cannot outlast it.
+	BlockDetectOnlyNoRebootWindow = BlockDetectOnlyWatchdogFireAllowance + BlockDetectOnlyRebootAllowance
+
+	// BlockDetectOnlyNoRebootMinWindow is the shortest no-reboot window the test will settle for
+	// when the steps between the CR appearing and the window opening have already eaten most of it.
+	// Without a floor a slow event lookup could shrink the check to nothing and pass for free.
+	BlockDetectOnlyNoRebootMinWindow = 2 * time.Minute
+
+	// BlockDetectOnlyNoRebootInterval is the poll interval for the no-reboot window.
+	BlockDetectOnlyNoRebootInterval = 10 * time.Second
+
 	// SBRCBlockLifecycleTestNameA is the first SBRC name for the Block-mode SBRC lifecycle test.
 	SBRCBlockLifecycleTestNameA = "test-sbrc-block-lifecycle-a"
 
@@ -603,9 +649,6 @@ const (
 	// DefaultWatchdogPath is the watchdog device an SBRC uses when watchdogPath is unset. In Block
 	// mode the agent is pointed at BlockModeHostDevMountPath + its basename instead.
 	DefaultWatchdogPath = "/dev/watchdog"
-
-	// AgentContainerName is the name of the sbr-agent container in the agent DaemonSet pod.
-	AgentContainerName = "sbr-agent"
 
 	// SharedStorageVolumeName is the name of the DaemonSet volume backed by the shared-storage PVC.
 	// In Block mode it is attached through volumeDevices; in Filesystem mode through volumeMounts.
