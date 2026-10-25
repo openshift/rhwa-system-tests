@@ -605,3 +605,40 @@ Full test case: [docs/TESTCASES/rhwa-1944.md](../../docs/TESTCASES/rhwa-1944.md)
   `Succeeded=True` and the victim carries the `out-of-service` taint; the victim's boot-id changes
   (the watchdog rebooted it), it returns Ready with a Ready agent pod and holds that boot-id for 90s;
   NHC deletes the CR and the node becomes schedulable with the taint gone
+
+### 20. Verify StorageBasedRemediationConfig Lifecycle in Block Mode on Ceph RBD ([RHWA-1960](https://issues.redhat.com/browse/RHWA-1960))
+
+Creates, patches, replaces and deletes an SBRC with `sharedStorageVolumeMode: Block` on Ceph RBD,
+asserting the steps the operator takes only in Block mode. A Block-mode config with no
+`sharedStorageClass` never gets agents — refused at admission when a validating webhook is
+registered, otherwise admitted and refused at reconcile with a `ValidationError` Warning. The
+shared-storage PVC is `ReadWriteMany` with `volumeMode: Block`; the device-init Job succeeds and the
+agent DaemonSet is created only after it; the agent attaches the device through `volumeDevices` at
+`/sbr-block` with no `volumeMounts` for it, runs with `--sbr-device=/sbr-block` and
+`--sbr-file-locking=false`, and reaches the watchdog through `/host-dev` instead of a mounted host
+`/dev`. `sharedStorageVolumeMode` cannot be patched afterwards; a `sbrTimeoutSeconds` patch rolls
+every agent onto the new revision. Deleting the SBRC removes its DaemonSet and PVC and runs **no**
+node map cleanup Job — Block mode keeps its node map inside the device, so the Filesystem-only
+cleanup has nothing to wipe. A second SBRC then gets a fresh PVC and a fresh init Job.
+
+The Block-mode counterpart of the Filesystem SBRC lifecycle test (`sbrc_lifecycle.go`, OCP-88734),
+with its own ID. The two SBRCs never run at the same time: every agent holds `/dev/watchdog`, so a
+second DaemonSet on the same nodes would crash-loop on EBUSY.
+
+Full test case: [docs/TESTCASES/rhwa-1960.md](../../docs/TESTCASES/rhwa-1960.md)
+
+- **Operators**: SBR v5.8.0 (skips below it — the CRD predates `sharedStorageVolumeMode`)
+- **Cluster**: Multi-node; at least two schedulable workers so the rollout assertion covers more
+  than one agent
+- **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by provisioner
+  (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the cluster has none
+- **Environment**: Connected or disconnected. **Non-destructive** — no node is cordoned, rebooted or
+  partitioned. Self Node Remediation must not be running
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="Block-mode SBRC lifecycle on Ceph RBD" ./tests/sbr-operator/...`
+- **Pass criteria**: the storage-class-less SBRC never gets a DaemonSet; A's PVC is RWX
+  `volumeMode: Block`; the init Job succeeds before the DaemonSet is created; the agent uses
+  `volumeDevices` at `/sbr-block`, the Block args, and the `/host-dev` watchdog mount;
+  `sharedStorageVolumeMode` is rejected on patch (where a webhook exists) and the stored value stays
+  `Block`; the `sbrTimeoutSeconds` patch puts every pod on the new revision Ready with none
+  unavailable; deleting A runs no `sbr-cleanup` Job and removes its DaemonSet and PVC; B gets a new
+  PVC and its own init Job, becomes ready, and deletes cleanly

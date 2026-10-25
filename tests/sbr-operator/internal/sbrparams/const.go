@@ -583,6 +583,88 @@ const (
 	// device at all and only its watchdog can reboot it.
 	BlockStorageLossInjectorPodName = "sbr-rbd-storage-loss-injector"
 
+	// SBRCBlockLifecycleTestNameA is the first SBRC name for the Block-mode SBRC lifecycle test.
+	SBRCBlockLifecycleTestNameA = "test-sbrc-block-lifecycle-a"
+
+	// SBRCBlockLifecycleTestNameB is the second SBRC name for the Block-mode SBRC lifecycle test.
+	// It is created only after the first one is deleted: every agent holds /dev/watchdog, so two
+	// agent DaemonSets on the same nodes would crash-loop.
+	SBRCBlockLifecycleTestNameB = "test-sbrc-block-lifecycle-b"
+
+	// SBRCBlockNoStorageClassTestName is the SBRC name used for the negative admission check that
+	// Block mode without sharedStorageClass is rejected. It is never expected to be admitted.
+	SBRCBlockNoStorageClassTestName = "test-sbrc-block-no-storage-class"
+
+	// BlockModeHostDevMountPath is where the agent container sees the host watchdog's parent
+	// directory in Block mode. A bind mount at /dev would make the OCI runtime skip creating the
+	// CSI-mapped block device node, so the host /dev is never mounted at /dev in Block mode.
+	BlockModeHostDevMountPath = "/host-dev"
+
+	// DefaultWatchdogPath is the watchdog device an SBRC uses when watchdogPath is unset. In Block
+	// mode the agent is pointed at BlockModeHostDevMountPath + its basename instead.
+	DefaultWatchdogPath = "/dev/watchdog"
+
+	// AgentContainerName is the name of the sbr-agent container in the agent DaemonSet pod.
+	AgentContainerName = "sbr-agent"
+
+	// SharedStorageVolumeName is the name of the DaemonSet volume backed by the shared-storage PVC.
+	// In Block mode it is attached through volumeDevices; in Filesystem mode through volumeMounts.
+	SharedStorageVolumeName = "shared-storage"
+
+	// AgentSBRDeviceFlag is the agent flag carrying the shared device path.
+	AgentSBRDeviceFlag = "--sbr-device"
+
+	// AgentFileLockingFlag is the agent flag toggling flock-based node map locking. Block mode
+	// always passes false: a raw device bypasses the cluster lock manager, so flock would degrade
+	// to host-local semantics.
+	AgentFileLockingFlag = "--sbr-file-locking"
+
+	// AgentWatchdogPathFlag is the agent flag carrying the in-container watchdog device path.
+	AgentWatchdogPathFlag = "--watchdog-path"
+
+	// SBRCKind is the kind of the StorageBasedRemediationConfig CR, as it appears on the Event
+	// objects the controller emits about it.
+	SBRCKind = "StorageBasedRemediationConfig"
+
+	// SBRCResourcePlural is the API resource name for StorageBasedRemediationConfig, used to find
+	// the validating admission webhook that covers it.
+	SBRCResourcePlural = "storagebasedremediationconfigs"
+
+	// SBRCValidationErrorReason is the Warning event the controller emits when an admitted SBRC
+	// fails spec validation at reconcile time. It does not requeue: the user must fix the config.
+	SBRCValidationErrorReason = "ValidationError"
+
+	// SBRCPVCGCTimeout is how long to wait for an SBRC's shared-storage PVC to be garbage-collected
+	// after the SBRC is deleted. The operator patches the PV reclaim policy to Delete before
+	// dropping its finalizer, so the PVC goes with the SBRC.
+	SBRCPVCGCTimeout = 5 * time.Minute
+
+	// SBRCleanupJobComponentLabelKey is the component label key the operator stamps on the
+	// resources it creates for an SBRC.
+	SBRCleanupJobComponentLabelKey = "app.kubernetes.io/component"
+
+	// SBRCleanupJobComponentLabelValue is the component label value identifying the node map
+	// cleanup Job (RHWA-1056) the operator runs while deleting a Filesystem-mode SBRC. The Job uses
+	// a GenerateName, so its name carries a random suffix and the labels are what to select on.
+	SBRCleanupJobComponentLabelValue = "sbr-cleanup"
+
+	// SBRCConfigLabelKey is the label the operator stamps on the resources it creates for an SBRC,
+	// carrying the SBRC's own name.
+	SBRCConfigLabelKey = "sbrconfig"
+
+	// CleanupJobWatchInterval is how often the operator namespace is polled for a node map cleanup
+	// Job while an SBRC is being deleted. Tighter than the suite's usual poll interval: the Job is
+	// created and finishes inside the finalizer drain, so a slow poll could step over it.
+	CleanupJobWatchInterval = 1 * time.Second
+
+	// SBRCCleanupJobCheckDuration is how long the operator namespace is watched after a Block-mode
+	// SBRC is deleted to prove no node map cleanup Job was created. Block mode has no
+	// filesystem-level node map file to wipe, so the operator skips that Job entirely.
+	SBRCCleanupJobCheckDuration = 60 * time.Second
+
+	// SBRCCleanupJobCheckInterval is the poll interval for the cleanup-Job absence check.
+	SBRCCleanupJobCheckInterval = 5 * time.Second
+
 	// BlockInspectionMaxSkew bounds how old the newest heartbeat on the device may look from the
 	// machine running the test. It is deliberately loose: its job is to catch a device nobody is
 	// writing to any more, not to measure cadence, which BlockHeartbeatSlotMaxAge does on
