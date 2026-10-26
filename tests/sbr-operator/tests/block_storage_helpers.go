@@ -14,6 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 
+	"github.com/medik8s/system-tests/tests/internal/helpers"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
@@ -22,6 +23,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 // discoverCephRBDStorageClass returns the Ceph RBD block storage class name.
@@ -138,6 +140,11 @@ var cephRBDRejectReplyMatches = []string{
 	"-p tcp --sport 6789",
 	"-p tcp --match multiport --sports 6800:7300",
 }
+
+// cephRBDRejectPortTokens are the port tokens an iptables listing shows for the Ceph REJECT rules
+// above: the two monitor ports as single destinations and the OSD/MDS range as a multiport range.
+// They are what a listing is searched for when a test has to prove the rules really landed.
+var cephRBDRejectPortTokens = []string{"3300", "6789", "6800:7300"}
 
 // cephRBDChainRuleScript returns one iptables command per match on the named chain for the given
 // chain operation, "-I" to insert the REJECT rules or "-D" to remove them. Removals tolerate a
@@ -1015,4 +1022,316 @@ func setupBlockModeNHCScenario(sbrcName, nhcName string) *unstructured.Unstructu
 		"NodeHealthCheck CR %q must be created", nhcName)
 
 	return sbrc
+}
+
+// hostProcessChurnScript spawns short-lived processes on the host as fast as the node allows, for
+// the length of duration, and then exits. It is the reproducer's own loop: a probe that finds the
+// agent by walking every process on the host fails when any process exits mid-scan, so the churn
+// is what turns that race into a steady stream of probe failures.
+//
+// The reproducer uses "chroot /host"; the host-command pods here do not bind-mount the host root,
+// so the loop is entered through PID 1's namespaces instead, which is the same idiom the iptables
+// scripts in this file use. Either way the forked processes live in the host PID namespace, which
+// is what the agent's probes scan.
+func hostProcessChurnScript(duration time.Duration) string {
+	churnLoop := fmt.Sprintf(
+		"end=$((SECONDS+%d)); while [ $SECONDS -lt $end ]; do /bin/true & done", int(duration.Seconds()))
+
+	return fmt.Sprintf(`set -e
+nsenter --target 1 --mount --ipc --uts --net -- sh -c '%s'
+echo churn-complete
+`, churnLoop)
+}
+
+// watchdogHolderScanScript reports every host process holding a watchdog device open, one
+// "held by /proc/<pid>" line each, and prints a completion marker afterwards. The marker is what
+// separates "the scan ran and found nothing" from "the scan never got that far", so an empty
+// result can be read as evidence rather than as a broken probe.
+func watchdogHolderScanScript() string {
+	return fmt.Sprintf(`for procDir in /proc/[0-9]*; do
+  ls -l "$procDir"/fd 2>/dev/null | grep -q watchdog && echo "%s $procDir"
+done
+echo %s
+exit 0
+`, sbrparams.WatchdogHolderMarker, sbrparams.WatchdogHolderProbeDoneMarker)
+}
+
+// watchdogHolders returns the host processes the watchdog-holder scan found, parsed out of the
+// probe pod's log. A log without the completion marker is an error rather than an empty result:
+// the scan not having finished says nothing about who holds the device.
+func watchdogHolders(probeLog string) ([]string, error) {
+	if !strings.Contains(probeLog, sbrparams.WatchdogHolderProbeDoneMarker) {
+		return nil, fmt.Errorf("the watchdog-holder scan did not run to completion (no %q marker in "+
+			"its output): %s", sbrparams.WatchdogHolderProbeDoneMarker, probeLog)
+	}
+
+	var holders []string
+
+	for _, line := range strings.Split(probeLog, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, sbrparams.WatchdogHolderMarker) {
+			holders = append(holders, trimmed)
+		}
+	}
+
+	return holders, nil
+}
+
+// hostCommandPodRunning returns nil while the named host-command pod is Running. Folded into the
+// windows that watch a node under churn: a churn pod that died takes the load away with it, and
+// the rest of the window would then pass without anything being exercised.
+func hostCommandPodRunning(podName string) error {
+	current, pullErr := pod.Pull(APIClient, podName, medik8sparams.OperatorNs)
+	if pullErr != nil {
+		return fmt.Errorf("pull host command pod %s: %w", podName, pullErr)
+	}
+
+	if phase := current.Object.Status.Phase; phase != corev1.PodRunning {
+		return fmt.Errorf("host command pod %s is %s, not Running", podName, phase)
+	}
+
+	return nil
+}
+
+// agentPodOffNode returns one of the SBRC's Running agent pods on a node other than nodeName,
+// together with the node it runs on. Callers use it for the healthy-node control of a check they
+// then repeat on the node under test, so an empty result there means the agent is gone rather than
+// that the check itself is broken.
+func agentPodOffNode(sbrcName, nodeName string) (string, string, error) {
+	agentPods, listErr := sbrcAgentPods(sbrcName)
+	if listErr != nil {
+		return "", "", listErr
+	}
+
+	for _, agentPod := range agentPods {
+		if agentPod.Object.Spec.NodeName != nodeName {
+			return agentPod.Object.Name, agentPod.Object.Spec.NodeName, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("SBRC %s has no Running agent pod outside node %s", sbrcName, nodeName)
+}
+
+// agentPodUID returns a pod's UID, for narrowing an event lookup to this instance of a name.
+func agentPodUID(podName string) (string, error) {
+	agentPod, pullErr := pod.Pull(APIClient, podName, medik8sparams.OperatorNs)
+	if pullErr != nil {
+		return "", fmt.Errorf("pull agent pod %s: %w", podName, pullErr)
+	}
+
+	return string(agentPod.Object.UID), nil
+}
+
+// podEventsSince returns, as readable one-liners, the events recorded for the named pod whose
+// message contains messageSubstr and that are newer than since.
+//
+// Events are matched on their message, not their reason: kubelet reports a failed liveness probe
+// as a generic Unhealthy event and the restart it triggers as a generic Killing one, so the
+// message text is the only thing that ties either back to the probe.
+//
+// The cutoff is not optional. Probe failures are already present on every agent pod on an
+// untouched cluster and events live for about an hour, so an unscoped lookup reports history
+// rather than anything the caller did.
+func podEventsSince(podName, podUID string, since time.Time, messageSubstr string) ([]string, error) {
+	events, listErr := helpers.ListEventsForObject(context.TODO(), EventsClient,
+		helpers.InvolvedObjectRef{
+			Kind:      "Pod",
+			Name:      podName,
+			Namespace: medik8sparams.OperatorNs,
+			UID:       podUID,
+		})
+	if listErr != nil {
+		return nil, listErr
+	}
+
+	var matched []string
+
+	for eventIdx := range events {
+		event := &events[eventIdx]
+		if !strings.Contains(event.Message, messageSubstr) {
+			continue
+		}
+
+		occurredAt := eventTime(event)
+		if !occurredAt.After(since) {
+			continue
+		}
+
+		matched = append(matched, fmt.Sprintf("%s reason=%s type=%s count=%d message=%q",
+			occurredAt.UTC().Format(time.RFC3339), event.Reason, event.Type, event.Count, event.Message))
+	}
+
+	return matched, nil
+}
+
+// eventTime returns when an event was last seen. The three fields are tried in order of how
+// specific they are: LastTimestamp is what the core event recorder sets, EventTime what the newer
+// events API sets, and FirstTimestamp is the fallback for an event seen exactly once.
+func eventTime(event *corev1.Event) time.Time {
+	if !event.LastTimestamp.IsZero() {
+		return event.LastTimestamp.Time
+	}
+
+	if !event.EventTime.IsZero() {
+		return event.EventTime.Time
+	}
+
+	return event.FirstTimestamp.Time
+}
+
+// agentRestartsUnchanged returns nil while the agent pod's total container restart count still
+// matches baseline. Intended as a Consistently body: a container that kubelet restarts keeps the
+// same pod, so the count is what moves.
+func agentRestartsUnchanged(agentPodName string, baseline int32) error {
+	restarts, restartErr := agentRestartCount(agentPodName)
+	if restartErr != nil {
+		return restartErr
+	}
+
+	if restarts != baseline {
+		return fmt.Errorf("agent pod %s was restarted: container restart count went from %d to %d",
+			agentPodName, baseline, restarts)
+	}
+
+	return nil
+}
+
+// cephRBDChainListing returns the host's iptables rules for the named chain, read through an
+// already-running injector pod, so a caller can assert the REJECT rules it inserted are really in
+// place rather than trust the insert command's exit code.
+func cephRBDChainListing(injectorPod *pod.Builder, chain string) (string, error) {
+	out, execErr := injectorPod.ExecCommand([]string{
+		"sh", "-c", fmt.Sprintf("%s -L %s -n", nsenterIPTables, chain),
+	})
+
+	return out.String(), execErr
+}
+
+// missingCephRBDRejectPorts returns the Ceph port tokens that have no REJECT rule in an iptables
+// chain listing. Matching the port token on a REJECT line, rather than a whole rule spec, keeps it
+// working across the wordings "iptables -L" and "iptables -S" produce.
+func missingCephRBDRejectPorts(chainListing string) []string {
+	var missing []string
+
+	for _, port := range cephRBDRejectPortTokens {
+		found := false
+
+		for _, line := range strings.Split(chainListing, "\n") {
+			if strings.Contains(line, "REJECT") && strings.Contains(line, port) {
+				found = true
+
+				break
+			}
+		}
+
+		if !found {
+			missing = append(missing, port)
+		}
+	}
+
+	return missing
+}
+
+// nodeAndAgentReady returns nil once nodeName is Ready and the SBRC's own agent pod on it is Ready.
+// It is the precondition a spec that disrupts a node checks before it starts, so a node an earlier
+// spec left wedged is reported as such rather than failing the next spec for an unrelated reason.
+func nodeAndAgentReady(sbrcName, nodeName string) error {
+	if readyErr := nodeConditionIs(nodeName, string(corev1.NodeReady),
+		corev1.ConditionTrue, ""); readyErr != nil {
+		return readyErr
+	}
+
+	return agentPodReadyOnNode(sbrcName, nodeName)
+}
+
+// containerProbe is a container's exec probe as the test needs to run it: the command kubelet
+// runs, and the container it runs in.
+type containerProbe struct {
+	command       []string
+	containerName string
+}
+
+// errNoLivenessProbe is returned when the agent container defines no liveness probe at all. That
+// is the fixed state rather than a problem: with no liveness probe there is nothing that can
+// restart the agent under churn, so there is nothing to sample.
+var errNoLivenessProbe = errors.New("the agent container defines no liveness probe")
+
+// agentLivenessProbe returns the sbr-agent container's liveness probe, read off the live
+// DaemonSet so the test runs exactly what kubelet runs rather than a copy of it that can drift.
+// It returns errNoLivenessProbe when the container has none.
+func agentLivenessProbe(sbrcName string) (*containerProbe, error) {
+	agentDS, dsErr := sbrcAgentDaemonSet(sbrcName)
+	if dsErr != nil {
+		return nil, dsErr
+	}
+
+	container, containerErr := agentContainerOf(agentDS)
+	if containerErr != nil {
+		return nil, containerErr
+	}
+
+	if container.LivenessProbe == nil {
+		return nil, errNoLivenessProbe
+	}
+
+	if container.LivenessProbe.Exec == nil || len(container.LivenessProbe.Exec.Command) == 0 {
+		return nil, fmt.Errorf("the liveness probe of container %s is not an exec probe, so the "+
+			"test cannot run it the way kubelet does", container.Name)
+	}
+
+	return &containerProbe{
+		command:       container.LivenessProbe.Exec.Command,
+		containerName: container.Name,
+	}, nil
+}
+
+// probeSampler runs a container probe inside an agent pod and records the runs that came back
+// non-zero.
+//
+// It exists because an assertion on kubelet's Unhealthy events cannot be trusted over a long
+// window. Kubelet rate-limits the events it emits per object, so a probe that keeps failing stops
+// being reported part-way through and the absence of events then reads as health. Running the
+// probe directly is not rate limited: every run is observed.
+type probeSampler struct {
+	agentPodName string
+	probe        *containerProbe
+	runs         int
+	failures     []string
+}
+
+// sample runs the probe once.
+//
+// A non-zero exit is recorded and is not returned as an error: that is the thing being counted.
+// Anything else — the pod being gone, the exec not reaching the container, the run overrunning
+// its hang guard — is returned as an error instead, so a sampler that stopped working can never
+// be mistaken for a clean run.
+func (s *probeSampler) sample() error {
+	agentPod, pullErr := pod.Pull(APIClient, s.agentPodName, medik8sparams.OperatorNs)
+	if pullErr != nil {
+		return fmt.Errorf("pull agent pod %s to run its probe: %w", s.agentPodName, pullErr)
+	}
+
+	s.runs++
+
+	output, execErr := agentPod.ExecCommandWithTimeout(
+		s.probe.command, sbrparams.BlockProbeSampleTimeout, s.probe.containerName)
+	if execErr == nil {
+		return nil
+	}
+
+	var exitErr utilexec.ExitError
+	if !errors.As(execErr, &exitErr) {
+		return fmt.Errorf("run the liveness probe of agent pod %s: %w", s.agentPodName, execErr)
+	}
+
+	s.failures = append(s.failures, fmt.Sprintf("%s exit=%d output=%q",
+		time.Now().UTC().Format(time.RFC3339), exitErr.ExitStatus(),
+		strings.TrimSpace(output.String())))
+
+	return nil
+}
+
+// summary is how the sampler reads in a failure message or a log line.
+func (s *probeSampler) summary() string {
+	return fmt.Sprintf("%d of %d runs of the liveness probe of agent pod %s came back non-zero",
+		len(s.failures), s.runs, s.agentPodName)
 }

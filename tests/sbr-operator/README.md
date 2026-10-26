@@ -685,3 +685,53 @@ Full test case: [docs/TESTCASES/rhwa-1961.md](../../docs/TESTCASES/rhwa-1961.md)
   blocked the victim reaches `SBRStorageUnhealthy=True` (reason `HeartbeatTimeout`), NHC creates a CR,
   an `SBRUnhealthyDetectOnly` Warning naming the victim is recorded on the SBRC, and the victim stays
   Ready on the same boot-id for the rest of the no-reboot window and on one final check after it
+
+### 22. Verify Process Churn Never Costs a Node Its SBR Agent on Ceph RBD Block Storage ([RHWA-1963](https://issues.redhat.com/browse/RHWA-1963))
+
+Proves a busy node cannot get a healthy agent killed. The sbr-agent's container probes find the agent
+by scanning every process on the host, so a process that exits mid-scan makes the scan exit non-zero
+even though it found the agent. Three consecutive liveness failures and kubelet restarts the
+container, which releases `/dev/watchdog`.
+
+Two specs, both under an `Ordered` Describe. The first puts a privileged host-PID fork loop on one
+worker for 12 minutes and watches its agent for 10: the container restart count must not move, the
+liveness probe must never exit non-zero, and kubelet must never record a restart decision. The second
+repeats it with the victim's Ceph traffic rejected on the host `OUTPUT` chain (ports 3300, 6789,
+6800–7300), which is the serious case — a restarted agent cannot come back without storage, so
+nothing on the node would hold the watchdog and nothing could reboot it. It ends by scanning
+`/proc/<pid>/fd` on a healthy node first and then on the victim, so an empty result on the victim
+means the agent is gone rather than that the scan is broken.
+
+The probe failures are sampled by running the probe command — read off the live DaemonSet, so it is
+exactly what kubelet runs — every 15s inside the agent container, not by reading kubelet's
+`Unhealthy` events. Kubelet rate-limits those per object: in an earlier run it stopped emitting them
+four minutes into a ten-minute window while the probe went on failing, which made an event-based
+assertion pass vacuously. Events are still used for the restart decision, which is rare enough not to
+be rate-limited away. The second spec never deletes the agent pod by hand, so the only thing that can
+remove the agent is its own probe.
+
+Gated behind `SBR_RUN_LIVENESS_CHURN` while [RHWA-1955](https://issues.redhat.com/browse/RHWA-1955)
+is open: without the fix both specs fail by design. With the fix — liveness and startup probes
+removed, readiness no longer scanning the process table — both pass and the probe sampling reports
+itself skipped.
+
+Full test case: [docs/TESTCASES/rhwa-1963.md](../../docs/TESTCASES/rhwa-1963.md)
+
+- **Operators**: SBR v5.8.0
+- **Cluster**: Multi-node; at least one schedulable worker not hosting an SBR controller pod, plus one
+  more running a Ready agent as the watchdog-scan control. Skips otherwise
+- **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by provisioner
+  (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the cluster has none
+- **Environment**: Connected or disconnected; `SBR_INJECTOR_IMAGE` must be mirrored when
+  disconnected. **Destructive** — one worker runs an unbounded fork loop in its host namespaces for
+  12 minutes and loses its Ceph traffic for the second spec. No node is expected to reboot. Self Node
+  Remediation must not be running. Skips when a `NodeHealthCheck` already remediates through the SBR
+  template, because a remediation CR would reboot the victim for an unrelated reason. Skips unless
+  `SBR_RUN_LIVENESS_CHURN` is set. Takes roughly 30 minutes
+- **Standalone**: `SBR_RUN_LIVENESS_CHURN=1 ginkgo --label-filter="sbr" --focus="SBR Block Storage — Ceph RBD Liveness Probe Under Process Churn" ./tests/sbr-operator/...`
+- **Pass criteria**: in both 10-minute windows the churn pod stays Running, zero liveness-probe
+  samples exit non-zero, the agent's container restart count never moves from its baseline, and no
+  `Container sbr-agent failed liveness probe, will be restarted` event is recorded after the window's
+  cutoff; in the second the victim stays Ready throughout, its agent pod is Ready at the end, and the
+  watchdog-holder scan finds a holder on the victim after finding one on the control node; teardown
+  leaves no churn or injector pod, no Ceph REJECT rule, and no `StorageBasedRemediationConfig`

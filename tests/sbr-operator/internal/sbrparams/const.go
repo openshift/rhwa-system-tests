@@ -641,6 +641,77 @@ const (
 	// Block mode without sharedStorageClass is rejected. It is never expected to be admitted.
 	SBRCBlockNoStorageClassTestName = "test-sbrc-block-no-storage-class"
 
+	// SBRCBlockLivenessChurnTestName is the SBRC name for the Ceph RBD Block-mode liveness-probe
+	// under process churn test.
+	SBRCBlockLivenessChurnTestName = "test-sbrc-block-liveness-churn"
+
+	// BlockChurnPodName is the privileged host-PID pod that spawns short-lived processes on the
+	// victim node, so the agent's probes scan a process table that keeps changing under them.
+	BlockChurnPodName = "sbr-rbd-churn"
+
+	// BlockChurnStorageLossPodName is the churn pod used while the victim is also cut off from
+	// Ceph. It is a separate pod from BlockChurnPodName so the two specs never share one.
+	BlockChurnStorageLossPodName = "sbr-rbd-churn-storage-loss"
+
+	// BlockChurnInjectorPodName is the privileged injector pod that blocks the victim's Ceph
+	// traffic for the storage-loss half of the churn test.
+	BlockChurnInjectorPodName = "sbr-rbd-churn-injector"
+
+	// BlockWatchdogHolderProbePodName is the host-command pod that reports which host processes
+	// hold a watchdog device open. It is created and removed per invocation, so one name serves
+	// both the healthy-node control and the victim check.
+	BlockWatchdogHolderProbePodName = "sbr-rbd-wdog-holder-probe"
+
+	// BlockChurnObserveDuration is how long the victim's agent is watched under process churn.
+	// The liveness probe fires every 30s and restarts the container after three consecutive
+	// failures, and the bug it guards against restarted the agent within about four minutes, so
+	// the window is sized well past both.
+	BlockChurnObserveDuration = 10 * time.Minute
+
+	// BlockChurnObserveInterval is the poll interval for the under-churn observation window.
+	BlockChurnObserveInterval = 15 * time.Second
+
+	// BlockChurnDuration is how long a churn pod keeps spawning processes. It outlasts
+	// BlockChurnObserveDuration so the churn covers the whole observation window including the
+	// time spent starting the pod, and it bounds the load if the test dies before its cleanup runs.
+	BlockChurnDuration = BlockChurnObserveDuration + 2*time.Minute
+
+	// BlockChurnPodRunningTimeout is how long a churn pod gets to reach Running.
+	BlockChurnPodRunningTimeout = 3 * time.Minute
+
+	// BlockChurnAgentRecoveryTimeout is how long the victim's agent pod gets to report Ready again
+	// in teardown, once the churn and the Ceph block are gone.
+	BlockChurnAgentRecoveryTimeout = 10 * time.Minute
+
+	// BlockCephRuleConfirmTimeout bounds the read-back that proves the Ceph REJECT rules really
+	// landed on the victim's chain. The rules are inserted once and never removed inside the spec,
+	// so a listing that does not show them is retried rather than believed: an exec that came back
+	// short is not the same as a chain that has no rules.
+	BlockCephRuleConfirmTimeout = 2 * time.Minute
+
+	// BlockProbeSampleTimeout bounds one run of a container probe the test executes itself. It is
+	// a hang guard, not kubelet's own probe deadline: an exec round trip through the API server
+	// carries latency kubelet does not pay, so a run that overruns is reported as a broken sample
+	// rather than counted as a probe failure.
+	BlockProbeSampleTimeout = 30 * time.Second
+
+	// LivenessProbeFailedEventSubstr is the substring kubelet puts in the Unhealthy event it emits
+	// for a failed liveness probe.
+	LivenessProbeFailedEventSubstr = "Liveness probe failed"
+
+	// LivenessRestartEventSubstr is the substring kubelet puts in the Killing event it emits when
+	// it restarts a container over its liveness probe. The container name is spliced in by the
+	// caller, since kubelet names the container in that message.
+	LivenessRestartEventSubstr = "failed liveness probe, will be restarted"
+
+	// WatchdogHolderMarker is what the watchdog-holder probe prints for each host process holding
+	// a watchdog device open.
+	WatchdogHolderMarker = "held by"
+
+	// WatchdogHolderProbeDoneMarker is what the watchdog-holder probe prints after it has scanned
+	// every process. It separates "nothing holds the watchdog" from "the probe never ran".
+	WatchdogHolderProbeDoneMarker = "watchdog-holder-scan-complete"
+
 	// BlockModeHostDevMountPath is where the agent container sees the host watchdog's parent
 	// directory in Block mode. A bind mount at /dev would make the OCI runtime skip creating the
 	// CSI-mapped block device node, so the host /dev is never mounted at /dev in Block mode.
@@ -821,6 +892,13 @@ var SBRStorageClass = os.Getenv("SBR_STORAGE_CLASS")
 // Set SBR_RBD_STORAGE_CLASS env var to override auto-discovery.
 // When empty, tests auto-discover a Ceph RBD StorageClass (provisioner containing "rbd.csi.ceph.com").
 var SBRRBDStorageClass = os.Getenv("SBR_RBD_STORAGE_CLASS")
+
+// SBRRunLivenessChurn gates the Ceph RBD liveness-probe-under-process-churn test (RHWA-1963).
+// The product defect it covers, RHWA-1955, is the agent's probes finding the agent by scanning
+// every process on the host, so a process exiting mid-scan makes the probe fail on a busy node.
+// The test fails by design on a build without the fix, so it only runs when it is asked for.
+// Set SBR_RUN_LIVENESS_CHURN to any non-empty value to run it; unset, the specs Skip.
+var SBRRunLivenessChurn = os.Getenv("SBR_RUN_LIVENESS_CHURN")
 
 // WatchdogDebugImage is the container image for /dev/watchdog* discovery and keepalive pods.
 // Must provide sh and ls. Set SBR_WATCHDOG_DEBUG_IMAGE to override (e.g. in disconnected clusters).
