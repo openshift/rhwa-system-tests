@@ -15,6 +15,8 @@ import (
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 )
 
+//dnm
+
 var _, currentFile, _, _ = runtime.Caller(0)
 
 func TestFAR(t *testing.T) {
