@@ -463,3 +463,52 @@ Full test case: [docs/TESTCASES/rhwa-1934.md](../../docs/TESTCASES/rhwa-1934.md)
   Ready, schedulable, same boot-id, unchanged `sbr_self_fenced_total`; the victim returns Ready with a
   changed boot-id and a Ready agent pod, holds steady for 90s, then NHC deletes the CR and the node
   becomes schedulable with the taint gone
+
+### 19. Verify the Agent Probes Do Not Restart a Healthy Agent ([RHWA-1965](https://issues.redhat.com/browse/RHWA-1965))
+
+Regression test for [RHWA-1955](https://issues.redhat.com/browse/RHWA-1955). The sbr-agent DaemonSet
+decided the agent was alive by grepping every process on the node, and the pod runs with `hostPID`,
+so a process exiting mid-scan made the scan fail on a healthy agent; three such checks in a row and
+kubelet restarted it. The fix drops the liveness and startup probes — the agent is the container's
+entrypoint, so kubelet restarts it when it really exits, and the watchdog is the liveness supervisor
+for a fencing agent.
+
+First the structural half: the `sbr-agent` container must define no liveness and no startup probe,
+and no remaining probe may decide liveness by scanning `/proc`. Then the behavioural half: a
+privileged `hostPID` pod spawns and reaps bursts of 50 short-lived processes on one worker, and for
+6 minutes no agent pod anywhere may be replaced, gain a restart, or collect a kubelet Event
+mentioning a probe. A host-PID check then confirms a process still holds the watchdog device open on
+the churned node.
+
+With the churn still running, the target is cut off from Ceph and taken all the way through fencing.
+Every wait fails fast on the bug's signature — the target's agent gaining a restart while the node
+is still Ready on its pre-fencing boot-id: that restart releases the watchdog, the replacement
+cannot complete preflight without the storage, and the node can no longer fence itself. A node that
+has rebooted or gone NotReady restarts its agent as a matter of course and does not trip the guard. The closing assertion is the end state the bug produced — once
+`FencingSucceeded=True` and `Succeeded=True` are set and the `out-of-service` taint is applied, the
+target's boot-id **must** change. A node the cluster has declared dead and moved work off must
+really be gone.
+
+Full test case: [docs/TESTCASES/rhwa-1965.md](../../docs/TESTCASES/rhwa-1965.md)
+
+- **Operators**: SBR v5.8.0, NHC (skips when the NodeHealthCheck CRD is absent)
+- **Cluster**: Multi-node, at least one schedulable worker not hosting an SBR controller pod; skips
+  otherwise
+- **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by
+  provisioner (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the
+  cluster has none
+- **Environment**: Connected or disconnected; `SBR_INJECTOR_IMAGE` must be mirrored when
+  disconnected. **Gated** — `SBR_TEST_RHWA1955=true` is required, and the spec skips before creating
+  anything without it, so a gated-off run provisions no storage. **Destructive** — one worker is
+  saturated with process churn for up to 20 minutes, cut off from Ceph, fenced and rebooted. Self
+  Node Remediation must not be running. Skips when another `NodeHealthCheck` already remediates
+  through the SBR template
+- **Standalone**: `SBR_TEST_RHWA1955=true ginkgo --label-filter="sbr" --focus="host process churn must not restart a healthy agent" ./tests/sbr-operator/...`
+- **Pass criteria**: the agent container has no `livenessProbe` and no `startupProbe`, and no probe
+  whose exec command contains `/proc/`; for 6 minutes of churn every agent keeps its pod name and
+  restart count and collects no probe Event; a process holds the watchdog open on the churned node;
+  the target then reaches `SBRStorageUnhealthy=True` (reason `HeartbeatTimeout`), NHC creates one
+  `StorageBasedRemediation` CR for it, that CR reaches `FencingSucceeded=True` / `Succeeded=True`
+  with the target's agent never restarted along the way, and the target's boot-id changes within
+  `NodeRebootTimeout`; the node then returns Ready with a Ready agent pod, NHC deletes the CR, and the
+  node becomes schedulable with the taint gone

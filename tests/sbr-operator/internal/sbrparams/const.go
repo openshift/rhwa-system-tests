@@ -539,6 +539,57 @@ const (
 	// writing to any more, not to measure cadence, which BlockHeartbeatSlotMaxAge does on
 	// device-written timestamps alone and so without any dependency on the runner's clock.
 	BlockInspectionMaxSkew = 5 * time.Minute
+
+	// SBRCAgentProbeTestName is the SBRC name for the agent probe resilience test (RHWA-1955).
+	SBRCAgentProbeTestName = "test-sbrc-agent-probe"
+
+	// NHCAgentProbeTestName is the NodeHealthCheck CR name for the agent probe resilience test
+	// (RHWA-1955).
+	NHCAgentProbeTestName = "nhc-sbr-agent-probe"
+
+	// AgentContainerName is the SBR agent container inside an agent DaemonSet pod. It is the name
+	// kubelet reports a failed probe against ("Container sbr-agent failed liveness probe").
+	AgentContainerName = "sbr-agent"
+
+	// AgentProbeChurnPodName is the host-PID pod that spawns short-lived processes on the target
+	// node, so the host's process list changes while an agent probe is scanning /proc.
+	AgentProbeChurnPodName = "sbr-probe-churn"
+
+	// AgentProbeWatchdogPodName is the short-lived host-PID pod that reports which host process, if
+	// any, holds a watchdog device open.
+	AgentProbeWatchdogPodName = "sbr-probe-watchdog-holder"
+
+	// AgentProbeInjectorPodName is the privileged pod that blocks Ceph traffic on the target node
+	// once the process churn is established.
+	AgentProbeInjectorPodName = "sbr-probe-injector"
+
+	// AgentProbeChurnDuration is how long the churn pod keeps spawning processes. It has to outlast
+	// the no-restart window and the fencing window that follows it, and it bounds the churn if the
+	// test dies before DeferCleanup removes the pod.
+	AgentProbeChurnDuration = 20 * time.Minute
+
+	// AgentProbeChurnBurst is how many short-lived processes the churn pod starts before reaping
+	// them. Large enough that the process list keeps changing, bounded so the loop paces itself
+	// rather than running away the way an unthrottled fork loop would.
+	AgentProbeChurnBurst = 50
+
+	// AgentProbeNoRestartDuration is how long every agent is watched under churn. A liveness probe
+	// configured the way RHWA-1955 reports it runs every 30s and needs three consecutive failures,
+	// so this covers a dozen probe cycles - well past the ~4 minutes a restart took to appear on
+	// the cluster in the bug report.
+	AgentProbeNoRestartDuration = 6 * time.Minute
+
+	// AgentProbeNoRestartInterval is the poll interval for the under-churn no-restart check.
+	AgentProbeNoRestartInterval = 15 * time.Second
+
+	// UnhealthyEventReason is the reason kubelet records against a pod whose probe failed, with a
+	// message naming the probe ("Liveness probe failed: ...").
+	UnhealthyEventReason = "Unhealthy"
+
+	// KillingEventReason is the reason kubelet records when it stops a container. It covers ordinary
+	// shutdowns too, so only a Killing whose message names a probe counts as a probe failure
+	// ("Container sbr-agent failed liveness probe, will be restarted").
+	KillingEventReason = "Killing"
 )
 
 // AgentExpectedMetricNames lists the Prometheus metric names that must be present in the agent output.
