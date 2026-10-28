@@ -526,3 +526,23 @@ values. Verifies the webhook rejects the update while remediation is active.
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="nhc && disruption:destructive" --focus="order change is rejected" ./tests/nhc-operator/...`
 - **Pass criteria**: TestRemediation CR created, update rejected with error containing "escalating remediations", node recovers after kubelet restart
+
+### 27. Manual Health Confirmation After Delayed Recovery ([RHWA-1973](https://redhat.atlassian.net/browse/RHWA-1973))
+
+Regression coverage for RHWA-1846. Runs the installed NHC against a dedicated,
+harmless test remediator and a test-only condition on one Ready worker. Proves
+that `healthyDelay: -1s` retains the remediation after recovery, and manual
+confirmation lets the real controller delete the remediation, remove the
+annotation using its deployed RBAC, and return to Enabled.
+
+Full test case: [docs/TESTCASES/rhwa-1973.md](../../docs/TESTCASES/rhwa-1973.md)
+
+- **Operators**: NHC v5.8.0 with node-healthcheck-operator#465
+- **Cluster**: One Ready, schedulable worker, no competing NHC configurations
+- **Environment**: Connected or disconnected. Non-destructive, no fencing or
+  reboot. Requires test CRD/RBAC and Node status/metadata permissions
+- **Standalone**: `ginkgo -v --label-filter='operator:nhc && tier:acceptance' --focus='manual health confirmation after delayed recovery' ./tests/nhc-operator`
+- **Pass criteria**: Same remediation retained for 30 seconds after recovery,
+  then deleted after manual confirmation. Annotation removed by NHC, NHC Enabled
+  with one healthy node, worker UID and boot ID unchanged. Test resources and
+  Node fields restored
