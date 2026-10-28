@@ -190,6 +190,58 @@ func verifyDSPodsNoHostPort() error {
 	return nil
 }
 
+// verifyDSPodsReadOnlyRootFilesystem checks that every SNR DaemonSet pod
+// container sets securityContext.readOnlyRootFilesystem=true. Validates the
+// fix for DAST KSV014 (AVD-KSV-0014): an immutable root filesystem must be
+// enforced per the pod security standard so a compromised container cannot
+// tamper with the filesystem or drop foreign executables to disk.
+func verifyDSPodsReadOnlyRootFilesystem() error {
+	dsListOptions := metav1.ListOptions{
+		LabelSelector: snrparams.DaemonSetPodLabelSelector,
+	}
+	dsPods, listErr := pod.List(APIClient, medik8sparams.OperatorNs, dsListOptions)
+	if listErr != nil {
+		return fmt.Errorf("failed to list SNR DaemonSet pods: %w", listErr)
+	}
+
+	if len(dsPods) == 0 {
+		return fmt.Errorf("no SNR DaemonSet pods found")
+	}
+
+	checkContainer := func(podName, kind string, container corev1.Container) error {
+		secContext := container.SecurityContext
+		if secContext == nil || secContext.ReadOnlyRootFilesystem == nil {
+			return fmt.Errorf(
+				"pod %q %s %q does not set securityContext.readOnlyRootFilesystem, expected true",
+				podName, kind, container.Name)
+		}
+
+		if !*secContext.ReadOnlyRootFilesystem {
+			return fmt.Errorf(
+				"pod %q %s %q has readOnlyRootFilesystem=false, expected true",
+				podName, kind, container.Name)
+		}
+
+		return nil
+	}
+
+	for _, dsPod := range dsPods {
+		for _, container := range dsPod.Object.Spec.Containers {
+			if err := checkContainer(dsPod.Object.Name, "container", container); err != nil {
+				return err
+			}
+		}
+
+		for _, initContainer := range dsPod.Object.Spec.InitContainers {
+			if err := checkContainer(dsPod.Object.Name, "init container", initContainer); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 // verifyDSPodsGone checks that no SNR DaemonSet pods exist.
 func verifyDSPodsGone() error {
 	dsListOptions := metav1.ListOptions{
