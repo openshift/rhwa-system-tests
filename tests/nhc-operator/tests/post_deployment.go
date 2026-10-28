@@ -355,11 +355,17 @@ var _ = Describe(
 				consolePods, err = pod.List(APIClient, medik8sparams.OperatorNs, listOptions)
 				Expect(err).ToNot(HaveOccurred(), "failed to re-list console plugin pods in namespace %q",
 					medik8sparams.OperatorNs)
-				Expect(consolePods).ToNot(BeEmpty(),
-					"console plugin pods disappeared after readiness check in namespace %q; "+
+
+				// Filter to Running pods so a terminating or old-revision pod left
+				// over from a rollout cannot cause a spurious failure, matching the
+				// sibling non-root spec. BeEmpty then guards the TOCTOU case where
+				// the pods vanish between the readiness poll and this re-list.
+				runningConsolePods := helpers.FilterRunningPods(consolePods)
+				Expect(runningConsolePods).ToNot(BeEmpty(),
+					"no Running console plugin pods after readiness check in namespace %q; "+
 						"cannot verify ReadOnlyRootFilesystem", medik8sparams.OperatorNs)
 
-				for _, consolePod := range consolePods {
+				for _, consolePod := range runningConsolePods {
 					containerFound := false
 
 					for _, container := range consolePod.Object.Spec.Containers {
