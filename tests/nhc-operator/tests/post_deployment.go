@@ -355,6 +355,9 @@ var _ = Describe(
 				consolePods, err = pod.List(APIClient, medik8sparams.OperatorNs, listOptions)
 				Expect(err).ToNot(HaveOccurred(), "failed to re-list console plugin pods in namespace %q",
 					medik8sparams.OperatorNs)
+				Expect(consolePods).ToNot(BeEmpty(),
+					"console plugin pods disappeared after readiness check in namespace %q; "+
+						"cannot verify ReadOnlyRootFilesystem", medik8sparams.OperatorNs)
 
 				for _, consolePod := range consolePods {
 					containerFound := false
