@@ -582,3 +582,25 @@ NHC CR to return to `Enabled`.
   worker node is free of SNR/NHC controller pods. Each skip records a `skipped-reason`
   report entry
 - **Pass criteria**: A worker node hosting neither an SNR nor an NHC controller pod is selected, NHC CRs whose selector matches the target node are cleared, kubelet stop succeeds, the NHC CR reaches `Enabled` before the break and `Remediating` after it, an SNR CR exists for the target node, at least one NHC controller pod is found, the resolved must-gather image contains a tag separator, `oc adm must-gather` exits successfully, and the output contains the target node's YAML, the operator namespace's aggregated `deployments.yaml`, the `nhc-test-must-gather` CR YAML, a SelfNodeRemediation CR collected during the active remediation, the NHC CRD definition and collected data for every NHC controller pod; the node then reboots (boot ID changes), the SNR CR is removed and the NHC CR returns to `Enabled`
+
+## Non-Destructive Tests -- Manual Health Confirmation
+
+### 28. Manual Health Confirmation After Delayed Recovery ([RHWA-1973](https://redhat.atlassian.net/browse/RHWA-1973))
+
+Regression coverage for RHWA-1846. Runs the installed NHC against a dedicated,
+harmless test remediator and a test-only condition on one Ready worker. Proves
+that `healthyDelay: -1s` retains the remediation after recovery, and manual
+confirmation lets the real controller delete the remediation, remove the
+annotation using its deployed RBAC, and return to Enabled.
+
+Full test case: [docs/TESTCASES/rhwa-1973.md](../../docs/TESTCASES/rhwa-1973.md)
+
+- **Operators**: NHC v5.8.0 with node-healthcheck-operator#465
+- **Cluster**: One Ready, schedulable worker, no competing NHC configurations
+- **Environment**: Connected or disconnected. Non-destructive, no fencing or
+  reboot. Requires test CRD/RBAC and Node status/metadata permissions
+- **Standalone**: `ginkgo -v --label-filter='operator:nhc && tier:acceptance' --focus='manual health confirmation after delayed recovery' ./tests/nhc-operator`
+- **Pass criteria**: Same remediation retained for 30 seconds after recovery,
+  then deleted after manual confirmation. Annotation removed by NHC, NHC Enabled
+  with one healthy node, worker UID and boot ID unchanged. Test resources and
+  Node fields restored
