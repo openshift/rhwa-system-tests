@@ -12,6 +12,7 @@ import (
 	olmV1alpha1 "github.com/rh-ecosystem-edge/eco-goinfra/pkg/schemes/olm/operators/v1alpha1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 // IsDownstream reports whether operators under test are expected to carry
@@ -114,14 +115,19 @@ func FindSucceededCSV(
 func SwitchSubscriptionCatalog(
 	apiClient *clients.Settings, subName, ns, catalogName, channel string,
 ) (*olm.SubscriptionBuilder, error) {
-	sub, err := olm.PullSubscription(apiClient, subName, ns)
-	if err != nil {
-		return nil, fmt.Errorf("failed to pull Subscription: %w", err)
-	}
+	var sub *olm.SubscriptionBuilder
+	// OLM status updates can change resourceVersion while the catalog is switched.
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current, err := olm.PullSubscription(apiClient, subName, ns)
+		if err != nil {
+			return err
+		}
+		current.Definition.Spec.CatalogSource = catalogName
+		current.Definition.Spec.Channel = channel
+		sub, err = current.Update()
 
-	sub.Definition.Spec.CatalogSource = catalogName
-	sub.Definition.Spec.Channel = channel
-	sub, err = sub.Update()
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to update Subscription to target catalog: %w", err)
 	}

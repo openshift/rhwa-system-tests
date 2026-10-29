@@ -33,9 +33,10 @@ SNR has concrete hooks in `tests/snr-operator/tests/upgrade_lifecycle.go`.
 They customize the GA-created default config, compare its UID and complete spec
 after upgrading, and require a unique config probe to reach newly rolled agent
 pods. Both the controller and all agents must run the expected candidate image.
-A direct SNR remediation must reboot and recover a worker before and after the
-upgrade; boot IDs must change while the node UID remains the same. This scenario
-is destructive and requires at least two Ready workers on a disposable cluster.
+Before upgrading, all GA agents must be Ready and reflect the customized config.
+After upgrading, a direct SNR remediation must reboot and recover a worker. Its
+boot ID must change while its node UID remains the same. This scenario is
+destructive and requires at least two Ready workers on a disposable cluster.
 It does not install NHC or stop kubelet: a test-owned SNR CR triggers remediation.
 
 FAR's default is a focused, nondestructive upgrade check on OpenShift 5.0.

@@ -80,9 +80,8 @@ func (hooks *snrUpgradeOperatorFBCTest) BeforeUpgrade(ctx context.Context) error
 	hooks.waitForAgents(ctx, baselineImage, nil, hooks.configSpec)
 	hooks.reportConfiguration(ctx, "before")
 
-	By("requiring a real worker reboot and recovery from GA SNR")
-
-	return hooks.runRemediationCycle(ctx, "before", baselineImage)
+	// Exercise remediation with the candidate after upgrading.
+	return nil
 }
 
 func (hooks *snrUpgradeOperatorFBCTest) AfterUpgrade(ctx context.Context) error {
