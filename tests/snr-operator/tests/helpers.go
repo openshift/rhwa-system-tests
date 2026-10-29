@@ -192,9 +192,10 @@ func verifyDSPodsNoHostPort() error {
 
 // verifyDSPodsReadOnlyRootFilesystem checks that every SNR DaemonSet pod
 // container sets securityContext.readOnlyRootFilesystem=true. Validates the
-// fix for DAST KSV014 (AVD-KSV-0014): an immutable root filesystem must be
-// enforced per the pod security standard so a compromised container cannot
-// tamper with the filesystem or drop foreign executables to disk.
+// fix for DAST KSV014 (AVD-KSV-0014): an immutable container root filesystem is a
+// hardening control (not a Pod Security Standards requirement) that stops a
+// compromised container from writing to its own root filesystem, though not to
+// separately mounted volumes.
 func verifyDSPodsReadOnlyRootFilesystem() error {
 	dsListOptions := metav1.ListOptions{
 		LabelSelector: snrparams.DaemonSetPodLabelSelector,

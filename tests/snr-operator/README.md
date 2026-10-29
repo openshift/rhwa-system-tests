@@ -265,12 +265,13 @@ for a non-destructive lane until that is fixed. Full specification: [docs/TESTCA
 Verifies that every SNR DaemonSet agent pod container (and init container) sets
 `securityContext.readOnlyRootFilesystem=true`. Validates the fix for DAST
 finding KSV014 (AVD-KSV-0014) reported in
-[RHWA-470](https://redhat.atlassian.net/browse/RHWA-470), an immutable root filesystem required by the pod
-security standard so a compromised container cannot tamper with its filesystem
-or write foreign executables to disk. Full specification:
+[RHWA-470](https://redhat.atlassian.net/browse/RHWA-470). An immutable container root
+filesystem is a DAST hardening control (not a Pod Security Standards requirement); it
+stops a compromised container from writing to its own root filesystem, though not to
+separately mounted volumes. Full specification:
 [docs/TESTCASES/rhwa-1984.md](../../docs/TESTCASES/rhwa-1984.md).
 
-- **Operators**: SNR v0.11.0+
+- **Operators**: SNR v5.8.0+
 - **Cluster**: Any topology with SNR installed via OLM
 - **Storage**: none
 - **Environment**: Connected or disconnected

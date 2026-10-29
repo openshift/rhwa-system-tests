@@ -162,7 +162,7 @@ var _ = Describe(
 
 				Expect(verifyDSPodsReadOnlyRootFilesystem()).To(Succeed(),
 					"SNR DaemonSet containers must set securityContext.readOnlyRootFilesystem=true "+
-						"per the pod security standard")
+						"per DAST finding KSV014 (AVD-KSV-0014)")
 			})
 
 		It("Verify only Automatic remediation template exists",
