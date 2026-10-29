@@ -353,6 +353,20 @@ var _ = Describe(
 									pluginPod.Object.Name, cs.Name)
 							}
 						}
+
+						podReady := false
+						for _, cond := range pluginPod.Object.Status.Conditions {
+							if cond.Type == corev1.PodReady {
+								podReady = cond.Status == corev1.ConditionTrue
+
+								break
+							}
+						}
+
+						if !podReady {
+							return fmt.Errorf("pod %q is Running with all containers Ready "+
+								"but PodReady condition is not True", pluginPod.Object.Name)
+						}
 					}
 
 					readyConsolePods = pods
