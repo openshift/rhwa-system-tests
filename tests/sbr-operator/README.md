@@ -707,8 +707,9 @@ The block-mode counterpart of the Filesystem total storage I/O loss test (`stora
 OCP-88880), with its own ID. The fencing proof is awaited **before** the reboot: death is proven from
 the already-stale heartbeat slot long before kubelet reports a new boot-id, and once the victim is
 back its iptables rules are gone with the reboot, so NHC deletes the CR and the taint goes with it.
-The CR is looked up by node name on every poll because it can be recreated when `SBRStorageUnhealthy`
-cycles to `Unknown`; `FencingInProgress` is deliberately not asserted because the 60s fencing window
+The CR and the Node are recorded from before the disruption, so the CR being recreated when
+`SBRStorageUnhealthy` cycles to `Unknown`, or the taint going with it, cannot be missed between polls;
+`FencingInProgress` is deliberately not asserted because the 60s fencing window
 and 60s staleness threshold make it flap.
 
 Full test case: [docs/TESTCASES/rhwa-1944.md](../../docs/TESTCASES/rhwa-1944.md)

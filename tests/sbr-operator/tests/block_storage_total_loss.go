@@ -13,7 +13,6 @@ import (
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -106,10 +105,19 @@ var _ = Describe(
 				By("Asserting SBRStorageUnhealthy is not True on the victim node")
 
 				// Absent, False or Unknown all pass; only True is a failed precondition.
-				Expect(transientNodeHasCondition(victimNodeName,
-					sbrparams.SBRStorageUnhealthyCondition, false)).To(Succeed(),
+				Expect(transientNodeHasCondition(victimNodeName, false)).To(Succeed(),
 					"Node %q must not report %s=True before its Ceph traffic is blocked",
 					victimNodeName, sbrparams.SBRStorageUnhealthyCondition)
+
+				By("Recording the StorageBasedRemediation CR and the Node before anything is disrupted")
+
+				// Started here, before the storage is cut off, because the remediation can run to
+				// completion and be deleted again in seconds: NHC removes the CR as soon as
+				// SBRStorageUnhealthy cycles to Unknown, and the reconciler drops the out-of-service taint
+				// with it. A wait that only begins after the disruption can miss both and report a failure
+				// that never happened.
+				sbrCRRec := recordSBRCR(victimNodeName)
+				nodeRec := recordNode(victimNodeName)
 
 				By(fmt.Sprintf("Starting a privileged injector pod that blocks Ceph traffic in both "+
 					"directions on the victim node %q", victimNodeName))
@@ -151,16 +159,9 @@ var _ = Describe(
 
 				// The CR is what the victim's own agent looks for: with its storage gone it stops
 				// petting the watchdog only once a remediation exists for its node.
-				Eventually(func() error {
-					_, pullErr := pullSBRCR(victimNodeName)
-					if k8serrors.IsNotFound(pullErr) {
-						return fmt.Errorf("StorageBasedRemediation/%s not yet created by NHC", victimNodeName)
-					}
-
-					return pullErr
-				}, sbrparams.NHCSBRCRCreationTimeout, sbrparams.NHCSBRCRCreationPollInterval).Should(Succeed(),
+				Eventually(sbrCRRec.EverExisted(), sbrparams.NHCSBRCRCreationTimeout,
+					sbrparams.NHCSBRCRCreationPollInterval).Should(Succeed(),
 					"NHC must create a StorageBasedRemediation CR for storage-isolated node %q", victimNodeName)
-
 				GinkgoWriter.Printf("StorageBasedRemediation/%s created by NHC\n", victimNodeName)
 
 				// The fencing proof is awaited before the reboot, not after it. Death is proven from
@@ -170,23 +171,21 @@ var _ = Describe(
 				// the taint — so a check that waits the reboot out first can find neither.
 				By("Waiting for FencingSucceeded=True and Succeeded=True on the victim's StorageBasedRemediation CR")
 
-				Eventually(func() error {
-					// Looked up by node name on every poll: the CR can be deleted and recreated
-					// mid-remediation when SBRStorageUnhealthy cycles to Unknown.
-					_, provenErr := fencingProven(victimNodeName)
-
-					return provenErr
-				}, sbrparams.FencingProvenTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+				// The recorder keeps every incarnation of the CR, which can be deleted and recreated
+				// mid-remediation when SBRStorageUnhealthy cycles to Unknown.
+				Eventually(sbrCRRec.EverSaw("FencingSucceeded=True and Succeeded=True", remediationFenced),
+					sbrparams.FencingProvenTimeout,
+					sbrparams.DefaultPollInterval).Should(Succeed(),
 					"StorageBasedRemediation/%s must reach %s=True and %s=True",
 					victimNodeName, sbrparams.FencingSucceededCondition, sbrparams.SucceededCondition)
 
-				By("Asserting the victim node carries the out-of-service taint")
+				By("Asserting the out-of-service taint was observed on the victim node")
 
-				fencedNode, fencedGetErr := APIClient.CoreV1Interface.Nodes().Get(
-					context.TODO(), victimNodeName, metav1.GetOptions{})
-				Expect(fencedGetErr).ToNot(HaveOccurred(),
-					"Must read node %q to check the %s taint", victimNodeName, sbrparams.OutOfServiceTaintKey)
-				Expect(hasOutOfServiceTaint(fencedNode)).To(BeTrue(),
+				// Asserted from the recording, not a live read: the reconciler removes the taint again when
+				// NHC deletes the CR, so by the time a read lands the taint can legitimately be gone.
+				Eventually(nodeRec.EverSaw("the out-of-service taint", hasOutOfServiceTaint),
+					sbrparams.OutOfServiceTaintObservationTimeout,
+					sbrparams.DefaultPollInterval).Should(Succeed(),
 					"Fenced node %q must carry the %s taint", victimNodeName, sbrparams.OutOfServiceTaintKey)
 
 				By("Waiting for the victim node's boot-id to change (the watchdog rebooted it)")
@@ -247,19 +246,8 @@ var _ = Describe(
 
 				By("Waiting for NHC to delete the StorageBasedRemediation CR")
 
-				Eventually(func() error {
-					_, pullErr := pullSBRCR(victimNodeName)
-					if k8serrors.IsNotFound(pullErr) {
-						return nil
-					}
-
-					if pullErr != nil {
-						return pullErr
-					}
-
-					return fmt.Errorf("StorageBasedRemediation/%s still exists; waiting for NHC cleanup",
-						victimNodeName)
-				}, sbrparams.SBRCRCleanupTimeout, sbrparams.SBRCRCleanupPollInterval).Should(Succeed(),
+				Eventually(sbrCRRec.Gone(), sbrparams.SBRCRCleanupTimeout,
+					sbrparams.SBRCRCleanupPollInterval).Should(Succeed(),
 					"NHC must delete the StorageBasedRemediation CR for node %q after recovery", victimNodeName)
 
 				By("Asserting the victim node is schedulable again and the out-of-service taint is gone")
