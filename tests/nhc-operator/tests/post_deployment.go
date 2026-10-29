@@ -21,6 +21,7 @@ import (
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/nhc-operator/internal/nhcparams"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -283,6 +284,126 @@ var _ = Describe(
 				if len(errorMessages) > 0 {
 					Fail("Testing security context of NHC container failed due to:\n- " +
 						strings.Join(errorMessages, "\n- "))
+				}
+			})
+
+		It("Verify NHC console plugin container has readOnlyRootFilesystem enabled",
+			reportxml.ID("1943"),
+			Label(labels.OperatorNHC, labels.TierSmoke, labels.DisruptionNonDestructive,
+				labels.PlatformAny, labels.FrequencyPresubmit,
+				labels.ComponentController), func() {
+				By("Checking whether the NHC console plugin is deployed")
+
+				// The console plugin is optional. Decide skip by the Deployment's
+				// presence, matched by the component label rather than the name: the
+				// Deployment is renamed by a kustomize namePrefix (node-healthcheck-),
+				// while the labels are not, so the selector is stable across that
+				// prefix. Skipping on an absent Deployment keeps the test optional;
+				// a Deployment that exists with zero or unready pods must fail, not
+				// skip, so a broken rollout (quota, scheduling, CrashLoopBackOff) is
+				// still caught.
+				listOptions := metav1.ListOptions{
+					LabelSelector: nhcparams.ConsolePluginPodLabelSelector,
+				}
+				consoleDeployments, err := deployment.List(APIClient, medik8sparams.OperatorNs, listOptions)
+				Expect(err).ToNot(HaveOccurred(), "failed to list console plugin deployments in namespace %q",
+					medik8sparams.OperatorNs)
+
+				if len(consoleDeployments) == 0 {
+					Skip(fmt.Sprintf(
+						"NHC console plugin not deployed (no Deployment matches %q in namespace %q); "+
+							"test requires the console plugin",
+						nhcparams.ConsolePluginPodLabelSelector, medik8sparams.OperatorNs))
+				}
+
+				By("Waiting for every console plugin pod to be Running and Ready")
+
+				// Assert readiness explicitly, not just pod phase: a container that
+				// crash-loops on readOnlyRootFilesystem (the RHWA-527 regression)
+				// keeps phase Running while never becoming Ready, so a phase-only
+				// wait would pass while the regression is present. The verified pod
+				// set is captured so the security check below reuses it rather than
+				// re-listing and filtering, which could silently drop a pod that
+				// appeared between the poll and the re-list.
+				var readyConsolePods []*pod.Builder
+
+				Eventually(func() error {
+					pods, listErr := pod.List(APIClient, medik8sparams.OperatorNs, listOptions)
+					if listErr != nil {
+						return fmt.Errorf("failed to list console plugin pods: %w", listErr)
+					}
+
+					if len(pods) == 0 {
+						return fmt.Errorf("no console plugin pods found")
+					}
+
+					for _, pluginPod := range pods {
+						if pluginPod.Object.Status.Phase != corev1.PodRunning {
+							return fmt.Errorf("pod %q phase is %q, want Running",
+								pluginPod.Object.Name, pluginPod.Object.Status.Phase)
+						}
+
+						if len(pluginPod.Object.Status.ContainerStatuses) == 0 {
+							return fmt.Errorf("pod %q has no container statuses yet", pluginPod.Object.Name)
+						}
+
+						for _, cs := range pluginPod.Object.Status.ContainerStatuses {
+							if !cs.Ready {
+								return fmt.Errorf("pod %q container %q is not Ready",
+									pluginPod.Object.Name, cs.Name)
+							}
+						}
+
+						podReady := false
+						for _, cond := range pluginPod.Object.Status.Conditions {
+							if cond.Type == corev1.PodReady {
+								podReady = cond.Status == corev1.ConditionTrue
+
+								break
+							}
+						}
+
+						if !podReady {
+							return fmt.Errorf("pod %q is Running with all containers Ready "+
+								"but PodReady condition is not True", pluginPod.Object.Name)
+						}
+					}
+
+					readyConsolePods = pods
+
+					return nil
+				}, medik8sparams.DefaultTimeout, nhcparams.DefaultPollInterval).Should(Succeed(),
+					"all console plugin pods must reach Running and Ready; a CrashLoopBackOff "+
+						"here is the RHWA-527 regression")
+
+				By("Verifying console plugin container has readOnlyRootFilesystem=true")
+
+				// Reuse the pod set verified Running and Ready above. Re-listing here
+				// would reintroduce a race where a newly created Pending pod is either
+				// dropped by a filter (contract violated) or fails the check.
+				for _, consolePod := range readyConsolePods {
+					containerFound := false
+
+					for _, container := range consolePod.Object.Spec.Containers {
+						if container.Name != nhcparams.ConsolePluginContainerName {
+							continue
+						}
+
+						containerFound = true
+						Expect(container.SecurityContext).NotTo(BeNil(),
+							"pod %q container %q must have a SecurityContext",
+							consolePod.Object.Name, container.Name)
+						Expect(container.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil(),
+							"pod %q container %q SecurityContext.ReadOnlyRootFilesystem must be set",
+							consolePod.Object.Name, container.Name)
+						Expect(*container.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue(),
+							"pod %q container %q must have ReadOnlyRootFilesystem=true",
+							consolePod.Object.Name, container.Name)
+					}
+
+					Expect(containerFound).To(BeTrue(),
+						"pod %q must contain a container named %q",
+						consolePod.Object.Name, nhcparams.ConsolePluginContainerName)
 				}
 			})
 	})
