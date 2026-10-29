@@ -303,30 +303,15 @@ func CleanupNamespaces(
 ) {
 	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, timeout)
 	defer cleanupCancel()
-	out, err := exec.CommandContext(cleanupCtx, "oc", "get", "ns",
-		"-l", "openshift.io/run-level",
-		"-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.creationTimestamp}{\"\\n\"}{end}",
-	).CombinedOutput()
+
+	namespaces, err := listGatherNamespacesSince(cleanupCtx, testStartTime)
 	if err != nil {
 		logf("Warning: failed to list namespaces for must-gather cleanup: %v\n", err)
 
 		return
 	}
 
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || !strings.HasPrefix(fields[0], "openshift-must-gather-") {
-			continue
-		}
-
-		namespaceName := fields[0]
-		if len(fields) >= namespaceTimestampFields {
-			createdAt, parseErr := time.Parse(time.RFC3339, fields[1])
-			if parseErr == nil && createdAt.Before(testStartTime) {
-				continue
-			}
-		}
-
+	for _, namespaceName := range namespaces {
 		logf("Cleaning up leftover must-gather namespace: %s\n", namespaceName)
 		cleanupOut, cleanupErr := exec.CommandContext(cleanupCtx, "oc", "delete", "ns", namespaceName,
 			"--ignore-not-found", "--wait=false").CombinedOutput()
