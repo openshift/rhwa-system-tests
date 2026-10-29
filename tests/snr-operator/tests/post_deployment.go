@@ -147,6 +147,24 @@ var _ = Describe(
 				Expect(err).ToNot(HaveOccurred(), "SNR controller pods are not running")
 			})
 
+		It("RHWA-1984: Verify SNR DaemonSet containers set readOnlyRootFilesystem (KSV014)",
+			reportxml.ID("1984"),
+			Label(labels.TierSmoke, labels.DisruptionNonDestructive,
+				labels.PlatformAny, labels.FrequencyPresubmit,
+				labels.ComponentDaemonSet), func() {
+				By("Waiting for SNR DaemonSet pods to be running")
+
+				Eventually(verifyDSPodsRunning,
+					medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
+					"SNR DaemonSet pods are not all running and ready")
+
+				By("Verifying SNR DaemonSet containers set readOnlyRootFilesystem (KSV014)")
+
+				Expect(verifyDSPodsReadOnlyRootFilesystem()).To(Succeed(),
+					"SNR DaemonSet containers must set securityContext.readOnlyRootFilesystem=true "+
+						"per DAST finding KSV014 (AVD-KSV-0014)")
+			})
+
 		It("Verify only Automatic remediation template exists",
 			reportxml.ID("71010"),
 			Label(labels.TierSmoke, labels.DisruptionNonDestructive,
