@@ -33,6 +33,14 @@ var (
 		"nodehealthchecks." + CRDGroup,
 	}
 
+	// ConsolePluginPodLabelSelector selects NHC console plugin pods (RHWA-1943).
+	// The pod labels are not affected by the kustomize namePrefix that renames
+	// the Deployment, so the selector is the stable way to find the plugin.
+	ConsolePluginPodLabelSelector = "app.kubernetes.io/component=node-remediation-console-plugin"
+
+	// ConsolePluginContainerName is the container name inside the console plugin pod (RHWA-1943).
+	ConsolePluginContainerName = "node-remediation-console-plugin"
+
 	// ReporterNamespacesToDump tells the reporter from where to collect logs.
 	ReporterNamespacesToDump = map[string]string{
 		medik8sparams.OperatorNs: medik8sparams.OperatorNs,
