@@ -294,20 +294,25 @@ var _ = Describe(
 				labels.ComponentController), func() {
 				By("Checking whether the NHC console plugin is deployed")
 
-				// The console plugin is optional. Key the skip off the pod label
-				// selector rather than the Deployment name: the Deployment is
-				// renamed by a kustomize namePrefix (node-healthcheck-), while the
-				// pod labels are not, so the selector is stable across that prefix.
+				// The console plugin is optional. Decide skip by the Deployment's
+				// presence, matched by the component label rather than the name: the
+				// Deployment is renamed by a kustomize namePrefix (node-healthcheck-),
+				// while the labels are not, so the selector is stable across that
+				// prefix. Skipping on an absent Deployment keeps the test optional;
+				// a Deployment that exists with zero or unready pods must fail, not
+				// skip, so a broken rollout (quota, scheduling, CrashLoopBackOff) is
+				// still caught.
 				listOptions := metav1.ListOptions{
 					LabelSelector: nhcparams.ConsolePluginPodLabelSelector,
 				}
-				consolePods, err := pod.List(APIClient, medik8sparams.OperatorNs, listOptions)
-				Expect(err).ToNot(HaveOccurred(), "failed to list console plugin pods in namespace %q",
+				consoleDeployments, err := deployment.List(APIClient, medik8sparams.OperatorNs, listOptions)
+				Expect(err).ToNot(HaveOccurred(), "failed to list console plugin deployments in namespace %q",
 					medik8sparams.OperatorNs)
 
-				if len(consolePods) == 0 {
+				if len(consoleDeployments) == 0 {
 					Skip(fmt.Sprintf(
-						"NHC console plugin not deployed (no pods match %q in namespace %q); test requires the console plugin",
+						"NHC console plugin not deployed (no Deployment matches %q in namespace %q); "+
+							"test requires the console plugin",
 						nhcparams.ConsolePluginPodLabelSelector, medik8sparams.OperatorNs))
 				}
 
@@ -316,7 +321,12 @@ var _ = Describe(
 				// Assert readiness explicitly, not just pod phase: a container that
 				// crash-loops on readOnlyRootFilesystem (the RHWA-527 regression)
 				// keeps phase Running while never becoming Ready, so a phase-only
-				// wait would pass while the regression is present.
+				// wait would pass while the regression is present. The verified pod
+				// set is captured so the security check below reuses it rather than
+				// re-listing and filtering, which could silently drop a pod that
+				// appeared between the poll and the re-list.
+				var readyConsolePods []*pod.Builder
+
 				Eventually(func() error {
 					pods, listErr := pod.List(APIClient, medik8sparams.OperatorNs, listOptions)
 					if listErr != nil {
@@ -345,6 +355,8 @@ var _ = Describe(
 						}
 					}
 
+					readyConsolePods = pods
+
 					return nil
 				}, medik8sparams.DefaultTimeout, nhcparams.DefaultPollInterval).Should(Succeed(),
 					"all console plugin pods must reach Running and Ready; a CrashLoopBackOff "+
@@ -352,20 +364,10 @@ var _ = Describe(
 
 				By("Verifying console plugin container has readOnlyRootFilesystem=true")
 
-				consolePods, err = pod.List(APIClient, medik8sparams.OperatorNs, listOptions)
-				Expect(err).ToNot(HaveOccurred(), "failed to re-list console plugin pods in namespace %q",
-					medik8sparams.OperatorNs)
-
-				// Filter to Running pods so a terminating or old-revision pod left
-				// over from a rollout cannot cause a spurious failure, matching the
-				// sibling non-root spec. BeEmpty then guards the TOCTOU case where
-				// the pods vanish between the readiness poll and this re-list.
-				runningConsolePods := helpers.FilterRunningPods(consolePods)
-				Expect(runningConsolePods).ToNot(BeEmpty(),
-					"no Running console plugin pods after readiness check in namespace %q; "+
-						"cannot verify ReadOnlyRootFilesystem", medik8sparams.OperatorNs)
-
-				for _, consolePod := range runningConsolePods {
+				// Reuse the pod set verified Running and Ready above. Re-listing here
+				// would reintroduce a race where a newly created Pending pod is either
+				// dropped by a filter (contract violated) or fails the check.
+				for _, consolePod := range readyConsolePods {
 					containerFound := false
 
 					for _, container := range consolePod.Object.Spec.Containers {
