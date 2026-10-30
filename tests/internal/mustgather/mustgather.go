@@ -116,6 +116,13 @@ func Run(
 		logf("must-gather output saved to %s\n", logFile)
 	}
 
+	// The collection log is long and mostly a listing of collected files.
+	// These few lines name the image, namespace and pod it used, so they are
+	// echoed rather than left for someone to find in the artifact.
+	for _, line := range ImageLinesFromOutput(string(output)) {
+		logf("oc adm must-gather: %s\n", line)
+	}
+
 	if childCtx.Err() != nil {
 		return fmt.Errorf("must-gather context ended: %w\nOutput: %s", childCtx.Err(), string(output))
 	}

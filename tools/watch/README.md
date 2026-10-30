@@ -17,6 +17,7 @@ for the person running the test, not for the test itself.
 | Script | Watches | Written for |
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
+| [`collection-watch.sh`](collection-watch.sh) | Every medik8s CRD with its live instance count, the custom resources themselves, the transient `openshift-must-gather-*` namespace and pod, the collection archives published so far, node `Ready`/cordon, and any operator pod not `Running` | [`rhwa-1994`](../../docs/TESTCASES/rhwa-1994.md) — suits any must-gather spec |
 
 ## `snr-watch.sh`
 
@@ -57,6 +58,62 @@ A rebooting node appears in three stages, and the last is the slowest:
 Requires only `oc` logged in and `awk`; it runs on Fedora Linux and macOS alike. Each tick
 is four small reads; raise `-n` to reduce API traffic. `SNR_WATCH_NS` overrides the
 namespace.
+
+## `collection-watch.sh`
+
+Linux, or macOS with `brew install watch`:
+
+```bash
+watch -n 5 -d tools/watch/collection-watch.sh
+```
+
+Anywhere, no `watch` needed:
+
+```bash
+tools/watch/collection-watch.sh --loop
+```
+
+One snapshot and exit:
+
+```bash
+tools/watch/collection-watch.sh
+```
+
+| Block | Shows |
+| ----- | ----- |
+| `crd instances` | every CRD whose name contains `medik8s`, with its live instance count |
+| `medik8s custom resources` | namespace, kind and name of each of those instances |
+| `must-gather` | the transient `openshift-must-gather-*` namespace and its pod, with status and age |
+| `archives` | the collection tarballs published so far, with size and full path |
+| `nodes` | name, `Ready` and cordon |
+| `operator pods not Running` | anything in the operator namespace that is not `Running` |
+
+The instance counts are the point. The collection test turns each one into a
+required file, so the count is the expectation being formed in real time. The
+value that must *not* change is a count dropping while the must-gather pod is
+`Running`: a CR that disappears mid-gather becomes a missing artifact and the
+comparison fails with no sign of why. A node returning `Ready` during the
+destructive specs is expected and harmless.
+
+`crd instances` runs one `oc get` per CRD, a dozen reads per tick. That is the
+most expensive script here, and it runs alongside a collection that is itself
+API-heavy — raise `-n` rather than lowering it.
+
+The must-gather pod ends `Completed`, not `Running`; its namespace is deleted
+shortly after, and the specs sweep up any that survive. A namespace still
+present several minutes after a run finished is a leak worth reporting, not a
+gather still in progress.
+
+`COLLECTION_WATCH_NS` overrides the operator namespace.
+
+The `archives` block looks in `COLLECTION_WATCH_ARCHIVE_DIR`, else
+`ARTIFACT_DIR`, else `ECO_REPORTS_DUMP_DIR`, else
+`/tmp/rhwa-collection-artifacts` — the same chain the specs use to decide
+where to publish. Watching usually happens from a second terminal without the
+run's environment, so that shared default is what makes the block work with
+no setup at all. One archive appears per spec as its
+collection finishes — three by the end of a full run — and the full path is
+printed so it can be copied straight onto a support case.
 
 ## Adding one
 
