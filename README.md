@@ -185,6 +185,7 @@ The project uses a development method - forking workflow
     │   │   └── medik8sparams              # Medik8s shared constants
     │   ├── far-operator                   # Fence Agents Remediation tests
     │   ├── mdr-operator                   # Machine Deletion Remediation tests
+    │   ├── medik8s-collection             # Cross-operator must-gather collection tests
     │   ├── nhc-operator                   # Node Health Check tests
     │   ├── nmo-operator                   # Node Maintenance Operator tests
     │   ├── sbr-operator                   # Storage-Based Remediation tests
