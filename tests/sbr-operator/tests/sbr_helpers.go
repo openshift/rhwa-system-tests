@@ -1559,10 +1559,13 @@ func sysRqTriggerWritable(injectorPod *pod.Builder) (string, error) {
 // (echo 1 > /proc/sys/kernel/sysrq), which sysRqTriggerWritable does not cover; if that part fails
 // the node never panics and the only other symptom is a distant timeout waiting for the condition.
 // The timeout bounds the exec so a half-open stream to a dead node cannot hang the spec.
+// A sync runs first so the panic does not leave containers/storage with a zero-byte overlay link
+// file for the just-pulled injector image, which would keep that image from starting on the node
+// in later runs. It is joined with ";" so a failing sync still lets the panic fire.
 func fireSysRqKernelPanic(injectorPod *pod.Builder) {
 	out, execErr := injectorPod.ExecCommandWithTimeout([]string{
 		"nsenter", "-t", "1", "--pid", "--mount", "--", "sh", "-c",
-		"echo 1 > /proc/sys/kernel/sysrq && echo c > /proc/sysrq-trigger",
+		"sync; echo 1 > /proc/sys/kernel/sysrq && echo c > /proc/sysrq-trigger",
 	}, sbrparams.SysRqExecTimeout)
 	if execErr != nil {
 		GinkgoWriter.Printf("SysRq panic exec on pod %s returned %v (expected: the node dies mid-exec); "+
