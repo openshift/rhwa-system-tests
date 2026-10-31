@@ -217,7 +217,7 @@ var _ = Describe(
 
 				Eventually(func() error {
 					return agentPodReadyOnNode(sbrparams.SBRCBlockStorageLossTestName, victimNodeName)
-				}, sbrparams.BlockFencingStateCheckTimeout,
+				}, sbrparams.BlockAgentReadyAfterRebootTimeout,
 					sbrparams.BlockFencingStateCheckInterval).Should(Succeed(),
 					"The SBRC %q agent pod on node %q must become Ready after it rebooted",
 					sbrparams.SBRCBlockStorageLossTestName, victimNodeName)
