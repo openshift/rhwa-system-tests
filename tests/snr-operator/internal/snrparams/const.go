@@ -1,6 +1,7 @@
 package snrparams
 
 import (
+	"os"
 	"time"
 
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
@@ -306,7 +307,106 @@ const (
 	// NetworkPolicyStabilityWindow is how long the NetworkPolicy's resolved
 	// ipBlock egress rule must remain unchanged after the rapid changes settle.
 	NetworkPolicyStabilityWindow = 30 * time.Second
+	// --- Control plane isolation (RHWA-1927) constants ---.
+
+	// DefaultPeerHostPort is the SNR agent peer health port assumed when the
+	// SelfNodeRemediationConfig does not set spec.hostPort explicitly.
+	DefaultPeerHostPort = 30001
+
+	// AgentProcessPattern matches the SNR agent process in the host PID
+	// namespace. The controller runs the same binary with --is-manager=true,
+	// so the flag is what distinguishes the agent.
+	AgentProcessPattern = "manager --is-manager=false"
+
+	// CPIsolationInjectorPodName is the privileged pod that adds the REJECT
+	// rules inside the victim agent's network namespace.
+	CPIsolationInjectorPodName = "snr-cp-isolation-injector"
+
+	// CPIsolationFlusherPodName is the privileged pod that removes them again.
+	CPIsolationFlusherPodName = "snr-cp-isolation-flusher"
+
+	// CPIsolationProbePodName is the privileged pod that proves, before the
+	// test starts, that the agent PID can be found and iptables is usable in
+	// its network namespace.
+	CPIsolationProbePodName = "snr-cp-isolation-probe"
+
+	// CPIsolationPodTimeout is the budget for a one-shot injector, flush or
+	// probe pod to pull its image and finish.
+	CPIsolationPodTimeout = 3 * time.Minute
+
+	// CPIsolationReadyGraceDuration is how long the victim node must stay
+	// Ready after its agent is isolated. Three apiCheckInterval ticks: long
+	// enough to prove /readyz is still passing, short enough to finish before
+	// the agent decides to reboot.
+	CPIsolationReadyGraceDuration = 45 * time.Second
+
+	// CPIsolationDetectTimeout is how long the victim agent may take to log
+	// the isolation decision. Derived from the SNRC defaults: three ticks to
+	// cross maxApiErrorThreshold, each paying two rounds of peer dial
+	// timeouts, then maxTimeForNoPeersResponse.
+	CPIsolationDetectTimeout = 5 * time.Minute
+
+	// CPIsolationRebootTimeout is how long the victim node may take to change
+	// its boot ID after the isolation decision is logged.
+	CPIsolationRebootTimeout = 10 * time.Minute
+
+	// CPIsolationLogWindow is how far back the agent log is searched.
+	CPIsolationLogWindow = 10 * time.Minute
+
+	// CPIsolationDetectedMessage is logged by the agent when /readyz passed
+	// but no control plane peer could be reached. This is the behaviour added
+	// by self-node-remediation#339 and the thing this test exists to catch.
+	//
+	// It is logged on every tick once peers are unreachable, including ticks
+	// where the agent then decides to wait for the error threshold, so on its
+	// own it proves detection but not the decision to reboot. Pair it with
+	// CPIsolationRebootTriggeredMessage.
+	CPIsolationDetectedMessage = "CP node: readyz passed but no CP peers reachable"
+
+	// PeerConsultationMessage is logged once errorCount crosses
+	// maxApiErrorThreshold and the agent starts asking peers about itself.
+	PeerConsultationMessage = "Error count exceeds threshold, trying to ask other nodes if I'm healthy"
+
+	// CPIsolationRebootTriggeredMessage is logged at the moment the agent
+	// calls Rebooter.Reboot() on the isolation path -- the observable form of
+	// "the agent stops feeding the watchdog".
+	CPIsolationRebootTriggeredMessage = "CP isolation detected despite passing readyz, triggering reboot"
+
+	// APICheckFailureMessage is logged by the agent when /readyz itself fails.
+	// Its absence before the partition is what proves the test exercises the
+	// isolation gate rather than the pre-existing API-error branch.
+	APICheckFailureMessage = "failed to check api server"
+
 )
+
+// DefaultCPIsolationRebootSLA is the default end-to-end budget from blocking the
+// peer port to the victim's boot ID changing.
+//
+// RHWA-1384 specifies ~2 minutes for the detection the customer cares about:
+// three 15s apiCheckInterval ticks to cross maxApiErrorThreshold (~45s),
+// maxTimeForNoPeersResponse (30s) from the last peer response, then the watchdog
+// timeout. The end-to-end measurement also includes the node reboot and kubelet
+// rejoin, which is platform-dependent: on baremetal with a hardware watchdog it
+// is quick, but on cloud VMs (softdog, full instance reboot, rejoin) it adds
+// several minutes. The default carries headroom for the cloud case so the test
+// does not flake there, while still failing if detection regresses by an order
+// of magnitude.
+const DefaultCPIsolationRebootSLA = 8 * time.Minute
+
+// CPIsolationRebootSLA is the budget enforced by the control plane isolation
+// test. Override with SNR_CP_ISOLATION_REBOOT_SLA (a Go duration string such as
+// "4m") to tighten it on baremetal where the reboot itself is fast, or to adjust
+// it per platform. Falls back to DefaultCPIsolationRebootSLA when unset or
+// unparseable. The measured value is recorded with AddReportEntry on every run.
+var CPIsolationRebootSLA = func() time.Duration {
+	if v := os.Getenv("SNR_CP_ISOLATION_REBOOT_SLA"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+
+	return DefaultCPIsolationRebootSLA
+}()
 
 // WorkloadTestImage is the container image used for test workload pods.
 var WorkloadTestImage = medik8sparams.WorkloadImage
@@ -327,4 +427,32 @@ var PreferredAddressTypesValid = []string{
 // first because that is the address type the fix exists to make usable;
 // NodeName second to prove the ordering survives rendering, since order is
 // the agent's fallback precedence.
-var PreferredAddressTypesConfigured = []string{"InternalIP", "NodeName"}
+var (
+	PreferredAddressTypesConfigured = []string{"InternalIP", "NodeName"}
+	// InjectorImage is the container image for the privileged pods that inject
+	// iptables rules into the SNR agent's network namespace. It must provide all
+	// three of nsenter, pgrep and iptables. Verified image coverage:
+	//   - ubi-minimal:    none
+	//   - ubi9/ubi:       nsenter only (no pgrep, no iptables)
+	//   - rhel9/support-tools: pgrep + nsenter, but no iptables
+	//   - nicolaka/netshoot: all three
+	// So the ubi9/ubi fallback below does NOT satisfy the requirement and the
+	// test will skip at the iptables-usability probe when it is used. Prow sets a
+	// purpose-built image via medik8s-lib (SHARED_DIR/injector_image); for a local
+	// run set SNR_INJECTOR_IMAGE to an image that carries all three tools.
+	//
+	// Set SNR_INJECTOR_IMAGE to override. SBR_INJECTOR_IMAGE is honoured as a
+	// fallback so a job that already mirrors an image for the SBR suite does not
+	// need a second variable.
+	InjectorImage = func() string {
+		if img := os.Getenv("SNR_INJECTOR_IMAGE"); img != "" {
+			return img
+		}
+
+		if img := os.Getenv("SBR_INJECTOR_IMAGE"); img != "" {
+			return img
+		}
+
+		return "registry.access.redhat.com/ubi9/ubi:latest"
+	}()
+)
