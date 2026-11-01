@@ -836,6 +836,176 @@ func parseFenceSlots(data []byte) map[int]FenceSlot {
 	return slots
 }
 
+// highestNodeIDEntry returns the node name and node ID of the node map entry holding the highest
+// node ID. Block mode fills slot index nodeID-1, so that node owns the last slot in use in every
+// region and the slots after it are still zero-filled. That is what makes a write aimed one slot
+// too far visible: it lands on a slot nobody owns, rather than on another node's live data.
+func highestNodeIDEntry(nodeMap *blockNodeMap) (string, uint16, error) {
+	var (
+		highestName string
+		highestID   uint16
+	)
+
+	for nodeName, entry := range nodeMap.Entries {
+		if entry.NodeID > highestID {
+			highestName, highestID = nodeName, entry.NodeID
+		}
+	}
+
+	// Node IDs start at 1, so a zero here means no entry carried an assignment at all.
+	if highestID == 0 {
+		return "", 0, fmt.Errorf("the node map assigns no node ID (%d entries)", len(nodeMap.Entries))
+	}
+
+	return highestName, highestID, nil
+}
+
+// heartbeatSlotUnwritten returns nil when the heartbeat slot at slotIdx is zero-filled: a slot no
+// agent has ever written. Only that one 4 KB slot is read, not the whole region.
+//
+// An empty heartbeat slot is what makes a slot-offset defect dangerous rather than merely wrong: a
+// heartbeat header that fails to unmarshal counts as "stopped", so a completion check reading one
+// slot too far sees a zeroed slot and reports a live node dead.
+func heartbeatSlotUnwritten(observerPodName string, slotIdx int) error {
+	if slotIdx < 0 || slotIdx >= blockMaxNodes {
+		return fmt.Errorf("heartbeat slot index %d is outside the region (0-%d)",
+			slotIdx, blockMaxNodes-1)
+	}
+
+	data, readErr := readDeviceBlocksFromPod(observerPodName, heartbeatRegionBlock+slotIdx, 1)
+	if readErr != nil {
+		return readErr
+	}
+
+	if !slotRegionIsZero(data, 0) {
+		return fmt.Errorf("heartbeat slot index %d is not zero-filled: something has written to a "+
+			"slot no node owns", slotIdx)
+	}
+
+	return nil
+}
+
+// errFenceOnNeighbourSlot marks a fence message found in the slot after the victim's. That is the
+// signature of the reconciler/agent slot offset mismatch fixed upstream in 4131c812: the reconciler
+// wrote at nodeID*slotSize while the agent reads its own fence at (nodeID-1)*4096, so the fence
+// landed one slot past the victim and the completion check read a neighbour's heartbeat slot.
+// Callers match it to fail immediately rather than keep waiting for a fence that will never arrive.
+var errFenceOnNeighbourSlot = errors.New("the fence landed in the slot after the victim's")
+
+// fenceNeighbourhood is the fence slot a node ID owns together with the slot immediately after it,
+// read in a single pass so both describe the same moment on the device.
+type fenceNeighbourhood struct {
+	nodeID uint16
+	// slotIndex is where the node's own fence slot sits in the region: nodeID-1 in Block mode.
+	slotIndex int
+	// own is the node's own fence slot; ownWritten is false when the slot is zero-filled, which is
+	// what a slot no peer has ever fenced looks like.
+	own        FenceSlot
+	ownWritten bool
+	// next is the slot immediately after it. nextExists is false for node ID 255, which owns the
+	// last slot in the region, so there is no following slot to read.
+	next        FenceSlot
+	nextWritten bool
+	nextExists  bool
+}
+
+// readFenceNeighbourhood reads the fence slot the given node ID owns, and the one after it, through
+// an agent pod. Only those slots are read rather than the whole 1 MB region, so it is cheap enough
+// to poll.
+func readFenceNeighbourhood(observerPodName string, nodeID uint16) (fenceNeighbourhood, error) {
+	if nodeID < 1 || nodeID > blockMaxNodes {
+		return fenceNeighbourhood{}, fmt.Errorf("node ID %d is outside the Block-mode range 1-%d",
+			nodeID, blockMaxNodes)
+	}
+
+	hood := fenceNeighbourhood{nodeID: nodeID, slotIndex: int(nodeID) - 1}
+	hood.nextExists = hood.slotIndex+1 < blockMaxNodes
+	readBlocks := 1
+
+	if hood.nextExists {
+		readBlocks = 2
+	}
+
+	data, readErr := readDeviceBlocksFromPod(observerPodName, fenceRegionBlock+hood.slotIndex, readBlocks)
+	if readErr != nil {
+		return fenceNeighbourhood{}, readErr
+	}
+
+	// parseFenceSlots indexes the bytes it is handed, so slot 0 is the node's own slot and slot 1
+	// the one after it, whatever their absolute position in the region. The absolute indices are
+	// written back so failure messages name the slots as the device numbers them.
+	slots := parseFenceSlots(data)
+	hood.own, hood.ownWritten = slots[0]
+	hood.next, hood.nextWritten = slots[1]
+	hood.own.SlotIndex = hood.slotIndex
+	hood.next.SlotIndex = hood.slotIndex + 1
+
+	return hood, nil
+}
+
+// ownSlotQuiet returns nil when the node's own fence slot asks for nothing: either no peer has ever
+// written it, or it holds a FENCE_REASON_NONE message, which is what the agent's startup disarm
+// leaves behind. Data that is not a valid SBD fence message is an error rather than "empty".
+func (hood fenceNeighbourhood) ownSlotQuiet() error {
+	if !hood.ownWritten {
+		return nil
+	}
+
+	if hood.own.Corrupt {
+		return fmt.Errorf("fence slot index %d, owned by node ID %d, holds data that is not a valid "+
+			"SBD fence message", hood.slotIndex, hood.nodeID)
+	}
+
+	if hood.own.Reason != fenceReasonNone {
+		return fmt.Errorf("fence slot index %d, owned by node ID %d, already requests fencing "+
+			"(writer node ID %d, target node ID %d, reason %d)",
+			hood.slotIndex, hood.nodeID, hood.own.WriterNodeID, hood.own.TargetNodeID, hood.own.Reason)
+	}
+
+	return nil
+}
+
+// nextSlotEmpty returns nil while the slot after the node's own is still zero-filled, and an error
+// wrapping errFenceOnNeighbourSlot once it holds a fence message. A node that owns the last slot in
+// the region has no next slot, which satisfies this trivially.
+func (hood fenceNeighbourhood) nextSlotEmpty() error {
+	if !hood.nextExists || !hood.nextWritten {
+		return nil
+	}
+
+	if hood.next.Corrupt {
+		return fmt.Errorf("fence slot index %d, the one after node ID %d's and owned by no running "+
+			"node, holds data that is not a valid SBD fence message", hood.next.SlotIndex, hood.nodeID)
+	}
+
+	return fmt.Errorf("%w: fence slot index %d holds a fence message (writer node ID %d, target "+
+		"node ID %d, reason %d) while node ID %d reads its own fence at slot index %d",
+		errFenceOnNeighbourSlot, hood.next.SlotIndex, hood.next.WriterNodeID, hood.next.TargetNodeID,
+		hood.next.Reason, hood.nodeID, hood.slotIndex)
+}
+
+// fenceRequested returns the fence message in the node's own slot, and errors while that slot holds
+// nothing, holds unparseable data, or holds a disarmed FENCE_REASON_NONE message. Intended as an
+// Eventually body.
+func (hood fenceNeighbourhood) fenceRequested() (FenceSlot, error) {
+	if !hood.ownWritten {
+		return FenceSlot{}, fmt.Errorf("fence slot index %d, owned by node ID %d, is still empty",
+			hood.slotIndex, hood.nodeID)
+	}
+
+	if hood.own.Corrupt {
+		return FenceSlot{}, fmt.Errorf("fence slot index %d, owned by node ID %d, holds data that is "+
+			"not a valid SBD fence message", hood.slotIndex, hood.nodeID)
+	}
+
+	if hood.own.Reason == fenceReasonNone {
+		return FenceSlot{}, fmt.Errorf("fence slot index %d, owned by node ID %d, holds a "+
+			"FENCE_REASON_NONE message rather than a fence request", hood.slotIndex, hood.nodeID)
+	}
+
+	return hood.own, nil
+}
+
 // slotRegionIsZero reports whether the whole 4 KB slot at slotIdx is zero-filled, which is what a
 // healthy slot no agent has ever written looks like.
 func slotRegionIsZero(data []byte, slotIdx int) bool {

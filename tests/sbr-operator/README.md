@@ -565,3 +565,47 @@ Full test case: [docs/TESTCASES/rhwa-1970.md](../../docs/TESTCASES/rhwa-1970.md)
   widened ingress rule is restored; the SBRC gets a `MetricsNamespaceLabelMissing` warning event
   when `openshift-monitoring` lacks the label
  
+
+### 23. Verify Fence Slot Geometry on Ceph RBD Block Storage ([RHWA-2031](https://issues.redhat.com/browse/RHWA-2031))
+
+Regression cover for the reconciler/agent slot offset mismatch fixed upstream in `4131c812`. In
+Block mode the agent reads its own fence slot at `(nodeID - 1) * 4096` while the controller wrote at
+`nodeID * slotSize`: the fence landed one slot past the victim, which therefore never saw it, and
+the completion check read the neighbour's zero-filled heartbeat slot — an unparseable slot counts as
+"stopped", so fencing was reported as succeeded while the victim was still alive.
+
+The test injects no fault. It creates a `StorageBasedRemediation` CR directly for the node holding
+the highest node ID in the on-device node map — the node whose neighbouring slots are still
+zero-filled, which is the case the defect was dangerous in — and lets the fencing run for real. Read
+through an observer agent on another node, the fence message must appear in fence slot index
+nodeID-1 and target the victim's node ID, while the slot after it stays empty on every poll; a fence
+found there fails the spec immediately rather than waiting out the timeout. The victim must then act
+on the fence and reboot, and `FencingSucceeded` must only go True after its heartbeat slot has gone
+stale: a `FencingSucceeded=True` observed while that slot is still fresh fails the spec.
+
+Staleness is measured between timestamps written on the device — the victim's slot against the
+newest slot on the device — never against the test runner's clock, because an exec into the observer
+pod can stall for tens of seconds and a read-time measure would turn that stall into a false "the
+victim stopped". The spec deletes the CR itself once the victim is Ready and only then waits for its
+agent: the `out-of-service` taint evicts the Ceph RBD CSI node plugin, so until the CR is gone the
+agent cannot attach the shared device.
+
+Full test case: [docs/TESTCASES/rhwa-2031.md](../../docs/TESTCASES/rhwa-2031.md)
+
+- **Operators**: SBR v5.8.0 (no NHC — the spec creates the remediation CR itself)
+- **Cluster**: Multi-node, agents on at least 2 nodes; skips when the node holding the highest node
+  ID hosts an SBR controller pod, since that node is rebooted
+- **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by provisioner
+  (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the cluster has none
+- **Environment**: Connected or disconnected. **Destructive** — one node is cordoned, fenced,
+  tainted `out-of-service` and rebooted. Self Node Remediation must not be running. Skips when a
+  `NodeHealthCheck` already remediates through the SBR template
+- **Standalone**: `ginkgo --label-filter="operator:sbr && component:remediation" --focus="the fence reaches the slot the victim reads" ./tests/sbr-operator/...`
+- **Pass criteria**: before the CR exists the victim's fence slot asks for nothing and the fence and
+  heartbeat slots after it are zero-filled; a fence message targeting the victim's node ID appears in
+  slot index nodeID-1 within 3m with the next slot still empty; the victim's heartbeat slot falls
+  more than 45s behind the newest heartbeat on the device with no `FencingSucceeded=True` while it is
+  under 30s behind; the CR reaches `FencingSucceeded=True` / `Succeeded=True` with the transition
+  later than the victim's last heartbeat; the victim carries the `out-of-service` taint, reboots with
+  a changed boot-id and returns Ready; after the CR is deleted it is schedulable with the taint gone
+  and its agent pod is Ready again

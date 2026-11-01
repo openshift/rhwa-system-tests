@@ -447,32 +447,202 @@ func heartbeatSequences(observerPodName string) (map[uint16]uint64, error) {
 	return sequences, nil
 }
 
-// victimHeartbeatTimestamp reads the heartbeat region through the observer and returns the UnixNano
-// timestamp written in the slot the given node ID owns. The slot is located by position (index
-// nodeID-1, the Block-mode geometry the agent and reconciler share) and must carry that node ID, so a
-// heartbeat written to the wrong offset fails here instead of being found by its payload.
-func victimHeartbeatTimestamp(observerPodName string, victimNodeID uint16) (int64, error) {
-	slots, readErr := readSlotDataFromPod(observerPodName)
-	if readErr != nil {
-		return 0, readErr
+// victimHeartbeatSlot returns the heartbeat slot the given node ID owns, read through the observer.
+// The slot is located by position (index nodeID-1, the Block-mode geometry the agent and reconciler
+// share) and must carry that node ID, so a heartbeat written to the wrong offset fails here instead
+// of being found by its payload. Only that one 4 KB slot is read, not the whole region.
+func victimHeartbeatSlot(observerPodName string, nodeID uint16) (SlotData, error) {
+	if nodeID < 1 || nodeID > blockMaxNodes {
+		return SlotData{}, fmt.Errorf("node ID %d is outside the Block-mode range 1-%d",
+			nodeID, blockMaxNodes)
 	}
 
-	slotIdx := int(victimNodeID) - 1
+	slotIdx := int(nodeID) - 1
+	data, readErr := readDeviceBlocksFromPod(observerPodName, heartbeatRegionBlock+slotIdx, 1)
+	if readErr != nil {
+		return SlotData{}, readErr
+	}
+
+	// parseSlotData indexes the bytes it is handed, so the single slot read comes back at index 0.
+	slots := parseSlotData(data)
+	if len(slots) == 0 {
+		return SlotData{}, fmt.Errorf("no valid heartbeat at slot index %d for node ID %d",
+			slotIdx, nodeID)
+	}
+
+	slot := slots[0]
+	if slot.NodeID != nodeID {
+		return SlotData{}, fmt.Errorf("heartbeat slot at index %d (node ID %d's position) holds node ID %d",
+			slotIdx, nodeID, slot.NodeID)
+	}
+
+	slot.SlotIndex = slotIdx
+
+	return slot, nil
+}
+
+// newestSlotTimestamp returns the highest timestamp written into any slot. Freshness is measured
+// against it rather than against the test runner's clock, which need not agree with the nodes'.
+func newestSlotTimestamp(slots []SlotData) int64 {
+	var newest int64
 
 	for _, slot := range slots {
-		if slot.SlotIndex != slotIdx {
-			continue
+		if slot.Timestamp > newest {
+			newest = slot.Timestamp
 		}
-
-		if slot.NodeID != victimNodeID {
-			return 0, fmt.Errorf("heartbeat slot at index %d (node ID %d's position) holds node ID %d",
-				slotIdx, victimNodeID, slot.NodeID)
-		}
-
-		return slot.Timestamp, nil
 	}
 
-	return 0, fmt.Errorf("no valid heartbeat at slot index %d for node ID %d", slotIdx, victimNodeID)
+	return newest
+}
+
+// slotForNodeID returns the heartbeat slot carrying the given node ID.
+func slotForNodeID(slots []SlotData, nodeID uint16) (SlotData, bool) {
+	for _, slot := range slots {
+		if slot.NodeID == nodeID {
+			return slot, true
+		}
+	}
+
+	return SlotData{}, false
+}
+
+// heartbeatSlotLag returns how far a node's heartbeat slot is behind the newest heartbeat on the
+// device: newest timestamp minus the node's own. Both come from the device, written by the nodes
+// themselves, so the measure holds regardless of what the test runner's clock says and regardless
+// of when the read happened — a read delayed by half a minute still reports the same lag.
+func heartbeatSlotLag(slots []SlotData, nodeID uint16) (time.Duration, error) {
+	slot, found := slotForNodeID(slots, nodeID)
+	if !found {
+		return 0, fmt.Errorf("no heartbeat slot on the device carries node ID %d", nodeID)
+	}
+
+	return time.Duration(newestSlotTimestamp(slots) - slot.Timestamp), nil
+}
+
+// errFencingProvenWhileHeartbeating marks the controller reporting fencing complete while the
+// victim's heartbeat slot was still advancing. That is exactly what the slot offset mismatch
+// produced: the completion check read a slot the victim never writes, found it zero-filled, and an
+// unparseable slot counts as "stopped". Callers match it to fail immediately rather than poll on.
+var errFencingProvenWhileHeartbeating = errors.New(
+	"fencing was proven while the victim was still heartbeating")
+
+// heartbeatStallWatch follows one node's heartbeat slot and reports when it has fallen behind the
+// rest of the device, which is the evidence from storage that the victim acted on its fence.
+//
+// Age is measured as the lag between the victim's slot and the newest slot on the device, never
+// against the test runner's clock or against when a read returned. Both figures are written by the
+// nodes themselves, so a read that is delayed — an exec into the observer pod can stall for tens of
+// seconds — reports the same lag it would have reported on time, and a slow read cannot be mistaken
+// for a stopped node.
+type heartbeatStallWatch struct {
+	observerPodName string
+	nodeName        string
+	nodeID          uint16
+	// quietFor is how far behind the newest heartbeat the victim's slot must fall before it counts
+	// as stopped.
+	quietFor time.Duration
+	// lastTimestamp is the UnixNano the victim itself wrote in the last heartbeat this watch saw.
+	// The ordering assertion uses it because it comes from the victim's clock, like the heartbeat
+	// the controller judges staleness on.
+	lastTimestamp int64
+}
+
+// newHeartbeatStallWatch starts watching a node's heartbeat slot.
+func newHeartbeatStallWatch(
+	observerPodName, nodeName string, nodeID uint16, quietFor time.Duration,
+) *heartbeatStallWatch {
+	return &heartbeatStallWatch{
+		observerPodName: observerPodName,
+		nodeName:        nodeName,
+		nodeID:          nodeID,
+		quietFor:        quietFor,
+	}
+}
+
+// stalled returns nil once the victim's heartbeat slot is more than quietFor behind the newest
+// heartbeat on the device. Every poll also reads the victim's remediation: FencingSucceeded going
+// True while the victim's slot is still fresh is returned wrapping
+// errFencingProvenWhileHeartbeating, because a proof of death that arrives while the victim is
+// demonstrably writing can only have come from reading the wrong slot. Every poll is logged,
+// read errors included, so a stalled read shows up in the report next to the lag it produced.
+// Intended as an Eventually body.
+func (watch *heartbeatStallWatch) stalled() error {
+	slots, readErr := readSlotDataFromPod(watch.observerPodName)
+	if readErr != nil {
+		GinkgoWriter.Printf("[heartbeat-stall] node %s (node ID %d): read through observer pod %s "+
+			"failed: %v\n", watch.nodeName, watch.nodeID, watch.observerPodName, readErr)
+
+		return readErr
+	}
+
+	lag, lagErr := heartbeatSlotLag(slots, watch.nodeID)
+	if lagErr != nil {
+		GinkgoWriter.Printf("[heartbeat-stall] node %s (node ID %d): %v\n",
+			watch.nodeName, watch.nodeID, lagErr)
+
+		return lagErr
+	}
+
+	if slot, found := slotForNodeID(slots, watch.nodeID); found {
+		watch.lastTimestamp = slot.Timestamp
+	}
+
+	sbrCR, pullErr := pullSBRCR(watch.nodeName)
+	if pullErr != nil {
+		GinkgoWriter.Printf("[heartbeat-stall] node %s (node ID %d): lag %s, but the remediation "+
+			"could not be read: %v\n", watch.nodeName, watch.nodeID, lag.Round(time.Second), pullErr)
+
+		return fmt.Errorf("get StorageBasedRemediation/%s: %w", watch.nodeName, pullErr)
+	}
+
+	proven := conditionTrue(sbrCR, sbrparams.FencingSucceededCondition)
+	GinkgoWriter.Printf("[heartbeat-stall] node %s (node ID %d): lag %s behind the newest heartbeat "+
+		"(stalled at %s, %s=%t)\n", watch.nodeName, watch.nodeID, lag.Round(time.Second),
+		watch.quietFor, sbrparams.FencingSucceededCondition, proven)
+
+	// Two write cycles: a slot that fresh belongs to a node that is still writing, so no completion
+	// check may have concluded otherwise.
+	if proven && lag < sbrparams.BlockHeartbeatSlotMaxAge {
+		return fmt.Errorf("%w: StorageBasedRemediation/%s reports %s=True while its heartbeat slot "+
+			"(node ID %d) is only %s behind the newest heartbeat on the device",
+			errFencingProvenWhileHeartbeating, watch.nodeName,
+			sbrparams.FencingSucceededCondition, watch.nodeID, lag.Round(time.Second))
+	}
+
+	if lag <= watch.quietFor {
+		return fmt.Errorf("heartbeat slot (node ID %d) of node %s is still being written: it is %s "+
+			"behind the newest heartbeat on the device, and must fall more than %s behind",
+			watch.nodeID, watch.nodeName, lag.Round(time.Second), watch.quietFor)
+	}
+
+	return nil
+}
+
+// lastHeartbeat is the UnixNano timestamp of the last heartbeat this watch saw the victim write.
+func (watch *heartbeatStallWatch) lastHeartbeat() int64 {
+	return watch.lastTimestamp
+}
+
+// nodeRestoredAfterRemediation returns nil once a node the reconciler cordoned is schedulable again
+// and no longer carries the out-of-service taint, which is the state deleting its
+// StorageBasedRemediation CR must leave it in. It deliberately does not require the node to be
+// Ready: a node that was actually rebooted comes back on its own schedule. Intended as an
+// Eventually body.
+func nodeRestoredAfterRemediation(nodeName string) error {
+	node, getErr := APIClient.CoreV1Interface.Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	if getErr != nil {
+		return fmt.Errorf("get node %s: %w", nodeName, getErr)
+	}
+
+	if node.Spec.Unschedulable {
+		return fmt.Errorf("node %s is still cordoned", nodeName)
+	}
+
+	if hasOutOfServiceTaint(node) {
+		return fmt.Errorf("node %s still carries the %s taint", nodeName, sbrparams.OutOfServiceTaintKey)
+	}
+
+	return nil
 }
 
 // stalledNodeIDs returns, in ascending order, the node IDs whose heartbeat sequence did not advance
@@ -633,11 +803,11 @@ func splitBrainHeartbeatState(
 		return splitBrainState{}, fmt.Errorf("the node map holds no entry for victim node %s", victimNodeName)
 	}
 
-	heartbeatTS, tsErr := victimHeartbeatTimestamp(observerPodName, victimEntry.NodeID)
-	if tsErr != nil {
+	victimSlot, slotErr := victimHeartbeatSlot(observerPodName, victimEntry.NodeID)
+	if slotErr != nil {
 		return splitBrainState{}, fmt.Errorf(
 			"read the victim's heartbeat slot (node ID %d) through observer pod %s: %w",
-			victimEntry.NodeID, observerPodName, tsErr)
+			victimEntry.NodeID, observerPodName, slotErr)
 	}
 
 	sequences, seqErr := heartbeatSequences(observerPodName)
@@ -654,7 +824,7 @@ func splitBrainHeartbeatState(
 
 	state := splitBrainState{
 		victimNodeID:     victimEntry.NodeID,
-		heartbeatTS:      heartbeatTS,
+		heartbeatTS:      victimSlot.Timestamp,
 		victimSequence:   victimSequence,
 		witnessNodeIDs:   make(map[string]uint16, len(witnessNodes)),
 		witnessSequences: make(map[uint16]uint64, len(witnessNodes)),
@@ -763,10 +933,11 @@ func witnessesStillHealthy(witnessNodes []string) error {
 
 // fencingProvenAfterHeartbeat checks that the victim's FencingSucceeded condition transitioned to True
 // only after the last heartbeat it wrote — death is proven from the heartbeat going stale, so the
-// proof cannot predate the silence. It reads the CR snapshot taken at the moment fencing was proven
-// rather than re-pulling, so NHC deleting the CR after recovery cannot race it.
-func fencingProvenAfterHeartbeat(provenCR *unstructured.Unstructured, state splitBrainState) error {
-	lastHeartbeat := time.Unix(0, state.heartbeatTS)
+// proof cannot predate the silence. heartbeatTS is the UnixNano the victim wrote in that heartbeat.
+// It reads the CR snapshot taken at the moment fencing was proven rather than re-pulling, so NHC
+// deleting the CR after recovery cannot race it.
+func fencingProvenAfterHeartbeat(provenCR *unstructured.Unstructured, heartbeatTS int64) error {
+	lastHeartbeat := time.Unix(0, heartbeatTS)
 	transition, transitionErr := fencingSucceededTransitionTime(provenCR)
 	if transitionErr != nil {
 		return fmt.Errorf("read the FencingSucceeded transition time from StorageBasedRemediation/%s: %w",

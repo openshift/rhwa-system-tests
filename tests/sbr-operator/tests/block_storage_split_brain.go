@@ -304,7 +304,7 @@ var _ = Describe(
 
 				By("Asserting the FencingSucceeded transition happened after the victim's last heartbeat")
 
-				Expect(fencingProvenAfterHeartbeat(provenCR, state)).To(Succeed(),
+				Expect(fencingProvenAfterHeartbeat(provenCR, state.heartbeatTS)).To(Succeed(),
 					"FencingSucceeded for node %q must transition after its last heartbeat", victimNodeName)
 
 				By("Asserting the victim node carries the out-of-service taint")

@@ -655,6 +655,31 @@ const (
 	// NetworkPolicyRecreateTimeout bounds the wait for the operator to recreate the agent
 	// NetworkPolicy after it is deleted out-of-band, and for a drifted spec to be restored.
 	NetworkPolicyRecreateTimeout = 2 * time.Minute
+
+	// SBRCBlockFenceGeometryTestName is the SBRC name for the Ceph RBD block-mode fence slot
+	// geometry regression test, which covers the reconciler/agent slot offset mismatch fixed in
+	// upstream 4131c812.
+	SBRCBlockFenceGeometryTestName = "test-sbrc-block-fence-geometry"
+
+	// BlockFenceWriteTimeout is how long a peer agent gets to write the fence message into the
+	// victim's own fence slot once the StorageBasedRemediation CR exists. The reconciler adds its
+	// finalizer, reads the storage write gate and cordons the node before it writes, and a failed
+	// write is retried with controller backoff, so this is sized well above a single reconcile.
+	BlockFenceWriteTimeout = 3 * time.Minute
+
+	// BlockVictimHeartbeatStallTimeout is how long the victim gets to stop writing heartbeats once
+	// the fence is in its slot. The victim reads its own fence slot on every peer-check tick and
+	// then reboots, so the slot normally goes quiet inside a minute; the rest is headroom for a
+	// slow node and for the quiet period below, which is served out inside this window.
+	BlockVictimHeartbeatStallTimeout = 5 * time.Minute
+
+	// BlockHeartbeatStallQuietPeriod is how far behind the newest heartbeat on the device the
+	// victim's own slot must fall before it counts as stopped: three write cycles, so a single
+	// slow or missed write is not mistaken for a dead node. It stays under the reconciler's
+	// hardcoded 60s staleness threshold, so the stall is observed before the controller may act
+	// on it. Both sides of the comparison are device-written timestamps, so a slow read of the
+	// device cannot inflate it.
+	BlockHeartbeatStallQuietPeriod = 3 * DefaultHeartbeatInterval
 )
 
 // AgentProbeForbiddenSubstrings are the fragments of a host process-table scan that must never
