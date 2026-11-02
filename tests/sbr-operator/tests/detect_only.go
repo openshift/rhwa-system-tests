@@ -352,37 +352,14 @@ var _ = Describe(
 
 			injectorPodName = strings.TrimRight(injectorPodName, "-")
 
-			By("Cleaning up any stale detectOnly StorageBasedRemediationConfig from a previous run")
+			By("Cleaning up any stale detectOnly StorageBasedRemediationConfig and its operands from a previous run")
 
-			Eventually(func() error {
-				stale := buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{})
-				deleteErr := APIClient.Delete(context.TODO(), stale)
-				if deleteErr == nil || k8serrors.IsNotFound(deleteErr) {
-					return nil
-				}
-
-				return deleteErr
-			}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-				"Pre-test cleanup of stale SBRC %s failed", sbrparams.SBRCDetectOnlyTestName)
-
-			By("Waiting for stale StorageBasedRemediationConfig to be fully removed before recreating")
-
-			Eventually(func() error {
-				staleCheck := buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{})
-				getErr := APIClient.Get(context.TODO(),
-					types.NamespacedName{Name: sbrparams.SBRCDetectOnlyTestName, Namespace: medik8sparams.OperatorNs},
-					staleCheck)
-				if k8serrors.IsNotFound(getErr) {
-					return nil
-				}
-
-				if getErr != nil {
-					return getErr
-				}
-
-				return fmt.Errorf("SBRC %s still terminating", sbrparams.SBRCDetectOnlyTestName)
-			}, sbrparams.SBRCReadyTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-				"Stale SBRC must be fully gone before recreating")
+			// Wait for the shared-storage PVC (not only the SBRC) before recreate: a Terminating
+			// PVC left by slow CephFS NodeUnstageVolume blocks the next device-init Job and
+			// surfaces as a false agent-DaemonSet BeforeAll timeout.
+			deleteSBRCAndWait(
+				buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{}),
+				sbrparams.SBRCDetectOnlyTestName)
 
 			By("Cleaning up any stale watchdog-keepalive pods from a previous run")
 
@@ -488,35 +465,17 @@ var _ = Describe(
 				}
 			}
 
-			By("AfterAll: removing detect-only StorageBasedRemediationConfig")
+			By("AfterAll: removing detect-only StorageBasedRemediationConfig and its operands")
 
-			if detectOnlySBRC != nil {
-				if deleteErr := APIClient.Delete(context.TODO(), detectOnlySBRC); deleteErr != nil {
-					if !k8serrors.IsNotFound(deleteErr) {
-						GinkgoT().Logf("Warning: AfterAll cleanup delete %s failed: %v",
-							sbrparams.SBRCDetectOnlyTestName, deleteErr)
-					}
-				} else {
-					Eventually(func() error {
-						getErr := APIClient.Get(context.TODO(),
-							types.NamespacedName{
-								Name:      sbrparams.SBRCDetectOnlyTestName,
-								Namespace: medik8sparams.OperatorNs,
-							},
-							detectOnlySBRC.DeepCopy())
-
-						if k8serrors.IsNotFound(getErr) {
-							return nil
-						}
-
-						if getErr != nil {
-							return getErr
-						}
-
-						return fmt.Errorf("SBRC %s still present after delete", sbrparams.SBRCDetectOnlyTestName)
-					}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed())
-				}
+			// A mid-suite It may already have deleted the CR; still drain leftover PVC/pods so
+			// the next Ordered/random suite cannot recreate on a Terminating claim.
+			sbrcToDelete := detectOnlySBRC
+			if sbrcToDelete == nil {
+				sbrcToDelete = buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{})
 			}
+
+			deleteSBRCAndWait(sbrcToDelete, sbrparams.SBRCDetectOnlyTestName)
+			detectOnlySBRC = nil
 		})
 
 		// RHWA-1184: SBR agent crashes on startup in detect-only mode when watchdog device is busy.
@@ -875,36 +834,38 @@ var _ = Describe(
 					GinkgoWriter.Printf("Warning: delete injector pod %s: %v\n", injectorPodName, delErr)
 				}
 
-				By("Deleting the StorageBasedRemediationConfig")
+				By("Deleting the StorageBasedRemediationConfig and waiting for its operands to drain")
 
 				liveRef := detectOnlySBRC.DeepCopy()
 				deleteErr := APIClient.Delete(context.TODO(), liveRef)
 				Expect(deleteErr).ToNot(HaveOccurred(),
 					"StorageBasedRemediationConfig %q must be deletable", sbrparams.SBRCDetectOnlyTestName)
 
-				// Nil out so AfterAll does not attempt a second delete.
+				// Nil out so AfterAll does not attempt a second delete of the CR; AfterAll still
+				// drains any leftover PVC/pods via deleteSBRCAndWait.
 				detectOnlySBRC = nil
 
-				By("Verifying agent DaemonSet is garbage-collected after StorageBasedRemediationConfig deletion")
-
-				dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrparams.SBRCDetectOnlyTestName
-
 				Eventually(func() error {
-					_, getErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
-						context.TODO(), dsName, metav1.GetOptions{})
-
+					getErr := APIClient.Get(context.TODO(),
+						types.NamespacedName{
+							Name:      sbrparams.SBRCDetectOnlyTestName,
+							Namespace: medik8sparams.OperatorNs,
+						},
+						liveRef.DeepCopy())
 					if k8serrors.IsNotFound(getErr) {
 						return nil
 					}
 
 					if getErr != nil {
-						return fmt.Errorf("unexpected error checking DaemonSet %s: %w", dsName, getErr)
+						return getErr
 					}
 
-					return fmt.Errorf("DaemonSet %q still exists after StorageBasedRemediationConfig deletion",
-						dsName)
-				}, sbrparams.SBRCDaemonSetGCTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"Agent DaemonSet %q must be garbage-collected after StorageBasedRemediationConfig deletion",
-					dsName)
+					return fmt.Errorf("SBRC %s still present after delete", sbrparams.SBRCDetectOnlyTestName)
+				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+					"StorageBasedRemediationConfig %q must finish deletion", sbrparams.SBRCDetectOnlyTestName)
+
+				By("Verifying agent DaemonSet, pods, Jobs, and shared-storage PVC are gone after deletion")
+
+				waitForSBRCOperandsGone(sbrparams.SBRCDetectOnlyTestName)
 			})
 	})

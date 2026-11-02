@@ -1635,3 +1635,210 @@ func conditionTrue(sbrCR *unstructured.Unstructured, condType string) bool {
 
 	return status == string(corev1.ConditionTrue)
 }
+
+// waitForSBRCOperandsGone blocks until every operand of the named SBRC is gone: agent DaemonSet,
+// pods and Jobs labeled with the SBRC, and the shared-storage PVC (by label and by the
+// controller's fixed name). Call this after the SBRC itself is NotFound and before recreating
+// an SBRC with the same name — a Terminating PVC left behind by slow CephFS NodeUnstageVolume
+// makes the next device-init Job fail to schedule and surfaces as a false BeforeAll timeout.
+func waitForSBRCOperandsGone(sbrcName string) {
+	dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrcName
+	pvcName := sbrcName + sbrparams.SharedStoragePVCSuffix
+	selector := metav1.ListOptions{LabelSelector: sbrparams.SBRCConfigLabelKey + "=" + sbrcName}
+
+	Eventually(func() error {
+		return sbrcOperandsRemaining(dsName, pvcName, selector)
+	}, sbrparams.GhostPeerCleanupTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+		func() string {
+			return fmt.Sprintf(
+				"All operands of SBRC %q must be gone before recreate\n%s",
+				sbrcName, sbrcOperandCleanupDiagnostics(sbrcName, dsName, pvcName, selector))
+		})
+}
+
+// sbrcOperandsRemaining returns nil when the agent DaemonSet, labeled pods/Jobs, labeled PVCs,
+// and the named shared-storage PVC are all absent. Otherwise it returns an error naming what
+// is still present so Eventually messages stay actionable.
+func sbrcOperandsRemaining(dsName, pvcName string, selector metav1.ListOptions) error {
+	ctx := context.TODO()
+	var leftover []string
+
+	_, dsErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(ctx, dsName, metav1.GetOptions{})
+	if dsErr == nil {
+		leftover = append(leftover, "DaemonSet/"+dsName)
+	} else if !k8serrors.IsNotFound(dsErr) {
+		return fmt.Errorf("get DaemonSet %s: %w", dsName, dsErr)
+	}
+
+	pods, podErr := APIClient.Pods(medik8sparams.OperatorNs).List(ctx, selector)
+	if podErr != nil {
+		return fmt.Errorf("list pods: %w", podErr)
+	}
+
+	for idx := range pods.Items {
+		leftover = append(leftover, fmt.Sprintf("Pod/%s(phase=%s)",
+			pods.Items[idx].Name, pods.Items[idx].Status.Phase))
+	}
+
+	jobs, jobErr := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(ctx, selector)
+	if jobErr != nil {
+		return fmt.Errorf("list jobs: %w", jobErr)
+	}
+
+	for idx := range jobs.Items {
+		leftover = append(leftover, "Job/"+jobs.Items[idx].Name)
+	}
+
+	pvcs, pvcErr := APIClient.PersistentVolumeClaims(medik8sparams.OperatorNs).List(ctx, selector)
+	if pvcErr != nil {
+		return fmt.Errorf("list PVCs: %w", pvcErr)
+	}
+
+	for idx := range pvcs.Items {
+		leftover = append(leftover, fmt.Sprintf("PVC/%s(phase=%s)",
+			pvcs.Items[idx].Name, pvcs.Items[idx].Status.Phase))
+	}
+
+	namedPVC, namedErr := APIClient.PersistentVolumeClaims(medik8sparams.OperatorNs).Get(
+		ctx, pvcName, metav1.GetOptions{})
+	if namedErr == nil {
+		// Avoid double-reporting when the labeled list already includes this PVC.
+		alreadyListed := false
+		for idx := range pvcs.Items {
+			if pvcs.Items[idx].Name == pvcName {
+				alreadyListed = true
+
+				break
+			}
+		}
+
+		if !alreadyListed {
+			phase := string(namedPVC.Status.Phase)
+			if namedPVC.DeletionTimestamp != nil {
+				phase = "Terminating"
+			}
+
+			leftover = append(leftover, fmt.Sprintf("PVC/%s(phase=%s)", pvcName, phase))
+		}
+	} else if !k8serrors.IsNotFound(namedErr) {
+		return fmt.Errorf("get PVC %s: %w", pvcName, namedErr)
+	}
+
+	if len(leftover) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("still present: %s", strings.Join(leftover, ", "))
+}
+
+// sbrcOperandCleanupDiagnostics dumps leftover operand state for a failed waitForSBRCOperandsGone.
+// Includes pods that still mount the shared-storage PVC (even without the sbrconfig label) because
+// a Succeeded agent pod holding the volume is what keeps pvc-protection from releasing.
+func sbrcOperandCleanupDiagnostics(sbrcName, dsName, pvcName string, selector metav1.ListOptions) string {
+	ctx := context.TODO()
+	var report strings.Builder
+
+	fmt.Fprintf(&report, "=== SBRC %q operand cleanup diagnostics (ns %s) ===\n",
+		sbrcName, medik8sparams.OperatorNs)
+	appendSBRCOperandDaemonSetDiag(&report, ctx, dsName)
+	appendSBRCOperandPodDiag(&report, ctx, selector)
+	appendSBRCOperandJobDiag(&report, ctx, selector)
+	appendSBRCOperandPVCDiag(&report, ctx, pvcName)
+	appendSBRCOperandPVCMountDiag(&report, ctx, pvcName)
+
+	return report.String()
+}
+
+func appendSBRCOperandDaemonSetDiag(report *strings.Builder, ctx context.Context, dsName string) {
+	_, dsErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(ctx, dsName, metav1.GetOptions{})
+	switch {
+	case k8serrors.IsNotFound(dsErr):
+		fmt.Fprintf(report, "DaemonSet %s: gone\n", dsName)
+	case dsErr != nil:
+		fmt.Fprintf(report, "DaemonSet %s: GET failed: %v\n", dsName, dsErr)
+	default:
+		fmt.Fprintf(report, "DaemonSet %s: still present\n", dsName)
+	}
+}
+
+func appendSBRCOperandPodDiag(report *strings.Builder, ctx context.Context, selector metav1.ListOptions) {
+	pods, podErr := APIClient.Pods(medik8sparams.OperatorNs).List(ctx, selector)
+	switch {
+	case podErr != nil:
+		fmt.Fprintf(report, "Labeled pods: LIST failed: %v\n", podErr)
+	case len(pods.Items) == 0:
+		fmt.Fprintf(report, "Labeled pods: none\n")
+	default:
+		for idx := range pods.Items {
+			agentPod := &pods.Items[idx]
+			fmt.Fprintf(report, "Pod %s: phase=%s node=%q deletionTimestamp=%v\n",
+				agentPod.Name, agentPod.Status.Phase, agentPod.Spec.NodeName, agentPod.DeletionTimestamp)
+		}
+	}
+}
+
+func appendSBRCOperandJobDiag(report *strings.Builder, ctx context.Context, selector metav1.ListOptions) {
+	jobs, jobErr := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(ctx, selector)
+	switch {
+	case jobErr != nil:
+		fmt.Fprintf(report, "Labeled jobs: LIST failed: %v\n", jobErr)
+	case len(jobs.Items) == 0:
+		fmt.Fprintf(report, "Labeled jobs: none\n")
+	default:
+		for idx := range jobs.Items {
+			fmt.Fprintf(report, "Job %s: active=%d succeeded=%d failed=%d\n",
+				jobs.Items[idx].Name,
+				jobs.Items[idx].Status.Active,
+				jobs.Items[idx].Status.Succeeded,
+				jobs.Items[idx].Status.Failed)
+		}
+	}
+}
+
+func appendSBRCOperandPVCDiag(report *strings.Builder, ctx context.Context, pvcName string) {
+	namedPVC, namedErr := APIClient.PersistentVolumeClaims(medik8sparams.OperatorNs).Get(
+		ctx, pvcName, metav1.GetOptions{})
+	switch {
+	case k8serrors.IsNotFound(namedErr):
+		fmt.Fprintf(report, "PVC %s: gone\n", pvcName)
+	case namedErr != nil:
+		fmt.Fprintf(report, "PVC %s: GET failed: %v\n", pvcName, namedErr)
+	default:
+		phase := string(namedPVC.Status.Phase)
+		if namedPVC.DeletionTimestamp != nil {
+			phase = "Terminating"
+		}
+
+		fmt.Fprintf(report, "PVC %s: phase=%s volume=%q finalizers=%v deletionTimestamp=%v\n",
+			pvcName, phase, namedPVC.Spec.VolumeName, namedPVC.Finalizers, namedPVC.DeletionTimestamp)
+	}
+}
+
+func appendSBRCOperandPVCMountDiag(report *strings.Builder, ctx context.Context, pvcName string) {
+	allPods, allErr := APIClient.Pods(medik8sparams.OperatorNs).List(ctx, metav1.ListOptions{})
+	if allErr != nil {
+		fmt.Fprintf(report, "PVC mount scan: LIST pods failed: %v\n", allErr)
+
+		return
+	}
+
+	foundMount := false
+	for idx := range allPods.Items {
+		mountPod := &allPods.Items[idx]
+		for _, vol := range mountPod.Spec.Volumes {
+			if vol.PersistentVolumeClaim == nil || vol.PersistentVolumeClaim.ClaimName != pvcName {
+				continue
+			}
+
+			foundMount = true
+			fmt.Fprintf(report,
+				"Pod %s still references PVC %s: phase=%s node=%q deletionTimestamp=%v\n",
+				mountPod.Name, pvcName, mountPod.Status.Phase, mountPod.Spec.NodeName, mountPod.DeletionTimestamp)
+		}
+	}
+
+	if !foundMount {
+		fmt.Fprintf(report, "PVC mount scan: no pods in %s reference %s\n",
+			medik8sparams.OperatorNs, pvcName)
+	}
+}

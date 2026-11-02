@@ -562,16 +562,19 @@ func ownedBy(owners []metav1.OwnerReference, ownerUID types.UID) bool {
 	return false
 }
 
-// deleteSBRCAndWait deletes an SBRC and blocks until it is gone. Deletion failures are logged
-// rather than asserted so teardown never masks the test result; the wait itself is asserted so
-// a stuck SBRC does not silently leak into the next suite.
+// deleteSBRCAndWait deletes an SBRC and blocks until the CR and its operands (agent DaemonSet,
+// pods, Jobs, shared-storage PVC) are gone. Deletion failures other than NotFound are logged
+// rather than asserted so teardown never masks the test result; the waits themselves are
+// asserted so a stuck SBRC or Terminating PVC cannot silently leak into the next recreate.
+//
+// NotFound on Delete is not an early return: a previous run may have removed the CR while leaving
+// the shared-storage PVC Terminating, and recreating the SBRC on top of that PVC is what wedges
+// device-init (RHWA-1184 BeforeAll flake).
 func deleteSBRCAndWait(sbrc *unstructured.Unstructured, sbrcName string) {
 	if deleteErr := APIClient.Delete(context.TODO(), sbrc); deleteErr != nil {
-		if k8serrors.IsNotFound(deleteErr) {
-			return
+		if !k8serrors.IsNotFound(deleteErr) {
+			GinkgoWriter.Printf("Warning: delete SBRC %s: %v\n", sbrcName, deleteErr)
 		}
-
-		GinkgoWriter.Printf("Warning: delete SBRC %s: %v\n", sbrcName, deleteErr)
 	}
 
 	Eventually(func() error {
@@ -590,6 +593,8 @@ func deleteSBRCAndWait(sbrc *unstructured.Unstructured, sbrcName string) {
 		return fmt.Errorf("SBRC %s still present", sbrcName)
 	}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
 		"SBRC %q must be gone", sbrcName)
+
+	waitForSBRCOperandsGone(sbrcName)
 }
 
 // blockSuperblock is the parsed sector-0 header of a Block-mode SBR device. CRC and ComputedCRC
