@@ -570,6 +570,215 @@ const (
 	// taken moments after the baseline can legitimately show a slot that has not ticked yet.
 	BlockWitnessProgressTimeout = 2 * time.Minute
 
+	// SBRCBlockStorageLossTestName is the SBRC name for the Ceph RBD block-mode total storage I/O
+	// loss test (RHWA-1944).
+	SBRCBlockStorageLossTestName = "test-sbrc-block-storage-loss"
+
+	// NHCBlockStorageLossTestName is the NodeHealthCheck CR name for the block-mode total storage
+	// I/O loss test (RHWA-1944).
+	NHCBlockStorageLossTestName = "nhc-sbr-block-storage-loss"
+
+	// BlockStorageLossInjectorPodName is the privileged pod that blocks Ceph traffic in both
+	// directions on the victim node, with no time limit, so the victim cannot reach the shared
+	// device at all and only its watchdog can reboot it.
+	BlockStorageLossInjectorPodName = "sbr-rbd-storage-loss-injector"
+
+	// SBRCBlockDetectOnlyTestName is the SBRC name for the Ceph RBD block-mode detection-only test.
+	SBRCBlockDetectOnlyTestName = "test-sbrc-block-detect-only"
+
+	// NHCBlockDetectOnlyTestName is the NodeHealthCheck CR name for the block-mode detection-only
+	// test. It is created only for the watchdog-path half of the test: the fence-read half runs with
+	// no NHC at all, so the StorageBasedRemediation CR the test writes itself is the only one.
+	NHCBlockDetectOnlyTestName = "nhc-sbr-block-detect-only"
+
+	// BlockDetectOnlyInjectorPodName is the privileged pod that blocks Ceph traffic in both
+	// directions on the victim node of the detection-only test, with no time limit, so the victim
+	// loses the shared device entirely and only its watchdog could still reboot it.
+	BlockDetectOnlyInjectorPodName = "sbr-rbd-detect-only-injector"
+
+	// SBRUnhealthyDetectOnlyReason is the event an agent emits, instead of stopping to pet its
+	// watchdog, when its own SBR storage is unhealthy while detectOnlyMode is Enabled.
+	SBRUnhealthyDetectOnlyReason = "SBRUnhealthyDetectOnly"
+
+	// BlockFenceMessageTimeout is how long to wait for a peer agent to write the fence message into
+	// the victim's own fence slot once a StorageBasedRemediation CR exists. The peer has to cordon
+	// the node and pass the storage write gate first, so it is sized well above one reconcile.
+	BlockFenceMessageTimeout = 3 * time.Minute
+
+	// BlockDetectOnlyWatchdogFireAllowance is the time a disarmed watchdog would have needed to
+	// fire: the agent's own grace before it stops petting plus the device's timeout. SBR does not
+	// expose either, so this is a loose upper bound rather than a measured value.
+	BlockDetectOnlyWatchdogFireAllowance = 2 * time.Minute
+
+	// BlockDetectOnlyRebootAllowance is the time a bare-metal node needs to go all the way down and
+	// report back in. It is the second half of the no-reboot window: a reboot that started but has
+	// not finished still shows as NotReady, which the window asserts on directly.
+	BlockDetectOnlyRebootAllowance = 8 * time.Minute
+
+	// BlockDetectOnlyNoRebootWindow is how long a storage-isolated victim must stay up and Ready to
+	// prove detect-only mode never let anything reboot it. It is counted from the moment its
+	// remediation CR appears, because that is when both reboot routes open, and it covers the
+	// watchdog firing plus a full reboot so a slow node cannot outlast it.
+	BlockDetectOnlyNoRebootWindow = BlockDetectOnlyWatchdogFireAllowance + BlockDetectOnlyRebootAllowance
+
+	// BlockDetectOnlyNoRebootMinWindow is the shortest no-reboot window the test will settle for
+	// when the steps between the CR appearing and the window opening have already eaten most of it.
+	// Without a floor a slow event lookup could shrink the check to nothing and pass for free.
+	BlockDetectOnlyNoRebootMinWindow = 2 * time.Minute
+
+	// BlockDetectOnlyNoRebootInterval is the poll interval for the no-reboot window.
+	BlockDetectOnlyNoRebootInterval = 10 * time.Second
+
+	// SBRCBlockLifecycleTestNameA is the first SBRC name for the Block-mode SBRC lifecycle test.
+	SBRCBlockLifecycleTestNameA = "test-sbrc-block-lifecycle-a"
+
+	// SBRCBlockLifecycleTestNameB is the second SBRC name for the Block-mode SBRC lifecycle test.
+	// It is created only after the first one is deleted: every agent holds /dev/watchdog, so two
+	// agent DaemonSets on the same nodes would crash-loop.
+	SBRCBlockLifecycleTestNameB = "test-sbrc-block-lifecycle-b"
+
+	// SBRCBlockNoStorageClassTestName is the SBRC name used for the negative admission check that
+	// Block mode without sharedStorageClass is rejected. It is never expected to be admitted.
+	SBRCBlockNoStorageClassTestName = "test-sbrc-block-no-storage-class"
+
+	// SBRCBlockLivenessChurnTestName is the SBRC name for the Ceph RBD Block-mode liveness-probe
+	// under process churn test.
+	SBRCBlockLivenessChurnTestName = "test-sbrc-block-liveness-churn"
+
+	// BlockChurnPodName is the privileged host-PID pod that spawns short-lived processes on the
+	// victim node, so the agent's probes scan a process table that keeps changing under them.
+	BlockChurnPodName = "sbr-rbd-churn"
+
+	// BlockChurnStorageLossPodName is the churn pod used while the victim is also cut off from
+	// Ceph. It is a separate pod from BlockChurnPodName so the two specs never share one.
+	BlockChurnStorageLossPodName = "sbr-rbd-churn-storage-loss"
+
+	// BlockChurnInjectorPodName is the privileged injector pod that blocks the victim's Ceph
+	// traffic for the storage-loss half of the churn test.
+	BlockChurnInjectorPodName = "sbr-rbd-churn-injector"
+
+	// BlockWatchdogHolderProbePodName is the host-command pod that reports which host processes
+	// hold a watchdog device open. It is created and removed per invocation, so one name serves
+	// both the healthy-node control and the victim check.
+	BlockWatchdogHolderProbePodName = "sbr-rbd-wdog-holder-probe"
+
+	// BlockChurnObserveDuration is how long the victim's agent is watched under process churn.
+	// The liveness probe fires every 30s and restarts the container after three consecutive
+	// failures, and the bug it guards against restarted the agent within about four minutes, so
+	// the window is sized well past both.
+	BlockChurnObserveDuration = 10 * time.Minute
+
+	// BlockChurnObserveInterval is the poll interval for the under-churn observation window.
+	BlockChurnObserveInterval = 15 * time.Second
+
+	// BlockChurnDuration is how long a churn pod keeps spawning processes. It outlasts
+	// BlockChurnObserveDuration so the churn covers the whole observation window including the
+	// time spent starting the pod, and it bounds the load if the test dies before its cleanup runs.
+	BlockChurnDuration = BlockChurnObserveDuration + 2*time.Minute
+
+	// BlockChurnPodRunningTimeout is how long a churn pod gets to reach Running.
+	BlockChurnPodRunningTimeout = 3 * time.Minute
+
+	// BlockChurnAgentRecoveryTimeout is how long the victim's agent pod gets to report Ready again
+	// in teardown, once the churn and the Ceph block are gone.
+	BlockChurnAgentRecoveryTimeout = 10 * time.Minute
+
+	// BlockCephRuleConfirmTimeout bounds the read-back that proves the Ceph REJECT rules really
+	// landed on the victim's chain. The rules are inserted once and never removed inside the spec,
+	// so a listing that does not show them is retried rather than believed: an exec that came back
+	// short is not the same as a chain that has no rules.
+	BlockCephRuleConfirmTimeout = 2 * time.Minute
+
+	// BlockProbeSampleTimeout bounds one run of a container probe the test executes itself. It is
+	// a hang guard, not kubelet's own probe deadline: an exec round trip through the API server
+	// carries latency kubelet does not pay, so a run that overruns is reported as a broken sample
+	// rather than counted as a probe failure.
+	BlockProbeSampleTimeout = 30 * time.Second
+
+	// LivenessProbeFailedEventSubstr is the substring kubelet puts in the Unhealthy event it emits
+	// for a failed liveness probe.
+	LivenessProbeFailedEventSubstr = "Liveness probe failed"
+
+	// LivenessRestartEventSubstr is the substring kubelet puts in the Killing event it emits when
+	// it restarts a container over its liveness probe. The container name is spliced in by the
+	// caller, since kubelet names the container in that message.
+	LivenessRestartEventSubstr = "failed liveness probe, will be restarted"
+
+	// WatchdogHolderMarker is what the watchdog-holder probe prints for each host process holding
+	// a watchdog device open.
+	WatchdogHolderMarker = "held by"
+
+	// WatchdogHolderProbeDoneMarker is what the watchdog-holder probe prints after it has scanned
+	// every process. It separates "nothing holds the watchdog" from "the probe never ran".
+	WatchdogHolderProbeDoneMarker = "watchdog-holder-scan-complete"
+
+	// BlockModeHostDevMountPath is where the agent container sees the host watchdog's parent
+	// directory in Block mode. A bind mount at /dev would make the OCI runtime skip creating the
+	// CSI-mapped block device node, so the host /dev is never mounted at /dev in Block mode.
+	BlockModeHostDevMountPath = "/host-dev"
+
+	// DefaultWatchdogPath is the watchdog device an SBRC uses when watchdogPath is unset. In Block
+	// mode the agent is pointed at BlockModeHostDevMountPath + its basename instead.
+	DefaultWatchdogPath = "/dev/watchdog"
+
+	// SharedStorageVolumeName is the name of the DaemonSet volume backed by the shared-storage PVC.
+	// In Block mode it is attached through volumeDevices; in Filesystem mode through volumeMounts.
+	SharedStorageVolumeName = "shared-storage"
+
+	// AgentSBRDeviceFlag is the agent flag carrying the shared device path.
+	AgentSBRDeviceFlag = "--sbr-device"
+
+	// AgentFileLockingFlag is the agent flag toggling flock-based node map locking. Block mode
+	// always passes false: a raw device bypasses the cluster lock manager, so flock would degrade
+	// to host-local semantics.
+	AgentFileLockingFlag = "--sbr-file-locking"
+
+	// AgentWatchdogPathFlag is the agent flag carrying the in-container watchdog device path.
+	AgentWatchdogPathFlag = "--watchdog-path"
+
+	// SBRCKind is the kind of the StorageBasedRemediationConfig CR, as it appears on the Event
+	// objects the controller emits about it.
+	SBRCKind = "StorageBasedRemediationConfig"
+
+	// SBRCResourcePlural is the API resource name for StorageBasedRemediationConfig, used to find
+	// the validating admission webhook that covers it.
+	SBRCResourcePlural = "storagebasedremediationconfigs"
+
+	// SBRCValidationErrorReason is the Warning event the controller emits when an admitted SBRC
+	// fails spec validation at reconcile time. It does not requeue: the user must fix the config.
+	SBRCValidationErrorReason = "ValidationError"
+
+	// SBRCPVCGCTimeout is how long to wait for an SBRC's shared-storage PVC to be garbage-collected
+	// after the SBRC is deleted. The operator patches the PV reclaim policy to Delete before
+	// dropping its finalizer, so the PVC goes with the SBRC.
+	SBRCPVCGCTimeout = 5 * time.Minute
+
+	// SBRCleanupJobComponentLabelKey is the component label key the operator stamps on the
+	// resources it creates for an SBRC.
+	SBRCleanupJobComponentLabelKey = "app.kubernetes.io/component"
+
+	// SBRCleanupJobComponentLabelValue is the component label value identifying the node map
+	// cleanup Job (RHWA-1056) the operator runs while deleting a Filesystem-mode SBRC. The Job uses
+	// a GenerateName, so its name carries a random suffix and the labels are what to select on.
+	SBRCleanupJobComponentLabelValue = "sbr-cleanup"
+
+	// SBRCConfigLabelKey is the label the operator stamps on the resources it creates for an SBRC,
+	// carrying the SBRC's own name.
+	SBRCConfigLabelKey = "sbrconfig"
+
+	// CleanupJobWatchInterval is how often the operator namespace is polled for a node map cleanup
+	// Job while an SBRC is being deleted. Tighter than the suite's usual poll interval: the Job is
+	// created and finishes inside the finalizer drain, so a slow poll could step over it.
+	CleanupJobWatchInterval = 1 * time.Second
+
+	// SBRCCleanupJobCheckDuration is how long the operator namespace is watched after a Block-mode
+	// SBRC is deleted to prove no node map cleanup Job was created. Block mode has no
+	// filesystem-level node map file to wipe, so the operator skips that Job entirely.
+	SBRCCleanupJobCheckDuration = 60 * time.Second
+
+	// SBRCCleanupJobCheckInterval is the poll interval for the cleanup-Job absence check.
+	SBRCCleanupJobCheckInterval = 5 * time.Second
+
 	// BlockInspectionMaxSkew bounds how old the newest heartbeat on the device may look from the
 	// machine running the test. It is deliberately loose: its job is to catch a device nobody is
 	// writing to any more, not to measure cadence, which BlockHeartbeatSlotMaxAge does on
@@ -683,6 +892,13 @@ var SBRStorageClass = os.Getenv("SBR_STORAGE_CLASS")
 // Set SBR_RBD_STORAGE_CLASS env var to override auto-discovery.
 // When empty, tests auto-discover a Ceph RBD StorageClass (provisioner containing "rbd.csi.ceph.com").
 var SBRRBDStorageClass = os.Getenv("SBR_RBD_STORAGE_CLASS")
+
+// SBRRunLivenessChurn gates the Ceph RBD liveness-probe-under-process-churn test (RHWA-1963).
+// The product defect it covers, RHWA-1955, is the agent's probes finding the agent by scanning
+// every process on the host, so a process exiting mid-scan makes the probe fail on a busy node.
+// The test fails by design on a build without the fix, so it only runs when it is asked for.
+// Set SBR_RUN_LIVENESS_CHURN to any non-empty value to run it; unset, the specs Skip.
+var SBRRunLivenessChurn = os.Getenv("SBR_RUN_LIVENESS_CHURN")
 
 // WatchdogDebugImage is the container image for /dev/watchdog* discovery and keepalive pods.
 // Must provide sh and ls. Set SBR_WATCHDOG_DEBUG_IMAGE to override (e.g. in disconnected clusters).

@@ -8,17 +8,22 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 
+	"github.com/medik8s/system-tests/tests/internal/helpers"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/remotecommand"
+	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // getWorkerNodeCount returns the number of worker nodes in the cluster.
@@ -853,4 +859,550 @@ func slotRegionIsZero(data []byte, slotIdx int) bool {
 	}
 
 	return true
+}
+
+// errSharedStoragePVCNotFound is returned by sbrcSharedStoragePVC when the SBRC owns no PVC. It is
+// a sentinel rather than a plain error so waitForSBRCPVCGone can treat "absent" as success without
+// also swallowing a list failure, which would report a leaked PVC as cleaned up.
+var errSharedStoragePVCNotFound = errors.New("no shared-storage PVC owned by the StorageBasedRemediationConfig")
+
+// sbrcSharedStoragePVC returns the shared-storage PVC the operator provisioned for the SBRC with
+// the given UID, or errSharedStoragePVCNotFound when there is none. The PVC is located by owner
+// reference rather than by name, so the test never has to mirror the operator's naming scheme and a
+// stale PVC left by an earlier run under the same SBRC name is not mistaken for this one.
+func sbrcSharedStoragePVC(ownerUID types.UID) (*corev1.PersistentVolumeClaim, error) {
+	pvcList, listErr := APIClient.PersistentVolumeClaims(medik8sparams.OperatorNs).List(
+		context.TODO(), metav1.ListOptions{})
+	if listErr != nil {
+		return nil, fmt.Errorf("list PVCs in %s: %w", medik8sparams.OperatorNs, listErr)
+	}
+
+	for idx := range pvcList.Items {
+		if ownedBy(pvcList.Items[idx].OwnerReferences, ownerUID) {
+			return &pvcList.Items[idx], nil
+		}
+	}
+
+	return nil, errSharedStoragePVCNotFound
+}
+
+// waitForSBRCPVCBound blocks until the SBRC's shared-storage PVC exists and returns it. The PVC is
+// created on the first reconcile, so a test that inspects it right after creating the SBRC can
+// otherwise race the controller.
+func waitForSBRCPVCBound(sbrcName string, ownerUID types.UID) *corev1.PersistentVolumeClaim {
+	var pvc *corev1.PersistentVolumeClaim
+
+	Eventually(func() error {
+		found, findErr := sbrcSharedStoragePVC(ownerUID)
+		if findErr != nil {
+			return fmt.Errorf("SBRC %s: %w", sbrcName, findErr)
+		}
+
+		pvc = found
+
+		return nil
+	}, sbrparams.SBRCReadyTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+		"Shared-storage PVC for SBRC %q must be created by the operator", sbrcName)
+
+	return pvc
+}
+
+// waitForSBRCPVCGone blocks until the SBRC's shared-storage PVC has been garbage-collected. The
+// operator patches the backing PV's reclaim policy to Delete before dropping its finalizer, so a
+// PVC that outlives its SBRC means the teardown path did not complete.
+func waitForSBRCPVCGone(sbrcName string, ownerUID types.UID) {
+	Eventually(func() error {
+		pvc, findErr := sbrcSharedStoragePVC(ownerUID)
+		if errors.Is(findErr, errSharedStoragePVCNotFound) {
+			return nil
+		}
+
+		if findErr != nil {
+			return findErr
+		}
+
+		return fmt.Errorf("PVC %s owned by SBRC %s still present (phase %s)",
+			pvc.Name, sbrcName, pvc.Status.Phase)
+	}, sbrparams.SBRCPVCGCTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+		"Shared-storage PVC of SBRC %q must be garbage-collected after the SBRC is deleted", sbrcName)
+}
+
+// sbrcOwnedJob returns the device-init Job in the operator namespace owned by the given SBRC, or an
+// error when there is none. Matching on the owner keeps a same-named Job left by a previous run out
+// of the result. It is the only Job an SBRC owns while it is alive, so the first match is it.
+func sbrcOwnedJob(ownerUID types.UID) (*batchv1.Job, error) {
+	jobList, listErr := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(
+		context.TODO(), metav1.ListOptions{})
+	if listErr != nil {
+		return nil, fmt.Errorf("list Jobs in %s: %w", medik8sparams.OperatorNs, listErr)
+	}
+
+	for idx := range jobList.Items {
+		if ownedBy(jobList.Items[idx].OwnerReferences, ownerUID) {
+			return &jobList.Items[idx], nil
+		}
+	}
+
+	return nil, fmt.Errorf("no Job owned by UID %s in %s", ownerUID, medik8sparams.OperatorNs)
+}
+
+// blockInitJobCompletionTime returns when the SBRC's Block device-init Job finished. It prefers the
+// Job's CompletionTime and falls back to the Complete condition's transition time, because a Job
+// that the API server has marked Complete may not carry CompletionTime yet.
+//
+// Only call this once waitForBlockInitJobSucceeded has returned: the Job is TTL-collected after it
+// finishes, so the timestamp has to be read while it is still there.
+func blockInitJobCompletionTime(sbrcName string, ownerUID types.UID) (time.Time, error) {
+	job, findErr := sbrcOwnedJob(ownerUID)
+	if findErr != nil {
+		return time.Time{}, fmt.Errorf("block init Job for SBRC %s: %w", sbrcName, findErr)
+	}
+
+	if job.Status.CompletionTime != nil {
+		return job.Status.CompletionTime.Time, nil
+	}
+
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
+			return cond.LastTransitionTime.Time, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("block init Job %s carries no completion timestamp", job.Name)
+}
+
+// sbrcNodeMapCleanupJobs returns the node map cleanup Jobs (RHWA-1056) the operator ran for the
+// named SBRC. Block mode keeps its node map inside the device, not in a filesystem file, so the
+// operator skips that Job and this must stay empty.
+//
+// The Jobs are selected by the labels the operator stamps on them rather than by name: the Job uses
+// a GenerateName, so its name carries a random suffix. They are not selected by owner reference
+// either - the Job is created while the SBRC is being deleted, so by the time a test could look the
+// owner is already gone.
+func sbrcNodeMapCleanupJobs(sbrcName string) ([]batchv1.Job, error) {
+	selector := fmt.Sprintf("%s=%s,%s=%s",
+		sbrparams.SBRCleanupJobComponentLabelKey, sbrparams.SBRCleanupJobComponentLabelValue,
+		sbrparams.SBRCConfigLabelKey, sbrcName)
+	jobList, listErr := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(
+		context.TODO(), metav1.ListOptions{LabelSelector: selector})
+	if listErr != nil {
+		return nil, fmt.Errorf("list Jobs matching %q in %s: %w",
+			selector, medik8sparams.OperatorNs, listErr)
+	}
+
+	return jobList.Items, nil
+}
+
+// deleteSBRCAssertingNoCleanupJob deletes an SBRC and watches for a node map cleanup Job from the
+// moment the delete is issued until the SBRC is gone, then reports any Job it saw.
+//
+// The watch has to start with the delete, not after it: the operator creates that Job during the
+// finalizer drain and it is TTL-collected afterwards, so a check that only runs once the SBRC has
+// disappeared can step straight over one that ran. The poll is deliberately tighter than the
+// suite's usual interval for the same reason.
+func deleteSBRCAssertingNoCleanupJob(sbrc *unstructured.Unstructured, sbrcName string) {
+	if deleteErr := APIClient.Delete(context.TODO(), sbrc); deleteErr != nil &&
+		!k8serrors.IsNotFound(deleteErr) {
+		GinkgoWriter.Printf("Warning: delete SBRC %s: %v\n", sbrcName, deleteErr)
+	}
+
+	var (
+		seenCleanupJob string
+		cleanReads     int
+		lastListErr    error
+	)
+
+	Eventually(func() error {
+		cleanupJobs, listErr := sbrcNodeMapCleanupJobs(sbrcName)
+
+		switch {
+		case listErr != nil:
+			// Never let a failed look count as "no Job seen": that is the whole assertion.
+			lastListErr = listErr
+		case len(cleanupJobs) > 0:
+			if seenCleanupJob == "" {
+				seenCleanupJob = cleanupJobs[0].Name
+			}
+
+			cleanReads++
+		default:
+			cleanReads++
+		}
+
+		getErr := APIClient.Get(context.TODO(),
+			types.NamespacedName{Name: sbrcName, Namespace: medik8sparams.OperatorNs},
+			sbrc.DeepCopy())
+
+		if k8serrors.IsNotFound(getErr) {
+			return nil
+		}
+
+		if getErr != nil {
+			return getErr
+		}
+
+		return fmt.Errorf("SBRC %s still present", sbrcName)
+	}, medik8sparams.DefaultTimeout, sbrparams.CleanupJobWatchInterval).Should(Succeed(),
+		"SBRC %q must be gone", sbrcName)
+
+	Expect(seenCleanupJob).To(BeEmpty(),
+		"Node map cleanup Job %q was created while deleting Block-mode SBRC %q: Block mode has no "+
+			"filesystem-level node map file to wipe, so that Job must never run",
+		seenCleanupJob, sbrcName)
+
+	// A window the Jobs could never be listed in proves nothing about what ran in it.
+	Expect(cleanReads).To(BeNumerically(">", 0),
+		"The Jobs in %s could not be listed even once while SBRC %q was being deleted, so the "+
+			"absence of a node map cleanup Job was never established: %v",
+		medik8sparams.OperatorNs, sbrcName, lastListErr)
+}
+
+// sbrcAgentDaemonSet returns the agent DaemonSet the operator created for the named SBRC.
+func sbrcAgentDaemonSet(sbrcName string) (*appsv1.DaemonSet, error) {
+	dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrcName
+	agentDS, getErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
+		context.TODO(), dsName, metav1.GetOptions{})
+	if getErr != nil {
+		return nil, fmt.Errorf("get DaemonSet %s: %w", dsName, getErr)
+	}
+
+	return agentDS, nil
+}
+
+// agentContainerOf returns the sbr-agent container of an agent DaemonSet's pod template.
+func agentContainerOf(agentDS *appsv1.DaemonSet) (*corev1.Container, error) {
+	for idx := range agentDS.Spec.Template.Spec.Containers {
+		if agentDS.Spec.Template.Spec.Containers[idx].Name == sbrparams.AgentContainerName {
+			return &agentDS.Spec.Template.Spec.Containers[idx], nil
+		}
+	}
+
+	return nil, fmt.Errorf("DaemonSet %s has no %q container",
+		agentDS.Name, sbrparams.AgentContainerName)
+}
+
+// podVolumeByName returns the named volume of a DaemonSet's pod template.
+func podVolumeByName(agentDS *appsv1.DaemonSet, volumeName string) (*corev1.Volume, error) {
+	for idx := range agentDS.Spec.Template.Spec.Volumes {
+		if agentDS.Spec.Template.Spec.Volumes[idx].Name == volumeName {
+			return &agentDS.Spec.Template.Spec.Volumes[idx], nil
+		}
+	}
+
+	return nil, fmt.Errorf("DaemonSet %s has no volume named %q", agentDS.Name, volumeName)
+}
+
+// containerArgValue returns the value of the first --flag=value argument carrying flagName, and
+// reports whether it was present at all, so a caller can tell "flag absent" from "flag empty".
+func containerArgValue(container *corev1.Container, flagName string) (string, bool) {
+	prefix := flagName + "="
+	for _, arg := range container.Args {
+		if strings.HasPrefix(arg, prefix) {
+			return strings.TrimPrefix(arg, prefix), true
+		}
+	}
+
+	return "", false
+}
+
+// assertBlockModeSharedStorageAttached proves the agent DaemonSet attaches the shared storage as a
+// raw device: a volumeDevice at sbrBlockDevicePath backed by the shared-storage PVC, and no
+// volumeMount for the same volume. Mounting it as a filesystem instead would mean the agent is not
+// in Block mode at all.
+func assertBlockModeSharedStorageAttached(agentDS *appsv1.DaemonSet, pvcName string) {
+	agentContainer, containerErr := agentContainerOf(agentDS)
+	Expect(containerErr).ToNot(HaveOccurred())
+	Expect(agentContainer.VolumeDevices).To(ContainElement(corev1.VolumeDevice{
+		Name:       sbrparams.SharedStorageVolumeName,
+		DevicePath: sbrBlockDevicePath,
+	}), "Block-mode agent container of DaemonSet %s must attach the shared storage as a raw device "+
+		"at %s; volumeDevices were %+v", agentDS.Name, sbrBlockDevicePath, agentContainer.VolumeDevices)
+
+	for _, mount := range agentContainer.VolumeMounts {
+		Expect(mount.Name).ToNot(Equal(sbrparams.SharedStorageVolumeName),
+			"Block-mode agent container of DaemonSet %s must not mount the shared storage as a "+
+				"filesystem, but volume %q is mounted at %s",
+			agentDS.Name, mount.Name, mount.MountPath)
+	}
+
+	sharedVolume, volumeErr := podVolumeByName(agentDS, sbrparams.SharedStorageVolumeName)
+	Expect(volumeErr).ToNot(HaveOccurred())
+	Expect(sharedVolume.PersistentVolumeClaim).ToNot(BeNil(),
+		"Volume %q of DaemonSet %s must be backed by a PVC",
+		sbrparams.SharedStorageVolumeName, agentDS.Name)
+	Expect(sharedVolume.PersistentVolumeClaim.ClaimName).To(Equal(pvcName),
+		"Volume %q of DaemonSet %s must be backed by the SBRC's own shared-storage PVC",
+		sbrparams.SharedStorageVolumeName, agentDS.Name)
+}
+
+// assertBlockModeAgentArgs proves the agent is told to run against the raw device with file locking
+// off. A raw device bypasses the cluster lock manager, so flock would degrade to host-local
+// semantics and the node map would lose its mutual exclusion.
+func assertBlockModeAgentArgs(agentDS *appsv1.DaemonSet) {
+	agentContainer, containerErr := agentContainerOf(agentDS)
+	Expect(containerErr).ToNot(HaveOccurred())
+	devicePath, devicePresent := containerArgValue(agentContainer, sbrparams.AgentSBRDeviceFlag)
+	Expect(devicePresent).To(BeTrue(),
+		"Block-mode agent args of DaemonSet %s must carry %s; args were %v",
+		agentDS.Name, sbrparams.AgentSBRDeviceFlag, agentContainer.Args)
+	Expect(devicePath).To(Equal(sbrBlockDevicePath),
+		"Block-mode agent of DaemonSet %s must be pointed at the raw device", agentDS.Name)
+	locking, lockingPresent := containerArgValue(agentContainer, sbrparams.AgentFileLockingFlag)
+	Expect(lockingPresent).To(BeTrue(),
+		"Block-mode agent args of DaemonSet %s must carry %s; args were %v",
+		agentDS.Name, sbrparams.AgentFileLockingFlag, agentContainer.Args)
+	Expect(locking).To(Equal("false"),
+		"Block-mode agent of DaemonSet %s must run with file locking disabled", agentDS.Name)
+}
+
+// assertBlockModeWatchdogMount proves the watchdog was moved out of /dev. A bind mount at /dev makes
+// the OCI runtime skip creating the CSI-mapped block device node, so Block mode mounts only the
+// watchdog's parent directory at BlockModeHostDevMountPath and points the agent under it.
+func assertBlockModeWatchdogMount(agentDS *appsv1.DaemonSet, hostWatchdogPath string) {
+	agentContainer, containerErr := agentContainerOf(agentDS)
+	Expect(containerErr).ToNot(HaveOccurred())
+	hostDevVolume, volumeErr := podVolumeByName(agentDS, "host-dev")
+	Expect(volumeErr).ToNot(HaveOccurred(),
+		"Block-mode DaemonSet %s must carry a host-dev volume for the watchdog's parent directory",
+		agentDS.Name)
+	Expect(hostDevVolume.HostPath).ToNot(BeNil(),
+		"Volume host-dev of DaemonSet %s must be a hostPath volume", agentDS.Name)
+	Expect(hostDevVolume.HostPath.Path).To(Equal(filepath.Dir(hostWatchdogPath)),
+		"Volume host-dev of DaemonSet %s must expose the watchdog's parent directory", agentDS.Name)
+
+	var hostDevMountPath string
+
+	for _, mount := range agentContainer.VolumeMounts {
+		Expect(mount.MountPath).ToNot(Equal("/dev"),
+			"Block-mode agent container of DaemonSet %s must not mount anything at /dev: a bind "+
+				"mount there makes the runtime skip the CSI block device node (volume %q)",
+			agentDS.Name, mount.Name)
+
+		if mount.Name == "host-dev" {
+			hostDevMountPath = mount.MountPath
+		}
+	}
+
+	Expect(hostDevMountPath).To(Equal(sbrparams.BlockModeHostDevMountPath),
+		"Block-mode agent container of DaemonSet %s must mount host-dev at %s",
+		agentDS.Name, sbrparams.BlockModeHostDevMountPath)
+	watchdogArg, watchdogPresent := containerArgValue(agentContainer, sbrparams.AgentWatchdogPathFlag)
+	Expect(watchdogPresent).To(BeTrue(),
+		"Agent args of DaemonSet %s must carry %s; args were %v",
+		agentDS.Name, sbrparams.AgentWatchdogPathFlag, agentContainer.Args)
+	Expect(watchdogArg).To(Equal(
+		filepath.Join(sbrparams.BlockModeHostDevMountPath, filepath.Base(hostWatchdogPath))),
+		"Block-mode agent of DaemonSet %s must resolve the watchdog under %s, not on the host path",
+		agentDS.Name, sbrparams.BlockModeHostDevMountPath)
+}
+
+// patchSBRCSpec merge-patches spec fields onto an existing SBRC and returns the API error, so a
+// caller can assert either that the patch lands or that admission rejects it.
+func patchSBRCSpec(sbrcName string, specFields map[string]interface{}) error {
+	payload, marshalErr := json.Marshal(map[string]interface{}{"spec": specFields})
+	if marshalErr != nil {
+		return fmt.Errorf("marshal patch for SBRC %s: %w", sbrcName, marshalErr)
+	}
+
+	return APIClient.Patch(context.TODO(),
+		buildSBRC(sbrcName, map[string]interface{}{}),
+		runtimeclient.RawPatch(types.MergePatchType, payload))
+}
+
+// waitForDaemonSetRollout blocks until the named DaemonSet has moved past prePatchGeneration, has
+// reconciled that generation, and has every pod replaced with the new revision, Ready and
+// available. Used after an SBRC spec change to prove the operator pushed it down to all of the
+// agents rather than leaving some of them on the old configuration.
+//
+// The Filesystem lifecycle test (sbrc_lifecycle.go) still has this inline; it could call this.
+func waitForDaemonSetRollout(dsName string, prePatchGeneration int64) {
+	Eventually(func() error {
+		agentDS, getErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
+			context.TODO(), dsName, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("DaemonSet %s not found: %w", dsName, getErr)
+		}
+
+		if agentDS.Generation <= prePatchGeneration {
+			return fmt.Errorf("DaemonSet %s generation not advanced (current: %d, pre-patch: %d)",
+				dsName, agentDS.Generation, prePatchGeneration)
+		}
+
+		if agentDS.Status.ObservedGeneration < agentDS.Generation {
+			return fmt.Errorf("DaemonSet %s not yet reconciled (observed: %d, current: %d)",
+				dsName, agentDS.Status.ObservedGeneration, agentDS.Generation)
+		}
+
+		desired := agentDS.Status.DesiredNumberScheduled
+		if desired == 0 {
+			return fmt.Errorf("DaemonSet %s schedules no pods at all", dsName)
+		}
+
+		// Every agent has to be carrying the new spec, not just the first one to restart: a
+		// half-rolled DaemonSet leaves some agents running the old configuration.
+		if agentDS.Status.UpdatedNumberScheduled < desired {
+			return fmt.Errorf("DaemonSet %s rollout incomplete: %d/%d pods on the new revision",
+				dsName, agentDS.Status.UpdatedNumberScheduled, desired)
+		}
+
+		if agentDS.Status.NumberReady < desired {
+			return fmt.Errorf("DaemonSet %s: %d/%d pods ready after rollout",
+				dsName, agentDS.Status.NumberReady, desired)
+		}
+
+		if agentDS.Status.NumberUnavailable > 0 {
+			return fmt.Errorf("DaemonSet %s still has %d unavailable pod(s)",
+				dsName, agentDS.Status.NumberUnavailable)
+		}
+
+		return nil
+	}, 3*sbrparams.SBRCLifecyclePatchedTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+		"DaemonSet %s must complete its rollout after the SBRC is patched", dsName)
+}
+
+// sbrcAdmissionWebhookRegistered reports whether the cluster has a validating admission webhook
+// covering StorageBasedRemediationConfig objects.
+//
+// Some of the SBRC spec rules are enforced in two places and some in only one. Where the controller
+// re-checks a rule at reconcile time, a test can assert the outcome either way. Immutability of
+// sharedStorageVolumeMode is webhook-only, so a test asserting that an update is refused has to
+// know whether anything is there to refuse it.
+func sbrcAdmissionWebhookRegistered() bool {
+	configs, listErr := APIClient.K8sClient.AdmissionregistrationV1().
+		ValidatingWebhookConfigurations().List(context.TODO(), metav1.ListOptions{})
+	if listErr != nil {
+		GinkgoWriter.Printf("Warning: cannot list ValidatingWebhookConfigurations: %v\n", listErr)
+
+		return false
+	}
+
+	for cfgIdx := range configs.Items {
+		for _, hook := range configs.Items[cfgIdx].Webhooks {
+			for _, rule := range hook.Rules {
+				if slices.Contains(rule.APIGroups, sbrparams.CRDGroup) &&
+					slices.Contains(rule.Resources, sbrparams.SBRCResourcePlural) {
+					GinkgoWriter.Printf("StorageBasedRemediationConfig admission webhook %q is registered\n",
+						hook.Name)
+
+					return true
+				}
+			}
+		}
+	}
+
+	GinkgoWriter.Printf("No validating admission webhook covers %s.%s on this cluster\n",
+		sbrparams.SBRCResourcePlural, sbrparams.CRDGroup)
+
+	return false
+}
+
+// assertInvalidSBRCNeverBecomesOperational proves an SBRC whose spec is invalid never produces
+// agents, through whichever layer is actually enforcing the rule on this cluster.
+//
+// A spec rule that both the admission webhook and the controller enforce has two correct outcomes,
+// and which one applies is decided by whether the webhook is registered, not by what the create
+// call happens to return:
+//
+//   - webhook registered: the create must be refused, and refused over wantDenialSubstr. An
+//     AlreadyExists from an SBRC a crashed run left behind, or a timeout, is not a rejection and
+//     must not be mistaken for one - nothing was validated in those cases.
+//   - webhook not registered: the create must succeed, because there is nothing to refuse it. The
+//     controller then refuses it at reconcile, emitting a ValidationError Warning and never
+//     building a DaemonSet.
+//
+// The caller owns deleting the CR: it exists afterwards in the second case.
+func assertInvalidSBRCNeverBecomesOperational(
+	sbrc *unstructured.Unstructured, sbrcName, wantDenialSubstr string,
+) {
+	createErr := APIClient.Create(context.TODO(), sbrc)
+
+	if sbrcAdmissionWebhookRegistered() {
+		expectAdmissionDenial(createErr, wantDenialSubstr,
+			fmt.Sprintf("The validating admission webhook is registered, so SBRC %q must be refused "+
+				"at creation", sbrcName))
+		GinkgoWriter.Printf("SBRC %q was refused at admission: %v\n", sbrcName, createErr)
+
+		return
+	}
+
+	Expect(createErr).ToNot(HaveOccurred(),
+		"No validating admission webhook covers %s on this cluster, so SBRC %q must be admitted and "+
+			"refused by the controller instead", sbrparams.SBRCResourcePlural, sbrcName)
+	GinkgoWriter.Printf("SBRC %q was admitted (no validating webhook); asserting the controller "+
+		"refuses it at reconcile instead\n", sbrcName)
+
+	By(fmt.Sprintf("Waiting for a %s event on the admitted SBRC %q",
+		sbrparams.SBRCValidationErrorReason, sbrcName))
+
+	eventErr := helpers.WaitForEvents(context.TODO(), EventsClient,
+		helpers.InvolvedObjectRef{
+			Kind:      sbrparams.SBRCKind,
+			Name:      sbrcName,
+			Namespace: medik8sparams.OperatorNs,
+			UID:       string(sbrc.GetUID()),
+		},
+		[]helpers.EventExpectation{{
+			Reason: sbrparams.SBRCValidationErrorReason,
+			Type:   corev1.EventTypeWarning,
+		}},
+		medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval)
+	Expect(eventErr).ToNot(HaveOccurred(),
+		"The controller must emit a %s Warning for the invalid SBRC %q it was handed",
+		sbrparams.SBRCValidationErrorReason, sbrcName)
+
+	By(fmt.Sprintf("Asserting no agent DaemonSet is ever created for the invalid SBRC %q", sbrcName))
+
+	dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrcName
+
+	Consistently(func() error {
+		_, getErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
+			context.TODO(), dsName, metav1.GetOptions{})
+		if k8serrors.IsNotFound(getErr) {
+			return nil
+		}
+
+		if getErr != nil {
+			return getErr
+		}
+
+		return fmt.Errorf("DaemonSet %s was created for the invalid SBRC %s", dsName, sbrcName)
+	}, sbrparams.NoNewDaemonSetCheckDuration, sbrparams.NoNewDaemonSetCheckInterval).Should(Succeed(),
+		"An SBRC that fails spec validation must never get agents")
+}
+
+// expectAdmissionDenial asserts that err is a validating admission webhook turning a request down
+// over wantFieldSubstr, and not some other way for an API call to fail.
+//
+// A bare "an error happened" check is not enough for a negative admission assertion: a timeout, a
+// missing RBAC permission or an AlreadyExists from a crashed earlier run would all satisfy it while
+// proving nothing about the rule under test. A denial arrives as Forbidden or Invalid and carries
+// the webhook's own message, so both are checked.
+func expectAdmissionDenial(err error, wantFieldSubstr, description string) {
+	Expect(err).To(HaveOccurred(), "%s", description)
+	Expect(k8serrors.IsForbidden(err) || k8serrors.IsInvalid(err)).To(BeTrue(),
+		"%s: expected an admission denial (Forbidden or Invalid) but the API call failed another "+
+			"way, so nothing was validated: %v", description, err)
+	Expect(err.Error()).To(ContainSubstring(wantFieldSubstr),
+		"%s: the request was turned down, but not over %q, so the denial is not the one under "+
+			"test: %v", description, wantFieldSubstr, err)
+}
+
+// sbrcVolumeMode reads sharedStorageVolumeMode straight off the live SBRC. An unset field comes
+// back empty rather than resolved to its default, so a caller asserting the stored value sees what
+// is actually on the object.
+func sbrcVolumeMode(sbrcName string) (string, error) {
+	sbrc := buildSBRC(sbrcName, map[string]interface{}{})
+	if getErr := APIClient.Get(context.TODO(),
+		types.NamespacedName{Name: sbrcName, Namespace: medik8sparams.OperatorNs}, sbrc); getErr != nil {
+		return "", fmt.Errorf("get SBRC %s: %w", sbrcName, getErr)
+	}
+
+	mode, _, nestedErr := unstructured.NestedString(sbrc.Object,
+		"spec", sbrparams.SBRCBlockVolumeModeField)
+	if nestedErr != nil {
+		return "", fmt.Errorf("read %s of SBRC %s: %w",
+			sbrparams.SBRCBlockVolumeModeField, sbrcName, nestedErr)
+	}
+
+	return mode, nil
 }

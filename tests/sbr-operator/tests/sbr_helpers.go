@@ -445,14 +445,9 @@ func nhcsUsingSBRTemplate(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
-// ensureSBRTemplate creates the StorageBasedRemediationTemplate referenced by every SBR
-// NodeHealthCheck when it does not already exist. The SBR operator does not create it (the
-// sample only lives in the CSV alm-examples), and without it NHC disables itself with
-// RemediationTemplateNotFound and never creates StorageBasedRemediation CRs. A template
-// created here is deleted by DeferCleanup at the end of the calling node; a pre-existing
-// template is left untouched.
-func ensureSBRTemplate() {
-	template := &unstructured.Unstructured{
+// sbrTemplateObject returns the StorageBasedRemediationTemplate every SBR NodeHealthCheck points at.
+func sbrTemplateObject() *unstructured.Unstructured {
+	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": sbrparams.CRDGroup + "/" + sbrparams.CRDVersion,
 			"kind":       sbrparams.SBRTemplateKind,
@@ -467,22 +462,50 @@ func ensureSBRTemplate() {
 			},
 		},
 	}
-	err := APIClient.Create(context.TODO(), template)
+}
+
+// createSBRTemplateIfMissing creates the StorageBasedRemediationTemplate referenced by every SBR
+// NodeHealthCheck when it does not already exist, and reports whether this call created it. The SBR
+// operator does not create it (the sample only lives in the CSV alm-examples), and without it NHC
+// disables itself with RemediationTemplateNotFound and never creates StorageBasedRemediation CRs.
+//
+// Unlike ensureSBRTemplate it registers no cleanup: the caller owns deletion. That matters whenever
+// the template has to outlive something else in teardown — an NHC that still references it, or a
+// remediation CR that is still draining — because a DeferCleanup fires in registration order, not
+// in the order teardown actually needs.
+func createSBRTemplateIfMissing() bool {
+	err := APIClient.Create(context.TODO(), sbrTemplateObject())
 	if k8serrors.IsAlreadyExists(err) {
-		return
+		return false
 	}
 
 	Expect(err).ToNot(HaveOccurred(),
-		"StorageBasedRemediationTemplate %q must be created in %s", sbrparams.SBRTemplateName, medik8sparams.OperatorNs)
+		"StorageBasedRemediationTemplate %q must be created in %s",
+		sbrparams.SBRTemplateName, medik8sparams.OperatorNs)
 	GinkgoWriter.Printf("Created StorageBasedRemediationTemplate %s/%s\n",
 		medik8sparams.OperatorNs, sbrparams.SBRTemplateName)
 
-	DeferCleanup(func() {
-		if delErr := APIClient.Delete(context.TODO(), template); delErr != nil && !k8serrors.IsNotFound(delErr) {
-			GinkgoWriter.Printf("Warning: cleanup StorageBasedRemediationTemplate %s: %v\n",
-				sbrparams.SBRTemplateName, delErr)
-		}
-	})
+	return true
+}
+
+// deleteSBRTemplate removes the StorageBasedRemediationTemplate. Failures are logged rather than
+// asserted so teardown never masks the test result. Safe to call when the template is already gone.
+func deleteSBRTemplate() {
+	if delErr := APIClient.Delete(context.TODO(), sbrTemplateObject()); delErr != nil &&
+		!k8serrors.IsNotFound(delErr) {
+		GinkgoWriter.Printf("Warning: cleanup StorageBasedRemediationTemplate %s: %v\n",
+			sbrparams.SBRTemplateName, delErr)
+	}
+}
+
+// ensureSBRTemplate creates the StorageBasedRemediationTemplate referenced by every SBR
+// NodeHealthCheck when it does not already exist, and deletes it again with DeferCleanup at the end
+// of the calling node. A pre-existing template is left untouched. Callers whose teardown has to
+// order the template against other objects should use createSBRTemplateIfMissing instead.
+func ensureSBRTemplate() {
+	if createSBRTemplateIfMissing() {
+		DeferCleanup(deleteSBRTemplate)
+	}
 }
 
 // buildNHC returns an unstructured NodeHealthCheck CR that triggers SBR-based remediation
@@ -533,6 +556,8 @@ func buildNHC(name string) *unstructured.Unstructured {
 // instead of minHealthy, so a fixed number of nodes may be unhealthy regardless of cluster size
 // (minHealthy: "51%" blocks any remediation on a 2-worker cluster). It delegates to buildNHC and swaps
 // the health field, so the two stay in sync on selector, template and unhealthyConditions.
+//
+//nolint:unparam // maxUnhealthy is kept explicit so each call site states the budget its scenario needs.
 func buildNHCWithMaxUnhealthy(name string, maxUnhealthy int) *unstructured.Unstructured {
 	nhc := buildNHC(name)
 	spec, _ := nhc.Object["spec"].(map[string]interface{})

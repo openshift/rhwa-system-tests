@@ -14,6 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 
+	"github.com/medik8s/system-tests/tests/internal/helpers"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
@@ -22,6 +23,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 // discoverCephRBDStorageClass returns the Ceph RBD block storage class name.
@@ -130,14 +132,28 @@ var cephRBDRejectMatches = []string{
 	"-p tcp --match multiport --dports 6800:7300",
 }
 
-// cephRBDRuleScript returns one iptables command per Ceph port match for the given chain
-// operation, "-I" to insert the REJECT rules or "-D" to remove them. Removals tolerate a missing
-// rule so a flush can run whatever state the node is in.
-func cephRBDRuleScript(operation string) string {
+// cephRBDRejectReplyMatches are the same Ceph ports matched as sources, for the INPUT chain.
+// Rejecting only OUTPUT still lets the replies of an already-established session reach the node, so
+// a test that has to take a node's storage away completely blocks both directions.
+var cephRBDRejectReplyMatches = []string{
+	"-p tcp --sport 3300",
+	"-p tcp --sport 6789",
+	"-p tcp --match multiport --sports 6800:7300",
+}
+
+// cephRBDRejectPortTokens are the port tokens an iptables listing shows for the Ceph REJECT rules
+// above: the two monitor ports as single destinations and the OSD/MDS range as a multiport range.
+// They are what a listing is searched for when a test has to prove the rules really landed.
+var cephRBDRejectPortTokens = []string{"3300", "6789", "6800:7300"}
+
+// cephRBDChainRuleScript returns one iptables command per match on the named chain for the given
+// chain operation, "-I" to insert the REJECT rules or "-D" to remove them. Removals tolerate a
+// missing rule so a flush can run whatever state the node is in.
+func cephRBDChainRuleScript(operation, chain string, matches []string) string {
 	var script strings.Builder
 
-	for _, match := range cephRBDRejectMatches {
-		fmt.Fprintf(&script, "%s %s OUTPUT %s -j REJECT", nsenterIPTables, operation, match)
+	for _, match := range matches {
+		fmt.Fprintf(&script, "%s %s %s %s -j REJECT", nsenterIPTables, operation, chain, match)
 
 		if operation == "-D" {
 			fmt.Fprint(&script, " || true")
@@ -147,6 +163,20 @@ func cephRBDRuleScript(operation string) string {
 	}
 
 	return script.String()
+}
+
+// cephRBDRuleScript returns the outbound-only Ceph REJECT rules for the given chain operation.
+// Blocking OUTPUT is enough to cut a node off from Ceph; the callers that must also keep inbound
+// replies out use cephRBDBidirectionalRuleScript.
+func cephRBDRuleScript(operation string) string {
+	return cephRBDChainRuleScript(operation, "OUTPUT", cephRBDRejectMatches)
+}
+
+// cephRBDBidirectionalRuleScript returns the Ceph REJECT rules on both the OUTPUT and the INPUT
+// chain for the given chain operation, so neither a request nor a reply crosses the node's boundary.
+func cephRBDBidirectionalRuleScript(operation string) string {
+	return cephRBDRuleScript(operation) +
+		cephRBDChainRuleScript(operation, "INPUT", cephRBDRejectReplyMatches)
 }
 
 // cephRBDPartitionScript blocks Ceph traffic on the host for the length of the outage and then
@@ -163,9 +193,10 @@ wait $!
 }
 
 // cephRBDFlushScript removes the Ceph REJECT rules and always exits 0, so teardown reports success
-// on a node that has no rules left to remove.
+// on a node that has no rules left to remove. It deletes both directions so one flusher cleans up
+// after either injection; a rule that was never inserted is tolerated.
 func cephRBDFlushScript() string {
-	return cephRBDRuleScript("-D") + "exit 0\n"
+	return cephRBDBidirectionalRuleScript("-D") + "exit 0\n"
 }
 
 // cephRBDIPTablesProbeScript lists the host OUTPUT chain. It fails on a node where iptables cannot
@@ -253,6 +284,8 @@ func hostCommandPodLog(builder *pod.Builder) string {
 
 // runHostCommandPod runs script to completion on nodeName and returns the pod's final phase and
 // log, removing the pod before returning.
+//
+//nolint:unparam // timeout is kept explicit so each call site states the bound its script needs.
 func runHostCommandPod(nodeName, podName, script string, timeout time.Duration) (corev1.PodPhase, string) {
 	createHostCommandPod(nodeName, podName, script)
 
@@ -603,15 +636,30 @@ func splitBrainBaselineFor(victimBootID string, witnessNodes []string) (splitBra
 	return baseline, nil
 }
 
-// injectCephRBDRules inserts the Ceph port REJECT rules through an already-running injector pod and
-// returns the command output alongside the error so the caller can report it. The block persists (no
-// self-terminating window), so the node stays isolated until a reboot clears the host's iptables
-// rules. The rules are the same RBD REJECT set the transient partition test uses, so
+// injectCephRBDRules inserts the outbound Ceph port REJECT rules through an already-running injector
+// pod and returns the command output alongside the error so the caller can report it. The block
+// persists (no self-terminating window), so the node stays isolated until a reboot clears the host's
+// iptables rules. The rules are the same RBD REJECT set the transient partition test uses, so
 // flushCephRBDRules removes exactly what was inserted.
 func injectCephRBDRules(injectorPod *pod.Builder) (string, error) {
-	injectOut, injectErr := injectorPod.ExecCommand([]string{"sh", "-c", "set -e\n" + cephRBDRuleScript("-I")})
+	return execCephRBDRuleScript(injectorPod, cephRBDRuleScript("-I"))
+}
 
-	return injectOut.String(), injectErr
+// injectCephRBDRulesBidirectional inserts the Ceph port REJECT rules on both the OUTPUT and the
+// INPUT chain, so the node can neither reach Ceph nor receive anything back from it. Callers that
+// need total storage loss use this rather than injectCephRBDRules, whose outbound-only rules leave
+// inbound traffic of an established session flowing.
+func injectCephRBDRulesBidirectional(injectorPod *pod.Builder) (string, error) {
+	return execCephRBDRuleScript(injectorPod, cephRBDBidirectionalRuleScript("-I"))
+}
+
+// execCephRBDRuleScript runs an iptables rule script in the injector pod and returns its output
+// alongside the error. "set -e" makes the first failing iptables call abort the script, so a
+// partially applied rule set surfaces as an error instead of a half-isolated node.
+func execCephRBDRuleScript(injectorPod *pod.Builder, script string) (string, error) {
+	out, execErr := injectorPod.ExecCommand([]string{"sh", "-c", "set -e\n" + script})
+
+	return out.String(), execErr
 }
 
 // splitBrainHeartbeatState looks every involved node's heartbeat slot up in the on-device node map,
@@ -732,6 +780,64 @@ func splitBrainHeartbeatProgress(observerPodName string, state splitBrainState) 
 	return nil
 }
 
+// blockNodeIDOf looks a node's SBR node ID up in the on-device node map, read through an agent pod
+// on another node. The node map is the only place the mapping exists: node IDs are hash-assigned by
+// the agents and never surface on the Kubernetes API, so every slot-geometry lookup starts here.
+func blockNodeIDOf(observerPodName, nodeName string) (uint16, error) {
+	nodeMap, jsonPayload, mapErr := readNodeMapFromPod(observerPodName)
+	if mapErr != nil {
+		return 0, fmt.Errorf("read the node map through observer pod %s (payload: %s): %w",
+			observerPodName, jsonPayload, mapErr)
+	}
+
+	entry, mapped := nodeMap.Entries[nodeName]
+	if !mapped {
+		return 0, fmt.Errorf("the node map holds no entry for node %s", nodeName)
+	}
+
+	return entry.NodeID, nil
+}
+
+// liveFenceMessageFor returns the fence message standing in nodeName's own fence slot, read through
+// an agent pod on another node. It is an error when the slot is empty, when it holds a retracted
+// fence (reason NONE, which is what the agent writes to disarm a stale one), or when the message
+// targets another node — any of those means nobody has asked for this node to be fenced.
+//
+// The slot is located by position: in Block mode node N owns fence slot index N-1, the geometry the
+// agent and the reconciler share. Intended as an Eventually body.
+func liveFenceMessageFor(observerPodName, nodeName string) (FenceSlot, error) {
+	nodeID, idErr := blockNodeIDOf(observerPodName, nodeName)
+	if idErr != nil {
+		return FenceSlot{}, idErr
+	}
+
+	fenceSlots, readErr := readFenceSlotsFromPod(observerPodName)
+	if readErr != nil {
+		return FenceSlot{}, fmt.Errorf("read the fence region through observer pod %s: %w",
+			observerPodName, readErr)
+	}
+
+	slot, written := fenceSlots[int(nodeID)-1]
+	if !written {
+		return FenceSlot{}, fmt.Errorf("fence slot %d (node %s, node ID %d) holds no fence message yet",
+			int(nodeID)-1, nodeName, nodeID)
+	}
+
+	if slot.Reason == fenceReasonNone {
+		return FenceSlot{}, fmt.Errorf(
+			"fence slot %d (node %s, node ID %d) holds a reason-NONE message: nothing is asking for "+
+				"this node to be fenced", slot.SlotIndex, nodeName, nodeID)
+	}
+
+	if slot.TargetNodeID != nodeID {
+		return FenceSlot{}, fmt.Errorf(
+			"fence slot %d (node %s) holds a fence for node ID %d, not %d: the fence was written to "+
+				"the wrong slot", slot.SlotIndex, nodeName, slot.TargetNodeID, nodeID)
+	}
+
+	return slot, nil
+}
+
 // witnessesStillHealthy returns nil while no witness node is flagged SBRStorageUnhealthy=True and
 // none has a StorageBasedRemediation CR. It is checked on every poll of every wait that runs while
 // the victim is isolated, rather than over one window: the condition cycles True -> Unknown -> True
@@ -843,4 +949,389 @@ func witnessesUntouched(witnessNodes []string, baseline splitBrainBaseline) erro
 	}
 
 	return nil
+}
+
+// createBlockModeSBRCAndWaitReady creates a Ceph RBD Block-mode StorageBasedRemediationConfig with
+// additionalSpec merged into its spec, and returns once its agents are Ready. It fails the suite
+// when SNR is running (both operators claim the watchdog) and skips it when the cluster has no Ceph
+// RBD StorageClass. The returned object is the created SBRC, for the caller to delete in AfterAll.
+//
+// Unlike setupBlockModeSBRCWithSpec it waits on the Block device-init Job before the DaemonSet
+// readiness wait, so an init failure surfaces as "init Job failed" instead of an opaque "DaemonSet
+// not ready" timeout.
+func createBlockModeSBRCAndWaitReady(
+	sbrcName string, additionalSpec map[string]interface{},
+) *unstructured.Unstructured {
+	failIfSNRRunning()
+
+	By("Discovering the Ceph RBD block storage class")
+
+	rbdStorageClass := discoverCephRBDStorageClass()
+
+	By(fmt.Sprintf("Pre-cleaning any stale SBRC %q", sbrcName))
+	deleteSBRCAndWait(buildSBRC(sbrcName, map[string]interface{}{}), sbrcName)
+
+	By("Creating the Block-mode StorageBasedRemediationConfig on Ceph RBD")
+
+	sbrc := buildSBRC(sbrcName, buildBlockModeSBRC(rbdStorageClass, additionalSpec))
+	Expect(APIClient.Create(context.TODO(), sbrc)).To(Succeed(),
+		"StorageBasedRemediationConfig %q must be created", sbrcName)
+
+	By("Waiting for the Block device-init Job to succeed")
+	waitForBlockInitJobSucceeded(sbrcName, sbrc.GetUID())
+
+	By("Waiting for the agent DaemonSet to be ready")
+	waitForSBRCReady(sbrcName)
+
+	return sbrc
+}
+
+// setupBlockModeNHCScenario brings up everything a Block-mode fencing test needs: a Ceph RBD
+// StorageBasedRemediationConfig whose agents are Ready and whose shared storage is confirmed
+// concurrent-writeable, and a NodeHealthCheck that remediates SBRStorageUnhealthy nodes through the
+// SBR template. It returns the SBRC so the caller can delete it in AfterAll.
+//
+// A test that drives fencing without an NHC, or that needs a non-default SBRC spec, should call
+// createBlockModeSBRCAndWaitReady directly and add the pieces it wants.
+func setupBlockModeNHCScenario(sbrcName, nhcName string) *unstructured.Unstructured {
+	// Remove this test's own NodeHealthCheck from a crashed prior run first: it references the SBR
+	// template, so requireNoSBRNodeHealthCheck would otherwise see it and skip the test.
+	By("Removing any NodeHealthCheck left by a previous run of this test")
+	deleteNHCAndWait(nhcName)
+
+	By("Verifying no other NodeHealthCheck already remediates through the SBR template")
+	requireNoSBRNodeHealthCheck()
+
+	sbrc := createBlockModeSBRCAndWaitReady(sbrcName, nil)
+
+	By("Asserting the SBRC reports concurrent-writeable shared storage")
+
+	Eventually(func() (bool, error) {
+		return sbrcConcurrentWriteable(sbrcName)
+	}, sbrparams.StorageInjectionTimeout, sbrparams.DefaultPollInterval).Should(BeTrue(),
+		"SBRC %q must report status.storageValidation.concurrentWriteable=true before fencing "+
+			"can proceed", sbrcName)
+
+	By("Creating the NodeHealthCheck CR that remediates SBRStorageUnhealthy nodes through SBR")
+	ensureSBRTemplate()
+
+	// maxUnhealthy: 1 (rather than the shared builder's minHealthy: "51%") so exactly one node may
+	// be unhealthy regardless of cluster size — "51%" can block remediation on a small cluster.
+	nhc := buildNHCWithMaxUnhealthy(nhcName, 1)
+	Expect(APIClient.Create(context.TODO(), nhc)).To(Succeed(),
+		"NodeHealthCheck CR %q must be created", nhcName)
+
+	return sbrc
+}
+
+// hostProcessChurnScript spawns short-lived processes on the host as fast as the node allows, for
+// the length of duration, and then exits. It is the reproducer's own loop: a probe that finds the
+// agent by walking every process on the host fails when any process exits mid-scan, so the churn
+// is what turns that race into a steady stream of probe failures.
+//
+// The reproducer uses "chroot /host"; the host-command pods here do not bind-mount the host root,
+// so the loop is entered through PID 1's namespaces instead, which is the same idiom the iptables
+// scripts in this file use. Either way the forked processes live in the host PID namespace, which
+// is what the agent's probes scan.
+func hostProcessChurnScript(duration time.Duration) string {
+	churnLoop := fmt.Sprintf(
+		"end=$((SECONDS+%d)); while [ $SECONDS -lt $end ]; do /bin/true & done", int(duration.Seconds()))
+
+	return fmt.Sprintf(`set -e
+nsenter --target 1 --mount --ipc --uts --net -- sh -c '%s'
+echo churn-complete
+`, churnLoop)
+}
+
+// watchdogHolderScanScript reports every host process holding a watchdog device open, one
+// "held by /proc/<pid>" line each, and prints a completion marker afterwards. The marker is what
+// separates "the scan ran and found nothing" from "the scan never got that far", so an empty
+// result can be read as evidence rather than as a broken probe.
+func watchdogHolderScanScript() string {
+	return fmt.Sprintf(`for procDir in /proc/[0-9]*; do
+  ls -l "$procDir"/fd 2>/dev/null | grep -q watchdog && echo "%s $procDir"
+done
+echo %s
+exit 0
+`, sbrparams.WatchdogHolderMarker, sbrparams.WatchdogHolderProbeDoneMarker)
+}
+
+// watchdogHolders returns the host processes the watchdog-holder scan found, parsed out of the
+// probe pod's log. A log without the completion marker is an error rather than an empty result:
+// the scan not having finished says nothing about who holds the device.
+func watchdogHolders(probeLog string) ([]string, error) {
+	if !strings.Contains(probeLog, sbrparams.WatchdogHolderProbeDoneMarker) {
+		return nil, fmt.Errorf("the watchdog-holder scan did not run to completion (no %q marker in "+
+			"its output): %s", sbrparams.WatchdogHolderProbeDoneMarker, probeLog)
+	}
+
+	var holders []string
+
+	for _, line := range strings.Split(probeLog, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, sbrparams.WatchdogHolderMarker) {
+			holders = append(holders, trimmed)
+		}
+	}
+
+	return holders, nil
+}
+
+// hostCommandPodRunning returns nil while the named host-command pod is Running. Folded into the
+// windows that watch a node under churn: a churn pod that died takes the load away with it, and
+// the rest of the window would then pass without anything being exercised.
+func hostCommandPodRunning(podName string) error {
+	current, pullErr := pod.Pull(APIClient, podName, medik8sparams.OperatorNs)
+	if pullErr != nil {
+		return fmt.Errorf("pull host command pod %s: %w", podName, pullErr)
+	}
+
+	if phase := current.Object.Status.Phase; phase != corev1.PodRunning {
+		return fmt.Errorf("host command pod %s is %s, not Running", podName, phase)
+	}
+
+	return nil
+}
+
+// agentPodOffNode returns one of the SBRC's Running agent pods on a node other than nodeName,
+// together with the node it runs on. Callers use it for the healthy-node control of a check they
+// then repeat on the node under test, so an empty result there means the agent is gone rather than
+// that the check itself is broken.
+func agentPodOffNode(sbrcName, nodeName string) (string, string, error) {
+	agentPods, listErr := sbrcAgentPods(sbrcName)
+	if listErr != nil {
+		return "", "", listErr
+	}
+
+	for _, agentPod := range agentPods {
+		if agentPod.Object.Spec.NodeName != nodeName {
+			return agentPod.Object.Name, agentPod.Object.Spec.NodeName, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("SBRC %s has no Running agent pod outside node %s", sbrcName, nodeName)
+}
+
+// agentPodUID returns a pod's UID, for narrowing an event lookup to this instance of a name.
+func agentPodUID(podName string) (string, error) {
+	agentPod, pullErr := pod.Pull(APIClient, podName, medik8sparams.OperatorNs)
+	if pullErr != nil {
+		return "", fmt.Errorf("pull agent pod %s: %w", podName, pullErr)
+	}
+
+	return string(agentPod.Object.UID), nil
+}
+
+// podEventsSince returns, as readable one-liners, the events recorded for the named pod whose
+// message contains messageSubstr and that are newer than since.
+//
+// Events are matched on their message, not their reason: kubelet reports a failed liveness probe
+// as a generic Unhealthy event and the restart it triggers as a generic Killing one, so the
+// message text is the only thing that ties either back to the probe.
+//
+// The cutoff is not optional. Probe failures are already present on every agent pod on an
+// untouched cluster and events live for about an hour, so an unscoped lookup reports history
+// rather than anything the caller did.
+func podEventsSince(podName, podUID string, since time.Time, messageSubstr string) ([]string, error) {
+	events, listErr := helpers.ListEventsForObject(context.TODO(), EventsClient,
+		helpers.InvolvedObjectRef{
+			Kind:      "Pod",
+			Name:      podName,
+			Namespace: medik8sparams.OperatorNs,
+			UID:       podUID,
+		})
+	if listErr != nil {
+		return nil, listErr
+	}
+
+	var matched []string
+
+	for eventIdx := range events {
+		event := &events[eventIdx]
+		if !strings.Contains(event.Message, messageSubstr) {
+			continue
+		}
+
+		occurredAt := eventTime(event)
+		if !occurredAt.After(since) {
+			continue
+		}
+
+		matched = append(matched, fmt.Sprintf("%s reason=%s type=%s count=%d message=%q",
+			occurredAt.UTC().Format(time.RFC3339), event.Reason, event.Type, event.Count, event.Message))
+	}
+
+	return matched, nil
+}
+
+// eventTime returns when an event was last seen. The three fields are tried in order of how
+// specific they are: LastTimestamp is what the core event recorder sets, EventTime what the newer
+// events API sets, and FirstTimestamp is the fallback for an event seen exactly once.
+func eventTime(event *corev1.Event) time.Time {
+	if !event.LastTimestamp.IsZero() {
+		return event.LastTimestamp.Time
+	}
+
+	if !event.EventTime.IsZero() {
+		return event.EventTime.Time
+	}
+
+	return event.FirstTimestamp.Time
+}
+
+// agentRestartsUnchanged returns nil while the agent pod's total container restart count still
+// matches baseline. Intended as a Consistently body: a container that kubelet restarts keeps the
+// same pod, so the count is what moves.
+func agentRestartsUnchanged(agentPodName string, baseline int32) error {
+	restarts, restartErr := agentRestartCount(agentPodName)
+	if restartErr != nil {
+		return restartErr
+	}
+
+	if restarts != baseline {
+		return fmt.Errorf("agent pod %s was restarted: container restart count went from %d to %d",
+			agentPodName, baseline, restarts)
+	}
+
+	return nil
+}
+
+// cephRBDChainListing returns the host's iptables rules for the named chain, read through an
+// already-running injector pod, so a caller can assert the REJECT rules it inserted are really in
+// place rather than trust the insert command's exit code.
+func cephRBDChainListing(injectorPod *pod.Builder, chain string) (string, error) {
+	out, execErr := injectorPod.ExecCommand([]string{
+		"sh", "-c", fmt.Sprintf("%s -L %s -n", nsenterIPTables, chain),
+	})
+
+	return out.String(), execErr
+}
+
+// missingCephRBDRejectPorts returns the Ceph port tokens that have no REJECT rule in an iptables
+// chain listing. Matching the port token on a REJECT line, rather than a whole rule spec, keeps it
+// working across the wordings "iptables -L" and "iptables -S" produce.
+func missingCephRBDRejectPorts(chainListing string) []string {
+	var missing []string
+
+	for _, port := range cephRBDRejectPortTokens {
+		found := false
+
+		for _, line := range strings.Split(chainListing, "\n") {
+			if strings.Contains(line, "REJECT") && strings.Contains(line, port) {
+				found = true
+
+				break
+			}
+		}
+
+		if !found {
+			missing = append(missing, port)
+		}
+	}
+
+	return missing
+}
+
+// nodeAndAgentReady returns nil once nodeName is Ready and the SBRC's own agent pod on it is Ready.
+// It is the precondition a spec that disrupts a node checks before it starts, so a node an earlier
+// spec left wedged is reported as such rather than failing the next spec for an unrelated reason.
+func nodeAndAgentReady(sbrcName, nodeName string) error {
+	if readyErr := nodeConditionIs(nodeName, string(corev1.NodeReady),
+		corev1.ConditionTrue, ""); readyErr != nil {
+		return readyErr
+	}
+
+	return agentPodReadyOnNode(sbrcName, nodeName)
+}
+
+// containerProbe is a container's exec probe as the test needs to run it: the command kubelet
+// runs, and the container it runs in.
+type containerProbe struct {
+	command       []string
+	containerName string
+}
+
+// errNoLivenessProbe is returned when the agent container defines no liveness probe at all. That
+// is the fixed state rather than a problem: with no liveness probe there is nothing that can
+// restart the agent under churn, so there is nothing to sample.
+var errNoLivenessProbe = errors.New("the agent container defines no liveness probe")
+
+// agentLivenessProbe returns the sbr-agent container's liveness probe, read off the live
+// DaemonSet so the test runs exactly what kubelet runs rather than a copy of it that can drift.
+// It returns errNoLivenessProbe when the container has none.
+func agentLivenessProbe(sbrcName string) (*containerProbe, error) {
+	agentDS, dsErr := sbrcAgentDaemonSet(sbrcName)
+	if dsErr != nil {
+		return nil, dsErr
+	}
+
+	container, containerErr := agentContainerOf(agentDS)
+	if containerErr != nil {
+		return nil, containerErr
+	}
+
+	if container.LivenessProbe == nil {
+		return nil, errNoLivenessProbe
+	}
+
+	if container.LivenessProbe.Exec == nil || len(container.LivenessProbe.Exec.Command) == 0 {
+		return nil, fmt.Errorf("the liveness probe of container %s is not an exec probe, so the "+
+			"test cannot run it the way kubelet does", container.Name)
+	}
+
+	return &containerProbe{
+		command:       container.LivenessProbe.Exec.Command,
+		containerName: container.Name,
+	}, nil
+}
+
+// probeSampler runs a container probe inside an agent pod and records the runs that came back
+// non-zero.
+//
+// It exists because an assertion on kubelet's Unhealthy events cannot be trusted over a long
+// window. Kubelet rate-limits the events it emits per object, so a probe that keeps failing stops
+// being reported part-way through and the absence of events then reads as health. Running the
+// probe directly is not rate limited: every run is observed.
+type probeSampler struct {
+	agentPodName string
+	probe        *containerProbe
+	runs         int
+	failures     []string
+}
+
+// sample runs the probe once.
+//
+// A non-zero exit is recorded and is not returned as an error: that is the thing being counted.
+// Anything else — the pod being gone, the exec not reaching the container, the run overrunning
+// its hang guard — is returned as an error instead, so a sampler that stopped working can never
+// be mistaken for a clean run.
+func (s *probeSampler) sample() error {
+	agentPod, pullErr := pod.Pull(APIClient, s.agentPodName, medik8sparams.OperatorNs)
+	if pullErr != nil {
+		return fmt.Errorf("pull agent pod %s to run its probe: %w", s.agentPodName, pullErr)
+	}
+
+	s.runs++
+
+	output, execErr := agentPod.ExecCommandWithTimeout(
+		s.probe.command, sbrparams.BlockProbeSampleTimeout, s.probe.containerName)
+	if execErr == nil {
+		return nil
+	}
+
+	var exitErr utilexec.ExitError
+	if !errors.As(execErr, &exitErr) {
+		return fmt.Errorf("run the liveness probe of agent pod %s: %w", s.agentPodName, execErr)
+	}
+
+	s.failures = append(s.failures, fmt.Sprintf("%s exit=%d output=%q",
+		time.Now().UTC().Format(time.RFC3339), exitErr.ExitStatus(),
+		strings.TrimSpace(output.String())))
+
+	return nil
+}
+
+// summary is how the sampler reads in a failure message or a log line.
+func (s *probeSampler) summary() string {
+	return fmt.Sprintf("%d of %d runs of the liveness probe of agent pod %s came back non-zero",
+		len(s.failures), s.runs, s.agentPodName)
 }
