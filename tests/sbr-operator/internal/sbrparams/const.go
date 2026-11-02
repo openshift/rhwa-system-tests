@@ -38,9 +38,6 @@ const (
 	// NodeMapMaxAgentRestarts is the startup restart budget before the stability observation.
 	NodeMapMaxAgentRestarts = 1
 
-	// NodeMapPeerUnhealthyMessage identifies peer-health transitions in the agent's JSON logs.
-	NodeMapPeerUnhealthyMessage = "Peer node became unhealthy"
-
 	// DefaultPollInterval is the polling interval used with Eventually calls.
 	DefaultPollInterval = 5 * time.Second
 

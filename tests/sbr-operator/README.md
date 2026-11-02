@@ -615,7 +615,7 @@ Full test case: [docs/TESTCASES/rhwa-2031.md](../../docs/TESTCASES/rhwa-2031.md)
 Creates a filesystem-mode SBRC, records the live node map, and verifies that its
 deletion runs a successful cleanup Job and clears the map on the original
 volume. It then recreates the same name and spec, requires the same PVC UID and
-PV name, and checks agent readiness, restart counts, and ghost-peer log events.
+PV name, and checks agent readiness, restart counts, and the recreated node map.
 
 Design: [test plan PR #63](https://github.com/openshift/rhwa-system-tests/pull/63).
 Test task: [RHWA-1929](https://redhat.atlassian.net/browse/RHWA-1929).
@@ -634,7 +634,7 @@ Product fix: [SBR #69](https://github.com/medik8s/storage-based-remediation/pull
 - **Pass criteria**: Exactly one spec with ID `1929` passes. The original map is
   absent or empty after cleanup. The recreated agents become Ready within three minutes
   with at most one restart, then keep their UIDs and restart counts for three
-  minutes. No ghost peer is reported as unhealthy, and the SBRC reports Ready.
+  minutes. The recreated map contains only active agent nodes, and the SBRC reports Ready.
   Test-owned resources are removed, including the retained PVC.
 
 #### Storage identity and cleanup

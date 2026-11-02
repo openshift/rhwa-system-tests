@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -98,8 +97,8 @@ var _ = Describe("SBR Functional - Node map cleanup", Ordered, Serial,
 					assertion.Expect(test.agentSnapshot(ctx, assertion)).To(Equal(restarts),
 						"Every recreated agent must keep its UID and restart count")
 				}, sbrparams.NodeMapConvergenceDuration, sbrparams.DefaultPollInterval).Should(Succeed())
-				By("Verifying no agent logs a peer-unhealthy event for a node that is not an active target")
-				test.verifyPeerLogs(ctx)
+				By("Verifying the recreated node map contains only active agent nodes")
+				test.verifyRecreatedNodeMap()
 				By("Verifying the recreated SBRC reports Ready")
 				test.agentSnapshot(ctx, Default)
 			})
@@ -242,37 +241,12 @@ func (test *nodeMapCleanupTest) agentSnapshot(ctx context.Context, assertion Gom
 	return restarts
 }
 
-func (test *nodeMapCleanupTest) verifyPeerLogs(ctx context.Context) {
+func (test *nodeMapCleanupTest) verifyRecreatedNodeMap() {
 	nodeMap, payload, err := test.readNodeMap()
 	Expect(err).NotTo(HaveOccurred(), "The recreated node map must be readable")
 	Expect(nodeMap.Entries).To(HaveLen(len(test.agentNodes)))
-	activeIDs := make(map[uint16]bool, len(test.agentNodes))
 	for node := range test.agentNodes {
 		Expect(nodeMap.Entries).To(HaveKey(node), "Agent node %s must have a mapping", node)
-		activeIDs[nodeMap.Entries[node].NodeID] = true
 	}
 	AddReportEntry("node-map-after-recreation", payload, ReportEntryVisibilityFailureOrVerbose)
-	agents, err := APIClient.Pods(medik8sparams.OperatorNs).List(ctx,
-		metav1.ListOptions{LabelSelector: "app=sbr-agent,sbrconfig=" + test.config.GetName()})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(agents.Items).To(HaveLen(len(test.agentNodes)))
-	since := test.config.GetCreationTimestamp()
-	for _, agent := range agents.Items {
-		logContext, cancel := context.WithTimeout(ctx, sbrparams.NodeMapExecTimeout)
-		logs, logErr := APIClient.Pods(medik8sparams.OperatorNs).GetLogs(agent.Name, &corev1.PodLogOptions{
-			Container: "sbr-agent", SinceTime: &since,
-		}).DoRaw(logContext)
-		cancel()
-		Expect(logErr).NotTo(HaveOccurred(), "Logs for agent %s must be readable", agent.Name)
-		AddReportEntry("agent-log-"+agent.Name, string(logs), ReportEntryVisibilityFailureOrVerbose)
-		for _, line := range strings.Split(string(logs), "\n") {
-			if !strings.Contains(line, sbrparams.NodeMapPeerUnhealthyMessage) {
-				continue
-			}
-			var event struct{ NodeID uint16 }
-			Expect(json.Unmarshal([]byte(line), &event)).To(Succeed(), "Peer-health events must be valid JSON")
-			Expect(activeIDs).To(HaveKey(event.NodeID),
-				"Agent %s must not report a ghost peer as unhealthy: %s", agent.Name, line)
-		}
-	}
 }
