@@ -56,6 +56,9 @@ var _ = Describe(
 					victimNodeName, probePhase, probeLog))
 			}
 
+			By("Clearing residual Ceph OSD blocklist entries from prior tests")
+			clearCephOSDBlocklist()
+
 			testSBRC = setupBlockModeNHCScenario(
 				sbrparams.SBRCBlockStorageLossTestName, sbrparams.NHCBlockStorageLossTestName)
 		})
@@ -70,6 +73,9 @@ var _ = Describe(
 
 				By("Flushing any leftover Ceph REJECT rule on the victim node")
 				flushCephRBDRules(victimNodeName)
+
+				By("Clearing residual Ceph OSD blocklist entries left by the fencing")
+				clearCephOSDBlocklist()
 
 				By("Removing any StorageBasedRemediation CR left for the victim node")
 				cleanupSBRCR(context.Background(), victimNodeName)
