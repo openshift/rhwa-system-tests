@@ -36,12 +36,19 @@ var _ = Describe(
 			// An NHC remediating through the SBR template would create and delete its own
 			// StorageBasedRemediation CRs for the node this spec fences by hand.
 			requireNoSBRNodeHealthCheck()
+
+			By("Clearing residual Ceph OSD blocklist entries from prior tests")
+			clearCephOSDBlocklist()
+
 			testSBRC = setupFenceGeometrySBRC()
 			victimNodeName, victimNodeID, observerPodName = selectHighestNodeIDVictim()
 		})
 
 		AfterAll(func() {
 			if victimNodeName != "" {
+				By("Clearing residual Ceph OSD blocklist entries left by the fencing")
+				clearCephOSDBlocklist()
+
 				By("Removing any StorageBasedRemediation CR left for the victim node")
 				cleanupSBRCR(context.Background(), victimNodeName)
 
