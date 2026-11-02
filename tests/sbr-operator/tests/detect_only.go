@@ -531,6 +531,7 @@ var _ = Describe(
 				labels.PlatformAny,
 				labels.ComponentDaemonSet,
 			), func() {
+				Skip("RHWA-2033: Temporarily skipped — flaky test (36.8% pass rate)")
 				Expect(keepalivePods).To(HaveLen(1),
 					"RHWA-1184 regression requires a keepalive pod on the selected worker")
 
