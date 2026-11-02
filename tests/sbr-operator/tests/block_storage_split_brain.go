@@ -90,6 +90,9 @@ var _ = Describe(
 			Expect(APIClient.Create(context.TODO(), testSBRC)).To(Succeed(),
 				"StorageBasedRemediationConfig %q must be created", sbrparams.SBRCBlockSplitBrainTestName)
 
+			By("Clearing residual Ceph OSD blocklist entries from prior tests")
+			clearCephOSDBlocklist()
+
 			By("Waiting for the Block device-init Job to succeed")
 			waitForBlockInitJobSucceeded(sbrparams.SBRCBlockSplitBrainTestName, testSBRC.GetUID())
 
@@ -140,6 +143,9 @@ var _ = Describe(
 			if victimNodeName != "" {
 				By("Flushing any leftover Ceph REJECT rule on the victim node")
 				flushCephRBDRules(victimNodeName)
+
+				By("Clearing residual Ceph OSD blocklist entries left by the fencing")
+				clearCephOSDBlocklist()
 
 				By("Uncordoning the victim node if it is still cordoned")
 				uncordonNodeIfNeeded(victimNodeName)

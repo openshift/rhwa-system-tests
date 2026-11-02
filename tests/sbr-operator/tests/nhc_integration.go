@@ -107,6 +107,9 @@ var _ = Describe(
 				return fmt.Errorf("SBRC %s still terminating", sbrparams.SBRCNHCTestName)
 			}, sbrparams.SBRCReadyTimeout, sbrparams.DefaultPollInterval).Should(Succeed())
 
+			By("Clearing residual Ceph OSD blocklist entries from prior tests")
+			clearCephOSDBlocklist()
+
 			By(fmt.Sprintf("Creating StorageBasedRemediationConfig %q with sharedStorageClass=%q",
 				sbrparams.SBRCNHCTestName, storageClass))
 
@@ -206,6 +209,9 @@ var _ = Describe(
 		AfterAll(func() {
 			By("AfterAll: removing injected CephFS REJECT rules before deleting the NHC")
 			removeInjectedRejectRules(injectorPodName, removeCephFSRejectOutput)
+
+			By("Clearing residual Ceph OSD blocklist entries left by the fencing")
+			clearCephOSDBlocklist()
 
 			By("AfterAll: deleting StorageBasedRemediationConfig")
 

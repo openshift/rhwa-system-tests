@@ -78,6 +78,9 @@ var _ = Describe(
 			}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
 				"Stale agent DaemonSet must be gone before creating new SBRC")
 
+			By("Clearing residual Ceph OSD blocklist entries from prior tests")
+			clearCephOSDBlocklist()
+
 			By("Creating StorageBasedRemediationConfig with sharedStorageClass so agent DaemonSet starts")
 
 			// sharedStorageClass is required: without it the controller never creates the

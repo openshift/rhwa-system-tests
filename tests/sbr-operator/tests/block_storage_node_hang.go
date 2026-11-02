@@ -55,6 +55,9 @@ var _ = Describe(
 				buildSBRC(sbrparams.SBRCBlockNodeHangTestName, map[string]interface{}{}),
 				sbrparams.SBRCBlockNodeHangTestName)
 
+			By("Clearing residual Ceph OSD blocklist entries from prior tests")
+			clearCephOSDBlocklist()
+
 			By("Creating the Block-mode StorageBasedRemediationConfig on Ceph RBD")
 			testSBRC = buildSBRC(sbrparams.SBRCBlockNodeHangTestName,
 				buildBlockModeSBRC(rbdStorageClass, nil))
@@ -102,6 +105,9 @@ var _ = Describe(
 			if victimNodeName != "" {
 				By("Removing the injector pod if still present")
 				deleteHostCommandPod(sbrparams.BlockNodeHangInjectorPodName)
+
+				By("Clearing residual Ceph OSD blocklist entries left by the fencing")
+				clearCephOSDBlocklist()
 
 				By("Removing any StorageBasedRemediation CR left for the victim node")
 				cleanupSBRCR(context.Background(), victimNodeName)
