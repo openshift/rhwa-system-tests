@@ -9,8 +9,9 @@ the candidate catalog, it verifies the same config identity/spec and the expecte
 controller and agent images. A unique toleration probe must reach newly rolled,
 Ready agent pods, then the original config is restored.
 
-Before and after upgrading, a test-owned `SelfNodeRemediation` must reboot a
-worker, preserve its node UID, and return it to Ready without remediation taints.
+Before upgrading, the GA agents must be Ready and reflect the customized config.
+After upgrading, a test-owned `SelfNodeRemediation` must reboot a worker, preserve
+its node UID, and return it to Ready without remediation taints.
 This is a destructive test for disposable OpenShift 5.0 clusters with at least
 two Ready workers and an eligible target not hosting the active controller.
 It does not need NHC, SSH, a kubelet-stop command, or storage provisioning.
