@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -361,30 +362,51 @@ func isNHCCRDInstalled() bool {
 	return err == nil
 }
 
-// listMasterNodes returns all master/control-plane nodes, trying both
-// the "control-plane" and "master" (deprecated) role labels for K8s 1.20+ compat.
+// listControlPlaneNodes returns all control-plane nodes by querying both the
+// "control-plane" (K8s 1.20+) and deprecated "master" (K8s < 1.20) role labels,
+// then merging and deduplicating results by node name. This handles clusters
+// during upgrades where nodes may have different labels (e.g., OCP 4.13 → 4.14).
 func listControlPlaneNodes(ctx context.Context, k8sClient client.Client) (*corev1.NodeList, error) {
-	nodeList := &corev1.NodeList{}
+	// Query both labels to catch all control-plane nodes regardless of label state
+	cpNodes := &corev1.NodeList{}
+	cpErr := k8sClient.List(ctx, cpNodes,
+		client.MatchingLabels{"node-role.kubernetes.io/control-plane": ""})
+	masterNodes := &corev1.NodeList{}
+	masterErr := k8sClient.List(ctx, masterNodes,
+		client.MatchingLabels{"node-role.kubernetes.io/master": ""})
 
-	// Try "control-plane" label first (K8s 1.20+, OCP 4.14+).
-	if err := k8sClient.List(ctx, nodeList,
-		client.MatchingLabels{"node-role.kubernetes.io/control-plane": ""}); err != nil {
-		return nil, fmt.Errorf("failed to list control-plane nodes: %w", err)
+	// A failed query means the merged list may be incomplete
+	if cpErr != nil || masterErr != nil {
+		return nil, fmt.Errorf("failed to list control-plane nodes: %w", errors.Join(cpErr, masterErr))
 	}
 
-	// Fall back to deprecated "master" label (K8s < 1.20, OCP <= 4.13).
-	if len(nodeList.Items) == 0 {
-		if err := k8sClient.List(ctx, nodeList,
-			client.MatchingLabels{"node-role.kubernetes.io/master": ""}); err != nil {
-			return nil, fmt.Errorf("failed to list master nodes: %w", err)
+	// Merge results and deduplicate by node name
+	seen := make(map[string]bool)
+	merged := &corev1.NodeList{}
+
+	for i := range cpNodes.Items {
+		if !seen[cpNodes.Items[i].Name] {
+			merged.Items = append(merged.Items, cpNodes.Items[i])
+			seen[cpNodes.Items[i].Name] = true
 		}
 	}
 
-	sort.Slice(nodeList.Items, func(i, j int) bool {
-		return nodeList.Items[i].Name < nodeList.Items[j].Name
+	for i := range masterNodes.Items {
+		if !seen[masterNodes.Items[i].Name] {
+			merged.Items = append(merged.Items, masterNodes.Items[i])
+			seen[masterNodes.Items[i].Name] = true
+		}
+	}
+
+	if len(merged.Items) == 0 {
+		return nil, fmt.Errorf("no control-plane nodes found with either label")
+	}
+
+	sort.Slice(merged.Items, func(i, j int) bool {
+		return merged.Items[i].Name < merged.Items[j].Name
 	})
 
-	return nodeList, nil
+	return merged, nil
 }
 
 // selectControlPlaneNode returns a Ready control-plane node that is not in the
@@ -415,7 +437,7 @@ func selectControlPlaneNode(
 	}
 
 	return nil, fmt.Errorf(
-		"no eligible Ready master node found (excluded: %v)", excludeNodes)
+		"no eligible Ready control-plane node found (excluded: %v)", excludeNodes)
 }
 
 // countReadyControlPlaneNodes returns the number of Ready control-plane nodes.
