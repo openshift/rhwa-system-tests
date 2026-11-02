@@ -58,7 +58,6 @@ var _ = Describe(
 
 			By("Clearing residual Ceph OSD blocklist entries from prior tests")
 			clearCephOSDBlocklist()
-
 			testSBRC = setupBlockModeNHCScenario(
 				sbrparams.SBRCBlockStorageLossTestName, sbrparams.NHCBlockStorageLossTestName)
 		})
