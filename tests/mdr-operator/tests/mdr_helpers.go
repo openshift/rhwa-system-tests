@@ -21,7 +21,9 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -502,37 +504,66 @@ func deferDeleteMDRCR(name string) {
 // during upgrades where nodes may have different labels (e.g., OCP 4.13 → 4.14).
 func listControlPlaneNodes(ctx context.Context, k8sClient client.Client) (*corev1.NodeList, error) {
 	// Query both labels to catch all control-plane nodes regardless of label state
+	// Use Exists selector to match label presence (not value), handling nodes with
+	// non-empty label values correctly
+	cpReq, _ := labels.NewRequirement(
+		mdrparams.ControlPlaneRoleLabel,
+		selection.Exists,
+		nil,
+	)
+	cpSelector := labels.NewSelector().Add(*cpReq)
 	cpNodes := &corev1.NodeList{}
 	cpErr := k8sClient.List(ctx, cpNodes,
-		client.MatchingLabels{mdrparams.ControlPlaneRoleLabel: ""})
+		client.MatchingLabelsSelector{Selector: cpSelector})
+	masterReq, _ := labels.NewRequirement(
+		mdrparams.MasterRoleLabel,
+		selection.Exists,
+		nil,
+	)
+	masterSelector := labels.NewSelector().Add(*masterReq)
 	masterNodes := &corev1.NodeList{}
 	masterErr := k8sClient.List(ctx, masterNodes,
-		client.MatchingLabels{mdrparams.MasterRoleLabel: ""})
+		client.MatchingLabelsSelector{Selector: masterSelector})
 
-	// A failed query means the merged list may be incomplete
-	if cpErr != nil || masterErr != nil {
-		return nil, fmt.Errorf("failed to list control-plane nodes: %w", errors.Join(cpErr, masterErr))
+	// Handle partial query failures
+	if cpErr != nil && masterErr != nil {
+		// Both queries failed - cannot proceed
+		return nil, fmt.Errorf("failed to list control-plane nodes (both queries failed): %w",
+			errors.Join(cpErr, masterErr))
 	}
 
 	// Merge results and deduplicate by node name
+	// If one query failed, we still proceed with the successful query's results
 	seen := make(map[string]bool)
 	merged := &corev1.NodeList{}
 
-	for i := range cpNodes.Items {
-		if !seen[cpNodes.Items[i].Name] {
-			merged.Items = append(merged.Items, cpNodes.Items[i])
-			seen[cpNodes.Items[i].Name] = true
+	if cpErr == nil {
+		for i := range cpNodes.Items {
+			if !seen[cpNodes.Items[i].Name] {
+				merged.Items = append(merged.Items, cpNodes.Items[i])
+				seen[cpNodes.Items[i].Name] = true
+			}
 		}
 	}
 
-	for i := range masterNodes.Items {
-		if !seen[masterNodes.Items[i].Name] {
-			merged.Items = append(merged.Items, masterNodes.Items[i])
-			seen[masterNodes.Items[i].Name] = true
+	if masterErr == nil {
+		for i := range masterNodes.Items {
+			if !seen[masterNodes.Items[i].Name] {
+				merged.Items = append(merged.Items, masterNodes.Items[i])
+				seen[masterNodes.Items[i].Name] = true
+			}
 		}
 	}
 
 	if len(merged.Items) == 0 {
+		// Provide context about which queries were attempted
+		if cpErr != nil {
+			return nil, fmt.Errorf("no control-plane nodes found (control-plane query failed: %w)", cpErr)
+		}
+		if masterErr != nil {
+			return nil, fmt.Errorf("no control-plane nodes found (master query failed: %w)", masterErr)
+		}
+
 		return nil, fmt.Errorf("no control-plane nodes found with either label")
 	}
 
