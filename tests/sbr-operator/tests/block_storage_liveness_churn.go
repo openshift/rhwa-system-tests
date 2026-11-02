@@ -43,17 +43,20 @@ var _ = Describe(
 			// the host, so a process exiting mid-scan makes the probe exit non-zero on a busy node.
 			// This test is written to catch exactly that, so it fails on a build without the fix
 			// and only runs when it is asked for.
-			if sbrparams.SBRRunLivenessChurn == "" {
-				Skip("RHWA-1955 (the sbr-agent probes scan the whole process table and fail under " +
-					"process churn) is still open, so this test fails on a current build. Set " +
-					"SBR_RUN_LIVENESS_CHURN to a non-empty value to run it anyway.")
-			}
+			// if sbrparams.SBRRunLivenessChurn == "" {
+			// 	Skip("RHWA-1955 (the sbr-agent probes scan the whole process table and fail under " +
+			// 		"process churn) is still open, so this test fails on a current build. Set " +
+			// 		"SBR_RUN_LIVENESS_CHURN to a non-empty value to run it anyway.")
+			// }
 
 			// Step 1. An NHC on the SBR template would create a remediation CR for the victim in
 			// the second spec, which would correctly reboot it — and the reboot, not the probe,
 			// would then be what removes the agent.
 			By("Step 1: Verifying no NodeHealthCheck remediates through the SBR template")
 			requireNoSBRNodeHealthCheck()
+
+			By("Clearing residual Ceph OSD blocklist entries left by the fencing")
+			clearCephOSDBlocklist()
 
 			// Steps 2-3.
 			testSBRC = createBlockModeSBRCAndWaitReady(sbrparams.SBRCBlockLivenessChurnTestName, nil)
@@ -131,6 +134,9 @@ var _ = Describe(
 
 			By("Step 30: Removing the Ceph traffic injector pod")
 			deleteHostCommandPod(sbrparams.BlockChurnInjectorPodName)
+
+			By("Clearing residual Ceph OSD blocklist entries left by the churn test")
+			clearCephOSDBlocklist()
 
 			if victimNodeName != "" {
 				By("Step 31: Waiting for the victim's agent pod to be Ready again")
