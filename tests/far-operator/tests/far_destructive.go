@@ -608,43 +608,6 @@ var _ = Describe("FAR Destructive Tests",
 					func() {
 						Skip("Skipping until RHWA-1967 is resolved")
 
-						// Prior destructive tests fence/reboot worker nodes, which can
-						// leave the FAR controller's gRPC connections to the API server
-						// degraded. Restarting the pods forces fresh connections so the
-						// status update for FenceAgentActionSucceeded does not stall on
-						// a broken keepalive.
-						By("Restarting FAR controller pods for fresh API connections")
-
-						controllerPods, err := farutils.GetFARControllerPods(ctx, APIClient)
-						Expect(err).ToNot(HaveOccurred())
-						Expect(controllerPods).ToNot(BeEmpty(), "No FAR controller pods found")
-
-						for podIdx := range controllerPods {
-							Expect(APIClient.Delete(ctx, &controllerPods[podIdx])).To(Succeed(),
-								"Failed to delete FAR controller pod %s", controllerPods[podIdx].Name)
-						}
-
-						By("Waiting for new controller pods to become Ready")
-
-						Eventually(func() (int, error) {
-							pods, listErr := farutils.GetFARControllerPods(ctx, APIClient)
-
-							return len(pods), listErr
-						}, farparams.ControllerPodReadyTimeout, farparams.DefaultPollInterval).Should(
-							Equal(int(farparams.ExpectedReplicas)),
-							"FAR controller pods did not recover after restart")
-
-						By("Waiting for FAR leader election to settle after restart")
-
-						Eventually(func() error {
-							var leaderErr error
-
-							leaderNode, leaderErr = farutils.GetActiveFARControllerNode(ctx, APIClient)
-
-							return leaderErr
-						}, farparams.ControllerHandoverTimeout, farparams.DefaultPollInterval).Should(Succeed(),
-							"FAR leader election did not settle after pod restart")
-
 						By("Verifying at least 3 Ready control plane nodes for etcd quorum")
 
 						cpNodes, err := farutils.GetReadyControlPlaneNodes(ctx, APIClient)

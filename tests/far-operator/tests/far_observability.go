@@ -154,10 +154,21 @@ var _ = Describe("FAR Observability Tests",
 
 					By("Creating temporary must-gather output directory")
 
-					mustGatherDir, mkdirErr := os.MkdirTemp("", "far-must-gather-*")
+					mustGatherDir, mkdirErr := mustgather.CreateDestDir(
+						"far-must-gather-", GinkgoT().TempDir())
 					Expect(mkdirErr).ToNot(HaveOccurred())
 
 					DeferCleanup(func() {
+						// On failure the archive and failure-diagnostics are the
+						// evidence for triage; keep them under ARTIFACT_DIR.
+						if CurrentSpecReport().Failed() {
+							GinkgoWriter.Printf(
+								"Spec failed -- preserving must-gather output at %s\n",
+								mustGatherDir)
+
+							return
+						}
+
 						if removeErr := os.RemoveAll(mustGatherDir); removeErr != nil {
 							GinkgoWriter.Printf("WARNING: failed to remove must-gather dir %s: %v\n",
 								mustGatherDir, removeErr)
@@ -243,15 +254,27 @@ var _ = Describe("FAR Observability Tests",
 
 					By("Running oc adm must-gather")
 
-					mustGatherImage := os.Getenv(mustgather.ImageEnvVar)
-					if mustGatherImage == "" {
-						mustGatherImage = mustgather.DefaultImage
-					}
-
-					Expect(mustgather.Run(ctx, mustGatherImage, mustGatherDir, mustgather.Options{
+					mustGatherImage := mustgather.ResolveImage(
+						mustgather.ImageEnvVar, mustgather.DefaultImage, GinkgoWriter.Printf)
+					collectionStart := time.Now()
+					runErr := mustgather.Run(ctx, mustGatherImage, mustGatherDir, mustgather.Options{
 						CommandTimeout:   farparams.MustGatherTimeout,
 						ImageInfoTimeout: farparams.OcDebugTimeout,
-					}, GinkgoWriter.Printf)).To(Succeed(), "oc adm must-gather failed")
+						SaveCommandLog:   true,
+					}, GinkgoWriter.Printf)
+					if runErr != nil {
+						By("Dumping must-gather failure diagnostics")
+						mustgather.DumpFailureDiagnostics(
+							context.Background(),
+							mustGatherDir,
+							collectionStart,
+							[]string{targetNode.Name},
+							mustgather.DefaultCleanupTimeout,
+							GinkgoWriter.Printf,
+						)
+					}
+
+					Expect(runErr).To(Succeed(), "oc adm must-gather failed")
 
 					By("Validating must-gather output contains FAR data")
 
