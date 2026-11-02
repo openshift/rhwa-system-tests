@@ -495,20 +495,22 @@ func deferDeleteMDRCR(name string) {
 	})
 }
 
-// listControlPlaneNodes returns all master/control-plane nodes, trying both
-// the "master" and "control-plane" role labels for OCP 4.14+ compat.
+// listControlPlaneNodes returns all control-plane nodes, trying "control-plane"
+// label first, falling back to deprecated "master" for K8s < 1.20 / OCP <= 4.13.
 func listControlPlaneNodes(ctx context.Context, k8sClient client.Client) (*corev1.NodeList, error) {
 	nodeList := &corev1.NodeList{}
 
+	// Try "control-plane" label first (K8s 1.20+, OCP 4.14+).
 	if err := k8sClient.List(ctx, nodeList,
-		client.MatchingLabels{mdrparams.MasterRoleLabel: ""}); err != nil {
-		return nil, fmt.Errorf("failed to list master nodes: %w", err)
+		client.MatchingLabels{mdrparams.ControlPlaneRoleLabel: ""}); err != nil {
+		return nil, fmt.Errorf("failed to list control-plane nodes: %w", err)
 	}
 
+	// Fall back to deprecated "master" label (K8s < 1.20, OCP <= 4.13).
 	if len(nodeList.Items) == 0 {
 		if err := k8sClient.List(ctx, nodeList,
-			client.MatchingLabels{mdrparams.ControlPlaneRoleLabel: ""}); err != nil {
-			return nil, fmt.Errorf("failed to list control-plane nodes: %w", err)
+			client.MatchingLabels{mdrparams.MasterRoleLabel: ""}); err != nil {
+			return nil, fmt.Errorf("failed to list master nodes: %w", err)
 		}
 	}
 

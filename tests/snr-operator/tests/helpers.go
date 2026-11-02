@@ -362,21 +362,21 @@ func isNHCCRDInstalled() bool {
 }
 
 // listMasterNodes returns all master/control-plane nodes, trying both
-// the "master" and "control-plane" role labels for OCP 4.14+ compat.
-func listMasterNodes(ctx context.Context, k8sClient client.Client) (*corev1.NodeList, error) {
+// the "control-plane" and "master" (deprecated) role labels for K8s 1.20+ compat.
+func listControlPlaneNodes(ctx context.Context, k8sClient client.Client) (*corev1.NodeList, error) {
 	nodeList := &corev1.NodeList{}
 
-	// Try "master" label first (OCP <= 4.13).
+	// Try "control-plane" label first (K8s 1.20+, OCP 4.14+).
 	if err := k8sClient.List(ctx, nodeList,
-		client.MatchingLabels{"node-role.kubernetes.io/master": ""}); err != nil {
-		return nil, fmt.Errorf("failed to list master nodes: %w", err)
+		client.MatchingLabels{"node-role.kubernetes.io/control-plane": ""}); err != nil {
+		return nil, fmt.Errorf("failed to list control-plane nodes: %w", err)
 	}
 
-	// Fall back to "control-plane" label (OCP 4.14+).
+	// Fall back to deprecated "master" label (K8s < 1.20, OCP <= 4.13).
 	if len(nodeList.Items) == 0 {
 		if err := k8sClient.List(ctx, nodeList,
-			client.MatchingLabels{"node-role.kubernetes.io/control-plane": ""}); err != nil {
-			return nil, fmt.Errorf("failed to list control-plane nodes: %w", err)
+			client.MatchingLabels{"node-role.kubernetes.io/master": ""}); err != nil {
+			return nil, fmt.Errorf("failed to list master nodes: %w", err)
 		}
 	}
 
@@ -387,12 +387,12 @@ func listMasterNodes(ctx context.Context, k8sClient client.Client) (*corev1.Node
 	return nodeList, nil
 }
 
-// selectMasterNode returns a Ready master node that is not in the
-// excludeNodes list. Tries both "master" and "control-plane" role labels.
-func selectMasterNode(
+// selectControlPlaneNode returns a Ready control-plane node that is not in the
+// excludeNodes list. Tries "control-plane" label first, falls back to "master".
+func selectControlPlaneNode(
 	ctx context.Context, k8sClient client.Client, excludeNodes ...string,
 ) (*corev1.Node, error) {
-	nodeList, err := listMasterNodes(ctx, k8sClient)
+	nodeList, err := listControlPlaneNodes(ctx, k8sClient)
 	if err != nil {
 		return nil, err
 	}
@@ -418,9 +418,9 @@ func selectMasterNode(
 		"no eligible Ready master node found (excluded: %v)", excludeNodes)
 }
 
-// countReadyMasterNodes returns the number of Ready master/control-plane nodes.
-func countReadyMasterNodes(ctx context.Context, k8sClient client.Client) (int, error) {
-	nodeList, err := listMasterNodes(ctx, k8sClient)
+// countReadyControlPlaneNodes returns the number of Ready control-plane nodes.
+func countReadyControlPlaneNodes(ctx context.Context, k8sClient client.Client) (int, error) {
+	nodeList, err := listControlPlaneNodes(ctx, k8sClient)
 	if err != nil {
 		return 0, err
 	}
