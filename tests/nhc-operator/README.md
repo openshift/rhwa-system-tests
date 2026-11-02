@@ -164,6 +164,21 @@ container or pod level). Only checks the `manager` container.
 - **Standalone**: `ginkgo --label-filter="nhc" --focus="runs as non-root" ./tests/nhc-operator/...`
 - **Pass criteria**: Pod runAsNonRoot=true; expected manager container exists; manager container runAsUser != 0; allowPrivilegeEscalation=false; readOnlyRootFilesystem=true; capabilities.drop=[ALL]; seccomp profile RuntimeDefault
 
+### 5. Verify NHC Console Plugin Container Has readOnlyRootFilesystem Enabled ([RHWA-1943](https://issues.redhat.com/browse/RHWA-1943))
+
+Validates that the NHC console plugin pod (`node-remediation-console-plugin`)
+starts and remains Running with `readOnlyRootFilesystem: true` set in the container
+securityContext. Before RHWA-527, the pod entered CrashLoopBackOff because startup
+scripts wrote to the root filesystem. The test skips gracefully when the console
+plugin is not deployed (it is optional).
+
+- **Operators**: NHC v5.8.0+
+- **Cluster**: Any topology, OCP only (console plugin is OCP-specific)
+- **Storage**: none
+- **Environment**: Connected or disconnected
+- **Standalone**: `ginkgo --label-filter="operator:nhc && tier:smoke" --focus="readOnlyRootFilesystem" ./tests/nhc-operator/...`
+- **Pass criteria**: Console plugin pod Running; container `node-remediation-console-plugin` has `SecurityContext.ReadOnlyRootFilesystem=true`
+
 ## Non-Destructive Tests -- Negative Validation and Webhook Rejection
 
 Tests that verify NHC webhook rejection of invalid CRs and controller
