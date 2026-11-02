@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
+	"k8s.io/client-go/util/retry"
 )
 
 // UpgradeOperatorFBCTest owns all operator-specific behavior and mutable state for one run.
@@ -178,9 +179,13 @@ func DefineFBCUpgradeSuite(cfg UpgradeOperatorFBCConfig) bool {
 			Expect(test.BeforeUpgrade(ctx)).To(Succeed())
 
 			By("6. Switching Subscription to candidate CatalogSource")
-			_, err = helpers.SwitchSubscriptionCatalog(
-				APIClient, spec.SubscriptionName, spec.Namespace, inputs.CatalogName, spec.Channel,
-			)
+			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				_, switchErr := helpers.SwitchSubscriptionCatalog(
+					APIClient, spec.SubscriptionName, spec.Namespace, inputs.CatalogName, spec.Channel,
+				)
+
+				return switchErr
+			})
 			Expect(err).NotTo(HaveOccurred())
 
 			By("7. Waiting for candidate CSV and version to succeed")
