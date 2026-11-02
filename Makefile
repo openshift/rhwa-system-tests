@@ -28,7 +28,8 @@ GO_PACKAGES=$(shell go list ./... | grep -v vendor)
         new-testcase \
         check-testcase \
         check-testcase-jira \
-        vet
+        vet \
+        run-dast
 vet:
 	go vet ${GO_PACKAGES}
 
@@ -98,6 +99,32 @@ define go-install-tool
 	rm -rf $$TMP_DIR; \
 }
 endef
+
+## DAST scanning
+TRIVY_IMAGE    ?= docker.io/aquasec/trivy:0.76.1
+DAST_NAMESPACE ?= openshift-workload-availability
+
+run-dast: ## Run DAST scan against all RHWA pods in DAST_NAMESPACE
+	@if [ -z "$$KUBECONFIG" ]; then echo "Error: KUBECONFIG must be set"; exit 1; fi
+	@command -v kubectl >/dev/null 2>&1 || { echo "Error: kubectl is required"; exit 1; }
+	@pods=$$(kubectl --kubeconfig="$$KUBECONFIG" get pods -n $(DAST_NAMESPACE) -o name 2>/dev/null) || \
+	    { echo "Error: cannot list pods in $(DAST_NAMESPACE) — check kubeconfig RBAC"; exit 1; }; \
+	[ -n "$$pods" ] || { echo "Error: no pods in $(DAST_NAMESPACE) — nothing to scan"; exit 1; }
+	@flat=$$(mktemp) && \
+	kubectl --kubeconfig="$$KUBECONFIG" config view --flatten --raw > "$$flat" && \
+	podman run --rm \
+	  -e KUBECONFIG=/kubeconfig \
+	  -v "$$flat":/kubeconfig:Z \
+	  $(TRIVY_IMAGE) k8s \
+	  --include-namespaces $(DAST_NAMESPACE) \
+	  --include-kinds Pod \
+	  --disable-node-collector \
+	  --severity=HIGH,CRITICAL \
+	  --scanners=misconfig \
+	  --report all \
+	  --format json \
+	  --exit-code 1 ; \
+	rc=$$? ; rm -f "$$flat" ; exit $$rc
 
 build-docker-image:
 	@echo "Building docker image"

@@ -143,6 +143,56 @@ Executing test-runner script
 scripts/test-runner.sh
 ginkgo -timeout=30m --keep-going --require-suite -r --focus="should remediate a worker node after kubelet stop" ./tests/snr-operator
 ```
+## DAST Scanning
+
+Runtime misconfiguration scanning of running RHWA operator pods using the
+[Trivy](https://trivy.dev) Kubernetes scanner. This detects Kubernetes security
+misconfigurations (pod security context, privilege escalation, read-only root filesystem, etc.)
+in the live cluster — it is not endpoint fuzzing or API probing.
+
+Background and full history: [DAST Scanning for RHWA Operators](https://docs.google.com/document/d/1pp4VR3jKGu_irgVqry8vRqJzWukjuX9Wmiia1L9ttOs).
+For CI-integrated runs (prow), see [eco-gotests](https://github.com/openshift-kni/eco-gotests/pull/320).
+
+### Prerequisites
+
+- `KUBECONFIG` set and pointing at a cluster with RHWA operators deployed in `openshift-workload-availability`
+- `podman` available locally
+- `kubectl` available locally
+
+### Run DAST
+
+Scan all RHWA operators in the `openshift-workload-availability` namespace:
+
+```bash
+export KUBECONFIG=/path/to/kubeconfig
+make run-dast
+```
+
+To scan a different namespace or pin a specific Trivy version:
+
+```bash
+make run-dast DAST_NAMESPACE=my-custom-namespace
+make run-dast TRIVY_IMAGE=docker.io/aquasec/trivy:0.76.1
+```
+
+> **Note:** The scan targets a namespace, not a specific operator. For per-operator isolation,
+> install each operator in its own namespace and pass that namespace via `DAST_NAMESPACE`.
+> The default `openshift-workload-availability` is a shared namespace used when all RHWA
+> operators are installed together (e.g. via OLM in Prow CI).
+
+### Results
+
+Scan output goes to stdout. Pass/fail is reported inline: a finding at HIGH or CRITICAL severity
+causes a non-zero exit. No results are stored to disk — redirect stdout to capture them:
+
+```bash
+set -o pipefail; make -s run-dast | tee dast-results.json
+```
+
+`make -s` suppresses Make's recipe echo so only Trivy's JSON stdout is captured. Trivy progress
+and diagnostics go to stderr and remain on the terminal. `set -o pipefail` ensures a non-zero
+exit from `make run-dast` (findings found) propagates through the pipeline.
+
 # How to contribute
 
 The project follows the medik8s organization guidelines: the
