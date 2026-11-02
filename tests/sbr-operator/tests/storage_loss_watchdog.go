@@ -78,6 +78,9 @@ var _ = Describe(
 
 			GinkgoWriter.Printf("Using StorageClass %q for shared storage\n", rwxStorageClass)
 
+			By("Clearing residual Ceph OSD blocklist entries from prior tests")
+			clearCephOSDBlocklist()
+
 			By("Creating StorageBasedRemediationConfig with shared storage")
 
 			// Minimum sbrTimeoutSeconds (heartbeat = timeout/2) so a peer marks the
@@ -140,6 +143,9 @@ var _ = Describe(
 			if injectionStarted {
 				removeInjectedRejectRules(sbrparams.InjectorPodName+"-88880", removeCephFSRejectBidirectional)
 			}
+
+			By("Clearing residual Ceph OSD blocklist entries left by the fencing")
+			clearCephOSDBlocklist()
 
 			By("AfterAll: removing StorageBasedRemediationConfig")
 
