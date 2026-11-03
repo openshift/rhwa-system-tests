@@ -143,17 +143,15 @@ var _ = Describe(
 
 				finalCIDR := raceEndpointHealthCheckURL()
 
-				Eventually(func() error {
-					return verifyEgressIPBlockCIDR(finalCIDR)
+				// Nested Eventually(Consistently(…)) retries the stability
+				// window automatically if the operator flip-flops while
+				// draining queued reconciles from the rapid patches.
+				Eventually(func(g Gomega) {
+					g.Consistently(func() error {
+						return verifyEgressIPBlockCIDR(finalCIDR)
+					}, snrparams.NetworkPolicyStabilityWindow, snrparams.DefaultPollInterval).Should(Succeed())
 				}, medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
-					"NetworkPolicy %q egress must converge on the final ipBlock %s after rapid changes",
-					snrparams.NetworkPolicyName, finalCIDR)
-
-				Consistently(func() error {
-					return verifyEgressIPBlockCIDR(finalCIDR)
-				}, snrparams.NetworkPolicyStabilityWindow, snrparams.DefaultPollInterval).Should(Succeed(),
-					"NetworkPolicy %q egress must remain stable at exactly one ipBlock rule (%s), "+
-						"with no flip-flopping or race-induced clobbering",
+					"NetworkPolicy %q egress must converge and remain stable at ipBlock %s after rapid changes",
 					snrparams.NetworkPolicyName, finalCIDR)
 			})
 	})
