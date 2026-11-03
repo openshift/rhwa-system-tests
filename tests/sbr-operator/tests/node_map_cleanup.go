@@ -73,7 +73,9 @@ var _ = Describe("SBR Functional - Node map cleanup", Ordered, Serial,
 				test.deleteAndRetainClaim(ctx)
 
 				By("Verifying the node map is absent or empty on the original shared storage")
-				test.expectNodeMapCleared(ctx)
+				Eventually(func(assertion Gomega) {
+					test.expectNodeMapCleared(ctx, assertion)
+				}, sbrparams.NodeMapExecTimeout, sbrparams.DefaultPollInterval).Should(Succeed())
 
 				By("Recreating the StorageBasedRemediationConfig with the name and spec captured in step 1")
 				recreated := buildSBRC(test.config.GetName(), nil)
@@ -98,7 +100,11 @@ var _ = Describe("SBR Functional - Node map cleanup", Ordered, Serial,
 						"Every recreated agent must keep its UID and restart count")
 				}, sbrparams.NodeMapConvergenceDuration, sbrparams.DefaultPollInterval).Should(Succeed())
 				By("Verifying the recreated node map contains only active agent nodes")
-				test.verifyRecreatedNodeMap()
+				Eventually(func(assertion Gomega) {
+					assertion.Expect(test.agentSnapshot(ctx, assertion)).To(Equal(restarts),
+						"Every recreated agent must keep its UID and restart count")
+					test.verifyRecreatedNodeMap(assertion)
+				}, sbrparams.NodeMapExecTimeout, sbrparams.DefaultPollInterval).Should(Succeed())
 				By("Verifying the recreated SBRC reports Ready")
 				test.agentSnapshot(ctx, Default)
 			})
@@ -153,8 +159,8 @@ func nodeMapCleanupPreflight(ctx context.Context) string {
 	return storageClass
 }
 
-func (test *nodeMapCleanupTest) expectNodeMapCleared(ctx context.Context) {
-	test.expectOriginalClaim(ctx, Default)
+func (test *nodeMapCleanupTest) expectNodeMapCleared(ctx context.Context, assertion Gomega) {
+	test.expectOriginalClaim(ctx, assertion)
 	// SBR's O_CREATE lock can recreate an empty file during shutdown, but no
 	// mapping data may survive. Require readable original storage, not an empty mount.
 	output, err := test.observer.ExecCommandWithTimeout([]string{"sh", "-ec", `
@@ -178,7 +184,7 @@ fi
 echo 'Node map absent or empty on the original volume'
 `}, sbrparams.NodeMapExecTimeout)
 	AddReportEntry("node-map-after-deletion", output.String())
-	Expect(err).NotTo(HaveOccurred(), "Node map cleanup failed: %s", output.String())
+	assertion.Expect(err).NotTo(HaveOccurred(), "Node map cleanup failed: %s", output.String())
 }
 
 func (test *nodeMapCleanupTest) readNodeMap() (*blockNodeMap, string, error) {
@@ -241,12 +247,12 @@ func (test *nodeMapCleanupTest) agentSnapshot(ctx context.Context, assertion Gom
 	return restarts
 }
 
-func (test *nodeMapCleanupTest) verifyRecreatedNodeMap() {
+func (test *nodeMapCleanupTest) verifyRecreatedNodeMap(assertion Gomega) {
 	nodeMap, payload, err := test.readNodeMap()
-	Expect(err).NotTo(HaveOccurred(), "The recreated node map must be readable")
-	Expect(nodeMap.Entries).To(HaveLen(len(test.agentNodes)))
+	assertion.Expect(err).NotTo(HaveOccurred(), "The recreated node map must be readable")
+	assertion.Expect(nodeMap.Entries).To(HaveLen(len(test.agentNodes)))
 	for node := range test.agentNodes {
-		Expect(nodeMap.Entries).To(HaveKey(node), "Agent node %s must have a mapping", node)
+		assertion.Expect(nodeMap.Entries).To(HaveKey(node), "Agent node %s must have a mapping", node)
 	}
 	AddReportEntry("node-map-after-recreation", payload, ReportEntryVisibilityFailureOrVerbose)
 }
