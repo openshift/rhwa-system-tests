@@ -8,7 +8,7 @@ on:
       - 'release-\d.\d\d'
 
 jobs:
-  build:
+  vet:
     runs-on: ubuntu-22.04
     env:
       SHELL: /bin/bash
