@@ -13,6 +13,9 @@ const (
 	OperatorMDR = "operator:mdr"
 	// OperatorNMO marks tests for the Node Maintenance Operator.
 	OperatorNMO = "operator:nmo"
+	// OperatorWAO marks tests for the Workload Availability Operator, which installs and
+	// removes the other medik8s operators as operands.
+	OperatorWAO = "operator:wao"
 	// OperatorInterop marks cross-operator interoperability tests.
 	OperatorInterop = "operator:interop"
 

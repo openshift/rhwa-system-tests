@@ -17,6 +17,7 @@ for the person running the test, not for the test itself.
 | Script | Watches | Written for |
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
+| [`wao-watch.sh`](wao-watch.sh) | Per-operand `desiredState`/`phase`/`admissionReady`/retained count from the `WorkloadAvailabilityConfig`, WAO's own conditions, and the Deployments, DaemonSets and pods in the operator namespace | [`rhwa-2040`](../../docs/TESTCASES/rhwa-2040.md) — suits any spec that enables or disables a WAO operand |
 
 ## `snr-watch.sh`
 
@@ -57,6 +58,42 @@ A rebooting node appears in three stages, and the last is the slowest:
 Requires only `oc` logged in and `awk`; it runs on Fedora Linux and macOS alike. Each tick
 is four small reads; raise `-n` to reduce API traffic. `SNR_WATCH_NS` overrides the
 namespace.
+
+## `wao-watch.sh`
+
+```bash
+watch -n 5 -d tools/watch/wao-watch.sh   # Linux, or macOS with `brew install watch`
+tools/watch/wao-watch.sh --loop          # anywhere, no `watch` needed
+tools/watch/wao-watch.sh                 # one snapshot and exit
+```
+
+| Block            | Shows                                                                                   |
+| ---------------- | ----------------------------------------------------------------------------------------- |
+| `operands`       | one row per component of the singleton: `DESIRED`, `PHASE`, `ADMIT` (`admissionReady`), and the number of `retainedResources` |
+| `wao conditions` | WAO's own `Available`, `Progressing` and `Degraded`                                     |
+| `workloads`      | Deployments and DaemonSets in the operator namespace with ready/desired counts          |
+| `pods`           | name, ready, status, age and node for everything in the namespace                       |
+
+`WAO_WATCH_NS` overrides the namespace, `WAO_WATCH_WAC` the configuration name (default
+`cluster`). Requires only `oc` and `awk`.
+
+Enabling an operand moves it `Disabled` → `Progressing` → `Available`; disabling it removes the
+manager Deployment and moves it back. Three things are worth knowing before reading a run as a
+failure:
+
+1. **`nodeHealthCheck` lags the others.** It has two Deployments, the manager and the console
+   plugin, and reports `Available` only when both are ready.
+2. **`Progressing` with every Deployment ready and `ADMIT=false`** is the operand waiting for
+   the service CA controller to inject a webhook CA bundle — `snr`, `nmo` and `nhc` all gate on
+   this. It is not a crash loop.
+3. **`DisableIncomplete` is a normal end state**, not an error: agents, a config or native CRs
+   outlived the manager, and `RETAINED` counts them. `selfNodeRemediation` ends here whenever
+   it has been enabled, because its default `SelfNodeRemediationConfig` and agent DaemonSet
+   survive the disable.
+
+What must *not* change is `workload-availability-operator-controller-manager`, which stays
+`1/1` throughout. If WAO's own manager restarts mid-run, the operand phases are reporting a WAO
+recovery rather than operand health.
 
 ## Adding one
 

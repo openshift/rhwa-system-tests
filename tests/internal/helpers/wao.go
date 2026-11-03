@@ -162,6 +162,40 @@ func WAOComponentPhase(config *unstructured.Unstructured, component string) (str
 	return "", nil
 }
 
+// WAOComponentRetainedResources lists what outlived a disable of one operand: agent DaemonSets,
+// their native configs, and native objects the stopped manager would have reconciled. A non-empty
+// list is why an operand reports DisableIncomplete instead of Disabled.
+func WAOComponentRetainedResources(config *unstructured.Unstructured, component string) ([]string, error) {
+	if config == nil {
+		return nil, fmt.Errorf("no WAO configuration to read operand %q status from", component)
+	}
+
+	statuses, _, err := unstructured.NestedSlice(config.Object, "status", "components")
+	if err != nil {
+		return nil, fmt.Errorf("read WAO operand statuses: %w", err)
+	}
+
+	for _, status := range statuses {
+		statusMap, ok := status.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		if name, _, _ := unstructured.NestedString(statusMap, "name"); name != component {
+			continue
+		}
+
+		retained, _, retainedErr := unstructured.NestedStringSlice(statusMap, "retainedResources")
+		if retainedErr != nil {
+			return nil, fmt.Errorf("read WAO operand %q retained resources: %w", component, retainedErr)
+		}
+
+		return retained, nil
+	}
+
+	return nil, nil
+}
+
 // waoComponentStates maps every named operand to the same desired state.
 func waoComponentStates(enabled bool, components []string) map[string]bool {
 	states := make(map[string]bool, len(components))

@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
@@ -150,6 +151,34 @@ func TestSetWAOComponentsReportsMissingSingleton(t *testing.T) {
 	err := EnableWAOComponents(context.Background(), waoClient(), medik8sparams.WAOComponentNHC)
 	if err == nil {
 		t.Fatal("expected an error when the configuration does not exist")
+	}
+}
+
+func TestWAOComponentRetainedResources(t *testing.T) {
+	retained := "self-node-remediation.medik8s.io/v1alpha1 SelfNodeRemediationConfig ns/self-node-remediation-config"
+	config := waoConfig(nil)
+	config.Object["status"] = map[string]interface{}{"components": []interface{}{
+		map[string]interface{}{
+			"name":              medik8sparams.WAOComponentSNR,
+			"phase":             medik8sparams.WAOPhaseDisableIncomplete,
+			"retainedResources": []interface{}{retained},
+		},
+		map[string]interface{}{"name": medik8sparams.WAOComponentMDR, "phase": medik8sparams.WAOPhaseDisabled},
+	}}
+
+	for component, want := range map[string][]string{
+		medik8sparams.WAOComponentSNR: {retained},
+		medik8sparams.WAOComponentMDR: nil,
+		medik8sparams.WAOComponentNHC: nil,
+	} {
+		got, err := WAOComponentRetainedResources(config, component)
+		if err != nil {
+			t.Fatalf("WAOComponentRetainedResources(%s): %v", component, err)
+		}
+
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("operand %s retained = %v, want %v", component, got, want)
+		}
 	}
 }
 
