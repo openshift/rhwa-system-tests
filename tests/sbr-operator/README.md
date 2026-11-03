@@ -609,3 +609,23 @@ Full test case: [docs/TESTCASES/rhwa-2031.md](../../docs/TESTCASES/rhwa-2031.md)
   later than the victim's last heartbeat; the victim carries the `out-of-service` taint, reboots with
   a changed boot-id and returns Ready; after the CR is deleted it is schedulable with the taint gone
   and its agent pod is Ready again
+
+### 24. Verify Startup Clears the Unused Preflight Slot on Ceph RBD Block Storage ([RHWA-2038](https://issues.redhat.com/browse/RHWA-2038))
+
+Block-mode counterpart of test 20, covering RHWA-1058. Creates a Block-mode SBRC on Ceph RBD,
+waits until the on-device node map lists every agent with a unique ID other than 1, then waits for
+heartbeat slot index 0 (node ID 1, `(nodeID - 1) * 4096`) to be zero-filled through every agent and
+keeps reading it for a minute. Skips if a real node owns node ID 1.
+
+Full test case: [docs/TESTCASES/rhwa-2038.md](../../docs/TESTCASES/rhwa-2038.md)
+
+- **Operators**: SBR v5.8.0
+- **Cluster**: At least two Ready, schedulable workers. SNR agents must be stopped, no unrelated
+  SBRC may exist, and no NHC may reference an SBR template
+- **Storage**: Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by provisioner
+  (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the cluster has none
+- **Environment**: Connected or disconnected. Non-destructive, no fault injection
+- **Standalone**: `ginkgo -v --label-filter="operator:sbr && tier:acceptance" --focus="clears the unassigned preflight slot on a Block device" ./tests/sbr-operator/...`
+- **Pass criteria**: Valid node map with every agent registered and node ID 1 unused; heartbeat
+  slot index 0 is 4096 zero bytes through every agent within 300s and stays that way for one
+  minute; unchanged Ready pods and restart counts. Test SBRC and operands removed
