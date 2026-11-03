@@ -22,6 +22,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+)
+
+const (
+	watchdogOpenedMarker = "WATCHDOG_OPENED"
+	softdogReadyMarker   = "SOFTDOG_READY"
 )
 
 // keepalivePodName returns a valid pod name for the per-node watchdog-keepalive pod.
@@ -58,7 +64,136 @@ func deleteKeepalivePods(podNames []string) {
 	}
 }
 
-const watchdogOpenedMarker = "WATCHDOG_OPENED"
+// ensureHostSoftdog loads softdog on the named node (best-effort) and verifies a watchdog
+// char device exists under the host /dev. Remediations/reboots unload softdog; without this
+// step the RHWA-1184 keepalive exits 1 on "[ -c /dev/watchdog ]" and the precondition fails
+// with an opaque CrashLoop rather than a clear "no usable watchdog" error.
+func ensureHostSoftdog(nodeName string) error {
+	probeName := keepalivePodName("softdog-" + nodeName)
+	deleteKeepalivePods([]string{probeName})
+	probePod, createErr := pod.NewBuilder(
+		APIClient, probeName, medik8sparams.OperatorNs, sbrparams.InjectorImage).
+		DefineOnNode(nodeName).
+		WithHostPid(true).
+		WithPrivilegedFlag().
+		WithRestartPolicy(corev1.RestartPolicyNever).
+		RedefineDefaultCMD([]string{
+			"sh", "-c",
+			"exec nsenter --target 1 --mount -- sh -c " +
+				"\"modprobe softdog >/dev/null 2>&1 || true; " +
+				"if [ -c /dev/watchdog ] || [ -c /dev/watchdog0 ]; then " +
+				"echo " + softdogReadyMarker + "; exit 0; fi; " +
+				"echo SOFTDOG_MISSING; ls -la /dev/watchdog* 2>&1 || true; " +
+				"lsmod | grep -i soft || true; exit 1\"",
+		}).
+		CreateAndWaitUntilRunning(sbrparams.WatchdogKeepaliveTimeout)
+	if createErr != nil {
+		deleteKeepalivePods([]string{probeName})
+
+		return fmt.Errorf("softdog probe pod on %s failed to start: %w\n%s",
+			nodeName, createErr, watchdogKeepaliveDiagnostics(probeName))
+	}
+
+	waitErr := probePod.WaitUntilInStatus(corev1.PodSucceeded, sbrparams.WatchdogKeepaliveTimeout)
+	logs, _ := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).GetLogs(
+		probeName, &corev1.PodLogOptions{}).DoRaw(context.TODO())
+	deleteKeepalivePods([]string{probeName})
+
+	if waitErr != nil {
+		return fmt.Errorf("node %s has no usable /dev/watchdog after modprobe softdog (logs=%q): %w",
+			nodeName, strings.TrimSpace(string(logs)), waitErr)
+	}
+	if !strings.Contains(string(logs), softdogReadyMarker) {
+		return fmt.Errorf("node %s has no usable /dev/watchdog after modprobe softdog (logs=%q)",
+			nodeName, strings.TrimSpace(string(logs)))
+	}
+
+	return nil
+}
+
+// createWatchdogKeepaliveOnNode creates the RHWA-1184 keepalive that holds /dev/watchdog open
+// on nodeName. On any failure it deletes leftovers and returns a diagnostic error.
+func createWatchdogKeepaliveOnNode(nodeName string) (string, error) {
+	if softErr := ensureHostSoftdog(nodeName); softErr != nil {
+		return "", softErr
+	}
+
+	podName := keepalivePodName(nodeName)
+	deleteKeepalivePods([]string{podName})
+	keepalivePod, createErr := pod.NewBuilder(
+		APIClient, podName, medik8sparams.OperatorNs, sbrparams.InjectorImage).
+		DefineOnNode(nodeName).
+		WithHostPid(true).
+		WithPrivilegedFlag().
+		RedefineDefaultCMD([]string{
+			"sh", "-c",
+			"exec nsenter --target 1 --mount -- sh -c " +
+				"\"[ -c /dev/watchdog ] || exit 1; exec 200>/dev/watchdog || exit 1; " +
+				"trap 'printf V >&200 || true' EXIT; " +
+				"trap 'exit 0' TERM INT HUP; " +
+				"echo " + watchdogOpenedMarker + "; " +
+				"while true; do printf . >&200 || exit 1; sleep 3; done\"",
+		}).
+		CreateAndWaitUntilRunning(sbrparams.WatchdogKeepaliveTimeout)
+	if createErr != nil {
+		deleteKeepalivePods([]string{podName})
+
+		return "", fmt.Errorf("keepalive pod %s on %s failed to start: %w\n%s",
+			podName, nodeName, createErr, watchdogKeepaliveDiagnostics(podName))
+	}
+
+	openErr := wait.PollUntilContextTimeout(context.Background(),
+		sbrparams.DefaultPollInterval, sbrparams.WatchdogKeepaliveTimeout, true,
+		func(context.Context) (bool, error) {
+			if err := keepalivePodOpenedWatchdog(podName); err != nil {
+				return false, nil
+			}
+
+			return true, nil
+		})
+	if openErr != nil {
+		diag := watchdogKeepaliveDiagnostics(podName)
+		deleteKeepalivePods([]string{podName})
+
+		return "", fmt.Errorf("keepalive pod %s on %s did not open /dev/watchdog: %w\n%s",
+			podName, nodeName, openErr, diag)
+	}
+
+	GinkgoWriter.Printf("Keepalive %s running on %s (uid=%s)\n",
+		keepalivePod.Definition.Name, nodeName, keepalivePod.Definition.UID)
+
+	return podName, nil
+}
+
+// startWatchdogKeepaliveOnAnyWorker tries every schedulable worker: load softdog if needed,
+// then hold /dev/watchdog open. Fails the spec with a per-node report when none succeed —
+// that is an environment/precondition failure (coverage loss if skipped), not a product Skip.
+func startWatchdogKeepaliveOnAnyWorker(workerNodes []string) (podName, nodeName string) {
+	var failures []string
+
+	for _, candidate := range workerNodes {
+		By(fmt.Sprintf("Trying watchdog keepalive on worker %s", candidate))
+
+		name, err := createWatchdogKeepaliveOnNode(candidate)
+		if err == nil {
+			GinkgoWriter.Printf("Keepalive pod %s confirmed /dev/watchdog open on node %s\n",
+				name, candidate)
+
+			return name, candidate
+		}
+
+		failures = append(failures, fmt.Sprintf("- %s: %v", candidate, err))
+		GinkgoWriter.Printf("Watchdog keepalive unavailable on %s: %v\n", candidate, err)
+	}
+
+	Fail(fmt.Sprintf(
+		"RHWA-1184 precondition failed: no schedulable worker could open and hold /dev/watchdog "+
+			"(tried softdog modprobe on each). This is a cluster/environment failure — the "+
+			"regression cannot run without a usable watchdog device.\nWorkers tried:\n%s",
+		strings.Join(failures, "\n")))
+
+	return "", ""
+}
 
 // keepalivePodOpenedWatchdog returns nil only after the keepalive container confirms it opened the host watchdog.
 func keepalivePodOpenedWatchdog(podName string) error {
@@ -293,8 +428,8 @@ var _ = Describe(
 			rwxStorageClass string
 			targetNodeName  string
 			injectorPodName string
-			keepalivePods   []string // one pod name on targetNodeName during the RHWA-1184 spec
-			workerNodes     []string // node names, shared with the RHWA-1184 regression spec below
+			keepalivePods   []string // set only inside the RHWA-1184 It; never in BeforeAll
+			workerNodes     []string // schedulable workers for RHWA-1184 keepalive selection
 		)
 
 		BeforeAll(func() {
@@ -352,37 +487,14 @@ var _ = Describe(
 
 			injectorPodName = strings.TrimRight(injectorPodName, "-")
 
-			By("Cleaning up any stale detectOnly StorageBasedRemediationConfig from a previous run")
+			By("Cleaning up any stale detectOnly StorageBasedRemediationConfig and its operands from a previous run")
 
-			Eventually(func() error {
-				stale := buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{})
-				deleteErr := APIClient.Delete(context.TODO(), stale)
-				if deleteErr == nil || k8serrors.IsNotFound(deleteErr) {
-					return nil
-				}
-
-				return deleteErr
-			}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-				"Pre-test cleanup of stale SBRC %s failed", sbrparams.SBRCDetectOnlyTestName)
-
-			By("Waiting for stale StorageBasedRemediationConfig to be fully removed before recreating")
-
-			Eventually(func() error {
-				staleCheck := buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{})
-				getErr := APIClient.Get(context.TODO(),
-					types.NamespacedName{Name: sbrparams.SBRCDetectOnlyTestName, Namespace: medik8sparams.OperatorNs},
-					staleCheck)
-				if k8serrors.IsNotFound(getErr) {
-					return nil
-				}
-
-				if getErr != nil {
-					return getErr
-				}
-
-				return fmt.Errorf("SBRC %s still terminating", sbrparams.SBRCDetectOnlyTestName)
-			}, sbrparams.SBRCReadyTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-				"Stale SBRC must be fully gone before recreating")
+			// Wait for the shared-storage PVC (not only the SBRC) before recreate: a Terminating
+			// PVC left by slow CephFS NodeUnstageVolume blocks the next device-init Job and
+			// surfaces as a false agent-DaemonSet BeforeAll timeout.
+			deleteSBRCAndWait(
+				buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{}),
+				sbrparams.SBRCDetectOnlyTestName)
 
 			By("Cleaning up any stale watchdog-keepalive pods from a previous run")
 
@@ -397,41 +509,6 @@ var _ = Describe(
 					"Failed to remove stale keepalive pod %s", podName)
 			}
 
-			By("Creating a watchdog-keepalive pod on the selected worker (RHWA-1184 precondition)")
-
-			podName := keepalivePodName(targetNodeName)
-			keepalivePods = []string{podName}
-			keepalivePod, createErr := pod.NewBuilder(
-				APIClient, podName, medik8sparams.OperatorNs, sbrparams.InjectorImage).
-				DefineOnNode(targetNodeName).
-				WithHostPid(true).
-				WithPrivilegedFlag().
-				RedefineDefaultCMD([]string{
-					"sh", "-c",
-					"exec nsenter --target 1 --mount -- sh -c " +
-						"\"[ -c /dev/watchdog ] || exit 1; exec 200>/dev/watchdog || exit 1; " +
-						"trap 'printf V >&200 || true' EXIT; " +
-						"trap 'exit 0' TERM INT HUP; " +
-						"echo " + watchdogOpenedMarker + "; " +
-						"while true; do printf . >&200 || exit 1; sleep 3; done\"",
-				}).
-				CreateAndWaitUntilRunning(sbrparams.WatchdogKeepaliveTimeout)
-			Expect(createErr).ToNot(HaveOccurred(),
-				func() string {
-					return fmt.Sprintf("Watchdog keepalive pod %s on worker %s must start\n%s",
-						podName, targetNodeName, watchdogKeepaliveDiagnostics(podName))
-				})
-
-			Eventually(func() error {
-				return keepalivePodOpenedWatchdog(podName)
-			}, sbrparams.WatchdogKeepaliveTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-				func() string {
-					return fmt.Sprintf("Watchdog keepalive pod %s must open and hold /dev/watchdog\n%s",
-						podName, watchdogKeepaliveDiagnostics(podName))
-				})
-			GinkgoWriter.Printf("Keepalive pod %s confirmed /dev/watchdog open on node %s\n",
-				keepalivePod.Definition.Name, targetNodeName)
-
 			By("Creating StorageBasedRemediationConfig with detectOnlyMode: Enabled")
 
 			// Minimum sbrTimeoutSeconds (heartbeat = timeout/2) so a peer marks the
@@ -443,7 +520,7 @@ var _ = Describe(
 				"sharedStorageClass": rwxStorageClass,
 				"sbrTimeoutSeconds":  int64(sbrparams.SBRCTimeoutSecondsMin),
 			})
-			createErr = APIClient.Create(context.TODO(), detectOnlySBRC)
+			createErr := APIClient.Create(context.TODO(), detectOnlySBRC)
 			Expect(createErr).ToNot(HaveOccurred(),
 				"StorageBasedRemediationConfig with detectOnlyMode: Enabled must be admitted by the API server")
 
@@ -488,40 +565,22 @@ var _ = Describe(
 				}
 			}
 
-			By("AfterAll: removing detect-only StorageBasedRemediationConfig")
+			By("AfterAll: removing detect-only StorageBasedRemediationConfig and its operands")
 
-			if detectOnlySBRC != nil {
-				if deleteErr := APIClient.Delete(context.TODO(), detectOnlySBRC); deleteErr != nil {
-					if !k8serrors.IsNotFound(deleteErr) {
-						GinkgoT().Logf("Warning: AfterAll cleanup delete %s failed: %v",
-							sbrparams.SBRCDetectOnlyTestName, deleteErr)
-					}
-				} else {
-					Eventually(func() error {
-						getErr := APIClient.Get(context.TODO(),
-							types.NamespacedName{
-								Name:      sbrparams.SBRCDetectOnlyTestName,
-								Namespace: medik8sparams.OperatorNs,
-							},
-							detectOnlySBRC.DeepCopy())
-
-						if k8serrors.IsNotFound(getErr) {
-							return nil
-						}
-
-						if getErr != nil {
-							return getErr
-						}
-
-						return fmt.Errorf("SBRC %s still present after delete", sbrparams.SBRCDetectOnlyTestName)
-					}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed())
-				}
+			// A mid-suite It may already have deleted the CR; still drain leftover PVC/pods so
+			// the next Ordered/random suite cannot recreate on a Terminating claim.
+			sbrcToDelete := detectOnlySBRC
+			if sbrcToDelete == nil {
+				sbrcToDelete = buildSBRC(sbrparams.SBRCDetectOnlyTestName, map[string]interface{}{})
 			}
+
+			deleteSBRCAndWait(sbrcToDelete, sbrparams.SBRCDetectOnlyTestName)
+			detectOnlySBRC = nil
 		})
 
 		// RHWA-1184: SBR agent crashes on startup in detect-only mode when watchdog device is busy.
-		// The keepalive pod created in BeforeAll holds /dev/watchdog open on one worker to simulate the condition.
-		// The 5.0 recurrence of the closed RHWA-1068; see docs/TESTCASES/rhwa-1933.md.
+		// Keepalive is created inside this It (not BeforeAll) so a Skip cannot leave /dev/watchdog
+		// held for sibling 88876. The 5.0 recurrence of RHWA-1068; see docs/TESTCASES/rhwa-1933.md.
 		It("RHWA-1184 regression: agent pods reach Ready despite /dev/watchdog held by another process",
 			reportxml.ID("1933"),
 			Label(
@@ -532,8 +591,17 @@ var _ = Describe(
 				labels.PlatformAny,
 				labels.ComponentDaemonSet,
 			), func() {
-				Expect(keepalivePods).To(HaveLen(1),
-					"RHWA-1184 regression requires a keepalive pod on the selected worker")
+				// First line on purpose (RHWA-2033): product assertions stay skipped on main.
+				// SoftDog/worker selection below is latent until this Skip is removed.
+				// Suite-level Skip in BeforeAll (RHWA-2036) also covers 88876; keep both until
+				// the suite Skip is lifted.
+				Skip("RHWA-2033: Temporarily skipped — flaky test (36.8% pass rate)")
+
+				By("Creating a watchdog-keepalive on a worker that can open /dev/watchdog")
+
+				keepaliveName, keepaliveNode := startWatchdogKeepaliveOnAnyWorker(workerNodes)
+				keepalivePods = []string{keepaliveName}
+				GinkgoWriter.Printf("RHWA-1184 using keepalive on worker %s\n", keepaliveNode)
 
 				DeferCleanup(func() {
 					By("DeferCleanup: deleting watchdog-keepalive pods to release /dev/watchdog")
@@ -875,36 +943,38 @@ var _ = Describe(
 					GinkgoWriter.Printf("Warning: delete injector pod %s: %v\n", injectorPodName, delErr)
 				}
 
-				By("Deleting the StorageBasedRemediationConfig")
+				By("Deleting the StorageBasedRemediationConfig and waiting for its operands to drain")
 
 				liveRef := detectOnlySBRC.DeepCopy()
 				deleteErr := APIClient.Delete(context.TODO(), liveRef)
 				Expect(deleteErr).ToNot(HaveOccurred(),
 					"StorageBasedRemediationConfig %q must be deletable", sbrparams.SBRCDetectOnlyTestName)
 
-				// Nil out so AfterAll does not attempt a second delete.
+				// Nil out so AfterAll does not attempt a second delete of the CR; AfterAll still
+				// drains any leftover PVC/pods via deleteSBRCAndWait.
 				detectOnlySBRC = nil
 
-				By("Verifying agent DaemonSet is garbage-collected after StorageBasedRemediationConfig deletion")
-
-				dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrparams.SBRCDetectOnlyTestName
-
 				Eventually(func() error {
-					_, getErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
-						context.TODO(), dsName, metav1.GetOptions{})
-
+					getErr := APIClient.Get(context.TODO(),
+						types.NamespacedName{
+							Name:      sbrparams.SBRCDetectOnlyTestName,
+							Namespace: medik8sparams.OperatorNs,
+						},
+						liveRef.DeepCopy())
 					if k8serrors.IsNotFound(getErr) {
 						return nil
 					}
 
 					if getErr != nil {
-						return fmt.Errorf("unexpected error checking DaemonSet %s: %w", dsName, getErr)
+						return getErr
 					}
 
-					return fmt.Errorf("DaemonSet %q still exists after StorageBasedRemediationConfig deletion",
-						dsName)
-				}, sbrparams.SBRCDaemonSetGCTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"Agent DaemonSet %q must be garbage-collected after StorageBasedRemediationConfig deletion",
-					dsName)
+					return fmt.Errorf("SBRC %s still present after delete", sbrparams.SBRCDetectOnlyTestName)
+				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+					"StorageBasedRemediationConfig %q must finish deletion", sbrparams.SBRCDetectOnlyTestName)
+
+				By("Verifying agent DaemonSet, pods, Jobs, and shared-storage PVC are gone after deletion")
+
+				waitForSBRCOperandsGone(sbrparams.SBRCDetectOnlyTestName)
 			})
 	})

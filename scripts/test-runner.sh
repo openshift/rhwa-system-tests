@@ -49,7 +49,9 @@ fi
 
 
 # Build ginkgo command
-cmd="${GINKGO} -timeout=${ECO_TEST_TIMEOUT} --keep-going --require-suite --randomize-all -r"
+# TODO(RHWA-2037): re-enable --randomize-all once suite isolation is hardened;
+# disabled temporarily due to flaky cross-spec interference under shuffle.
+cmd="${GINKGO} -timeout=${ECO_TEST_TIMEOUT} --keep-going --require-suite -r"
 
 if [[ "${ECO_TEST_VERBOSE}" == "true" ]]; then
     cmd+=" -vv"

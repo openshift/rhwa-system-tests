@@ -130,6 +130,14 @@ const (
 	// DaemonSet name = SBRAgentDaemonSetPrefix + <sbrcName>.
 	SBRAgentDaemonSetPrefix = "sbr-agent-"
 
+	// SharedStoragePVCSuffix is appended to the SBRC name to form the shared-storage PVC the
+	// controller creates (PVC name = <sbrcName> + SharedStoragePVCSuffix).
+	SharedStoragePVCSuffix = "-shared-storage"
+
+	// SBRCConfigLabelKey is the label key the controller sets on agent DaemonSets, pods, Jobs,
+	// and the shared-storage PVC to tie them to their owning StorageBasedRemediationConfig.
+	SBRCConfigLabelKey = "sbrconfig"
+
 	// SBRCReadyTimeout is the time allowed for the SBRC's agent DaemonSet to have all scheduled
 	// pods reach Ready before a functional test begins. The first SBRC created in a suite pays a
 	// one-time cold-start cost (first CephFS PVC bind plus SBD device-init Job on a freshly
