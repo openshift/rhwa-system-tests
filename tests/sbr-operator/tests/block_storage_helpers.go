@@ -1086,6 +1086,10 @@ func setupBlockModeNHCScenario(sbrcName, nhcName string) *unstructured.Unstructu
 	Expect(APIClient.Create(context.TODO(), sbrc)).To(Succeed(),
 		"StorageBasedRemediationConfig %q must be created", sbrcName)
 
+	DeferCleanup(func() {
+		deleteSBRCAndWait(sbrc, sbrcName)
+	})
+
 	By("Waiting for the Block device-init Job to succeed")
 	waitForBlockInitJobSucceeded(sbrcName, sbrc.GetUID())
 
