@@ -680,6 +680,16 @@ const (
 	// on it. Both sides of the comparison are device-written timestamps, so a slow read of the
 	// device cannot inflate it.
 	BlockHeartbeatStallQuietPeriod = 3 * DefaultHeartbeatInterval
+
+	// SBRCBlockWriteGateTestName is the SBRC name for the Ceph RBD block-mode storage write gate
+	// test, which keeps status.storageValidation.concurrentWriteable false and proves a
+	// StorageBasedRemediation CR is withheld rather than fenced.
+	SBRCBlockWriteGateTestName = "test-sbrc-block-write-gate"
+
+	// FencingWithheldReason is the Warning event reason the remediation reconciler emits on a
+	// StorageBasedRemediation CR when the storage write check has not passed yet, so it declines
+	// to cordon or fence and requeues.
+	FencingWithheldReason = "FencingWithheld"
 )
 
 // AgentProbeForbiddenSubstrings are the fragments of a host process-table scan that must never
