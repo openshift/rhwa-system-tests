@@ -399,23 +399,8 @@ var _ = Describe(
 
 			By("Creating a watchdog-keepalive pod on the selected worker (RHWA-1184 precondition)")
 
-			podName := keepalivePodName(targetNodeName)
+			podName, createErr := startWatchdogKeepalivePod(targetNodeName)
 			keepalivePods = []string{podName}
-			keepalivePod, createErr := pod.NewBuilder(
-				APIClient, podName, medik8sparams.OperatorNs, sbrparams.InjectorImage).
-				DefineOnNode(targetNodeName).
-				WithHostPid(true).
-				WithPrivilegedFlag().
-				RedefineDefaultCMD([]string{
-					"sh", "-c",
-					"exec nsenter --target 1 --mount -- sh -c " +
-						"\"[ -c /dev/watchdog ] || exit 1; exec 200>/dev/watchdog || exit 1; " +
-						"trap 'printf V >&200 || true' EXIT; " +
-						"trap 'exit 0' TERM INT HUP; " +
-						"echo " + watchdogOpenedMarker + "; " +
-						"while true; do printf . >&200 || exit 1; sleep 3; done\"",
-				}).
-				CreateAndWaitUntilRunning(sbrparams.WatchdogKeepaliveTimeout)
 			Expect(createErr).ToNot(HaveOccurred(),
 				func() string {
 					return fmt.Sprintf("Watchdog keepalive pod %s on worker %s must start\n%s",
@@ -430,7 +415,7 @@ var _ = Describe(
 						podName, watchdogKeepaliveDiagnostics(podName))
 				})
 			GinkgoWriter.Printf("Keepalive pod %s confirmed /dev/watchdog open on node %s\n",
-				keepalivePod.Definition.Name, targetNodeName)
+				podName, targetNodeName)
 
 			By("Creating StorageBasedRemediationConfig with detectOnlyMode: Enabled")
 

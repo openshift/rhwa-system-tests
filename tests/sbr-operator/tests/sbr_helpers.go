@@ -1624,6 +1624,31 @@ func fencingProven(nodeName string) (*unstructured.Unstructured, error) {
 		nodeName, sbrparams.FencingSucceededCondition, sbrparams.SucceededCondition)
 }
 
+// startWatchdogKeepalivePod creates the privileged host-PID pod that holds /dev/watchdog open on
+// nodeName and waits for it to reach Running. It returns the pod's name alongside the create
+// error, so a caller can report diagnostics for a pod that never started. Running is not proof the
+// watchdog is held: callers must still wait on keepalivePodOpenedWatchdog.
+func startWatchdogKeepalivePod(nodeName string) (string, error) {
+	podName := keepalivePodName(nodeName)
+	_, createErr := pod.NewBuilder(
+		APIClient, podName, medik8sparams.OperatorNs, sbrparams.InjectorImage).
+		DefineOnNode(nodeName).
+		WithHostPid(true).
+		WithPrivilegedFlag().
+		RedefineDefaultCMD([]string{
+			"sh", "-c",
+			"exec nsenter --target 1 --mount -- sh -c " +
+				"\"[ -c /dev/watchdog ] || exit 1; exec 200>/dev/watchdog || exit 1; " +
+				"trap 'printf V >&200 || true' EXIT; " +
+				"trap 'exit 0' TERM INT HUP; " +
+				"echo " + watchdogOpenedMarker + "; " +
+				"while true; do printf . >&200 || exit 1; sleep 3; done\"",
+		}).
+		CreateAndWaitUntilRunning(sbrparams.WatchdogKeepaliveTimeout)
+
+	return podName, createErr
+}
+
 // conditionTrue reports whether the named status condition on an SBR CR is present and True.
 func conditionTrue(sbrCR *unstructured.Unstructured, condType string) bool {
 	cond := getSBRCRCondition(sbrCR, condType)

@@ -609,3 +609,34 @@ Full test case: [docs/TESTCASES/rhwa-2031.md](../../docs/TESTCASES/rhwa-2031.md)
   later than the victim's last heartbeat; the victim carries the `out-of-service` taint, reboots with
   a changed boot-id and returns Ready; after the CR is deleted it is schedulable with the taint gone
   and its agent pod is Ready again
+
+### 24. Verify Fencing Is Withheld While the Storage Write Check Has Not Passed on Ceph RBD Block Storage ([RHWA-2039](https://issues.redhat.com/browse/RHWA-2039))
+
+Before a peer agent cordons or fences, the remediation reconciler checks
+`status.storageValidation.concurrentWriteable` on its SBRC, which the operator only sets once
+`min(2, desired)` agents are Ready. Every other Block-mode spec runs with that gate open. This one
+keeps it closed and checks that a remediation CR is withheld.
+
+A keepalive pod holds `/dev/watchdog` open on every Ready worker except one before the SBRC exists,
+cordoned workers included, so those agents fail preflight and only one agent is Ready. The spec then
+creates a `StorageBasedRemediation` CR for a blocked worker. The reconciler must emit a
+`FencingWithheld` Warning event on the CR, and for 90s the victim must stay uncordoned and untainted,
+the CR must not start fencing, and no fence message may appear on the device. The CR is deleted before
+the keepalive pods in teardown, because once they go the gate opens.
+
+Full test case: [docs/TESTCASES/rhwa-2039.md](../../docs/TESTCASES/rhwa-2039.md)
+
+- **Operators**: SBR v5.8.0 (no NHC — the spec creates the remediation CR itself)
+- **Cluster**: Multi-node, at least two schedulable workers, one of them hosting no SBR controller pod
+- **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by provisioner
+  (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the cluster has none
+- **Environment**: Connected or disconnected (`SBR_INJECTOR_IMAGE` for the keepalive image on
+  disconnected). Non-destructive, but SBR agents on all but one worker cannot start while it runs.
+  Self Node Remediation must not be running. Skips when a `NodeHealthCheck` already remediates
+  through the SBR template
+- **Standalone**: `ginkgo -v --label-filter="operator:sbr && component:remediation" --focus="storage write check has not passed in Block mode" ./tests/sbr-operator/...`
+- **Pass criteria**: before the CR exists the agent DaemonSet has at least 2 desired and exactly 1
+  Ready and `concurrentWriteable` is not true; a `FencingWithheld` Warning event naming the victim
+  appears on the CR within 3m; for 90s the gate stays closed, the victim stays schedulable with no
+  `out-of-service` taint, the CR never reports `FencingInProgress` or `FencingSucceeded` True, and
+  every fence slot carries `FENCE_REASON_NONE`
