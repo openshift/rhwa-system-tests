@@ -157,24 +157,24 @@ var _ = Describe(
 func waitForSNRAgentDaemonSetAvailable() {
 	GinkgoHelper()
 
-	Eventually(func(g Gomega) {
+	Eventually(func(assertion Gomega) {
 		agentDS := &appsv1.DaemonSet{}
-		g.Expect(APIClient.Get(context.Background(), client.ObjectKey{
+		assertion.Expect(APIClient.Get(context.Background(), client.ObjectKey{
 			Name: snrparams.AgentDaemonSetName, Namespace: medik8sparams.OperatorNs,
 		}, agentDS)).To(Succeed(), "Failed to get SNR agent DaemonSet %q", snrparams.AgentDaemonSetName)
 		desired := agentDS.Status.DesiredNumberScheduled
-		g.Expect(desired).To(BeNumerically(">", 0),
+		assertion.Expect(desired).To(BeNumerically(">", 0),
 			"SNR agent DaemonSet %q has no desired pods", snrparams.AgentDaemonSetName)
-		g.Expect(agentDS.Status.ObservedGeneration).To(Equal(agentDS.Generation),
+		assertion.Expect(agentDS.Status.ObservedGeneration).To(Equal(agentDS.Generation),
 			"SNR agent DaemonSet %q has not observed generation %d (observed %d)",
 			snrparams.AgentDaemonSetName, agentDS.Generation, agentDS.Status.ObservedGeneration)
-		g.Expect(agentDS.Status.UpdatedNumberScheduled).To(Equal(desired),
+		assertion.Expect(agentDS.Status.UpdatedNumberScheduled).To(Equal(desired),
 			"SNR agent DaemonSet %q UpdatedNumberScheduled=%d, want %d",
 			snrparams.AgentDaemonSetName, agentDS.Status.UpdatedNumberScheduled, desired)
-		g.Expect(agentDS.Status.NumberReady).To(Equal(desired),
+		assertion.Expect(agentDS.Status.NumberReady).To(Equal(desired),
 			"SNR agent DaemonSet %q NumberReady=%d, want %d",
 			snrparams.AgentDaemonSetName, agentDS.Status.NumberReady, desired)
-		g.Expect(agentDS.Status.NumberAvailable).To(Equal(desired),
+		assertion.Expect(agentDS.Status.NumberAvailable).To(Equal(desired),
 			"SNR agent DaemonSet %q NumberAvailable=%d, want %d",
 			snrparams.AgentDaemonSetName, agentDS.Status.NumberAvailable, desired)
 	}, medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
