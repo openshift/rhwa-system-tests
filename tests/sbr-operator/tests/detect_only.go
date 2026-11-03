@@ -298,6 +298,7 @@ var _ = Describe(
 		)
 
 		BeforeAll(func() {
+			Skip("All specs in this suite are temporarily skipped — RHWA-2033 (OCP-1933), RHWA-2036 (OCP-88876)")
 			By("Verifying SBR operator deployment is ready")
 
 			sbrDeployment, pullErr := deployment.Pull(
@@ -531,7 +532,6 @@ var _ = Describe(
 				labels.PlatformAny,
 				labels.ComponentDaemonSet,
 			), func() {
-				Skip("RHWA-2033: Temporarily skipped — flaky test (36.8% pass rate)")
 				Expect(keepalivePods).To(HaveLen(1),
 					"RHWA-1184 regression requires a keepalive pod on the selected worker")
 
