@@ -87,7 +87,7 @@ var _ = Describe(
 
 				By("Waiting for the SNR agent DaemonSet to be fully available")
 
-				waitForSNRAgentDaemonSetAvailable()
+				desiredAgentPods := waitForSNRAgentDaemonSetAvailable()
 
 				By("Running oc adm must-gather")
 
@@ -139,30 +139,35 @@ var _ = Describe(
 
 				// Match by stable name prefixes under pods/. Exact pod name suffixes churn when
 				// the DaemonSet rolls during must-gather (common under --randomize-all when
-				// sibling specs create SelfNodeRemediation CRs).
+				// sibling specs create SelfNodeRemediation CRs). Require at least one controller
+				// and agent coverage for every desired agent slot (not just a single agent).
 				Expect(mustgather.HasMatchingFile(collectedFiles,
 					"/pods/"+snrparams.OperatorDeploymentName+"-")).To(BeTrue(),
 					"must-gather should contain data for an SNR controller pod (%s-*)",
 					snrparams.OperatorDeploymentName)
-				Expect(mustgather.HasMatchingFile(collectedFiles,
-					"/pods/"+snrparams.AgentDaemonSetName+"-")).To(BeTrue(),
-					"must-gather should contain data for an SNR agent DaemonSet pod (%s-*)",
-					snrparams.AgentDaemonSetName)
+				collectedAgentPods := countCollectedPodsWithPrefix(
+					collectedFiles, snrparams.AgentDaemonSetName+"-")
+				Expect(collectedAgentPods).To(BeNumerically(">=", desiredAgentPods),
+					"must-gather should contain data for every SNR agent DaemonSet pod (%s-*); "+
+						"collected %d unique agent pod dirs, want >= %d",
+					snrparams.AgentDaemonSetName, collectedAgentPods, desiredAgentPods)
 			})
 	})
 
 // waitForSNRAgentDaemonSetAvailable waits until the SNR agent DaemonSet has every
 // desired pod ready and updated, so must-gather is less likely to race mid-rollout
-// pods (ContainerCreating / disappearing names).
-func waitForSNRAgentDaemonSetAvailable() {
+// pods (ContainerCreating / disappearing names). Returns DesiredNumberScheduled for
+// archive coverage assertions.
+func waitForSNRAgentDaemonSetAvailable() int32 {
 	GinkgoHelper()
 
+	var desired int32
 	Eventually(func(assertion Gomega) {
 		agentDS := &appsv1.DaemonSet{}
 		assertion.Expect(APIClient.Get(context.Background(), client.ObjectKey{
 			Name: snrparams.AgentDaemonSetName, Namespace: medik8sparams.OperatorNs,
 		}, agentDS)).To(Succeed(), "Failed to get SNR agent DaemonSet %q", snrparams.AgentDaemonSetName)
-		desired := agentDS.Status.DesiredNumberScheduled
+		desired = agentDS.Status.DesiredNumberScheduled
 		assertion.Expect(desired).To(BeNumerically(">", 0),
 			"SNR agent DaemonSet %q has no desired pods", snrparams.AgentDaemonSetName)
 		assertion.Expect(agentDS.Status.ObservedGeneration).To(Equal(agentDS.Generation),
@@ -179,4 +184,32 @@ func waitForSNRAgentDaemonSetAvailable() {
 			snrparams.AgentDaemonSetName, agentDS.Status.NumberAvailable, desired)
 	}, medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
 		"SNR agent DaemonSet %q did not become fully available", snrparams.AgentDaemonSetName)
+
+	return desired
+}
+
+// countCollectedPodsWithPrefix returns how many unique pod directories under /pods/<prefix>
+// appear in the must-gather archive. Matching is case-insensitive to mirror HasMatchingFile.
+func countCollectedPodsWithPrefix(files []string, podNamePrefix string) int {
+	marker := "/pods/" + strings.ToLower(podNamePrefix)
+	seen := make(map[string]struct{})
+	for _, file := range files {
+		lower := strings.ToLower(file)
+		idx := strings.Index(lower, marker)
+		if idx < 0 {
+			continue
+		}
+
+		rest := file[idx+len("/pods/"):]
+		name := rest
+		if slash := strings.Index(rest, "/"); slash >= 0 {
+			name = rest[:slash]
+		}
+
+		if strings.HasPrefix(strings.ToLower(name), strings.ToLower(podNamePrefix)) {
+			seen[name] = struct{}{}
+		}
+	}
+
+	return len(seen)
 }

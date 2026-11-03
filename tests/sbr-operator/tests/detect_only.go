@@ -76,6 +76,7 @@ func ensureHostSoftdog(nodeName string) error {
 		DefineOnNode(nodeName).
 		WithHostPid(true).
 		WithPrivilegedFlag().
+		WithRestartPolicy(corev1.RestartPolicyNever).
 		RedefineDefaultCMD([]string{
 			"sh", "-c",
 			"exec nsenter --target 1 --mount -- sh -c " +

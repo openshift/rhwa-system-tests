@@ -1636,6 +1636,34 @@ func conditionTrue(sbrCR *unstructured.Unstructured, condType string) bool {
 	return status == string(corev1.ConditionTrue)
 }
 
+// deleteSBRCLabeledJobs best-effort deletes Jobs labeled for the named SBRC. The controller
+// may leave failed cleanup Jobs behind with no TTL; those block waitForSBRCOperandsGone forever
+// even when DS/PVC/pods are already gone.
+func deleteSBRCLabeledJobs(sbrcName string) {
+	ctx := context.TODO()
+	selector := metav1.ListOptions{LabelSelector: sbrparams.SBRCConfigLabelKey + "=" + sbrcName}
+	jobs, listErr := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(ctx, selector)
+	if listErr != nil {
+		GinkgoWriter.Printf("Warning: list Jobs for SBRC %s: %v\n", sbrcName, listErr)
+
+		return
+	}
+
+	background := metav1.DeletePropagationBackground
+	for idx := range jobs.Items {
+		job := &jobs.Items[idx]
+		jobUID := job.UID
+		delErr := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).Delete(ctx, job.Name,
+			metav1.DeleteOptions{
+				Preconditions:     &metav1.Preconditions{UID: &jobUID},
+				PropagationPolicy: &background,
+			})
+		if delErr != nil && !k8serrors.IsNotFound(delErr) {
+			GinkgoWriter.Printf("Warning: delete Job %s for SBRC %s: %v\n", job.Name, sbrcName, delErr)
+		}
+	}
+}
+
 // waitForSBRCOperandsGone blocks until every operand of the named SBRC is gone: agent DaemonSet,
 // pods and Jobs labeled with the SBRC, and the shared-storage PVC (by label and by the
 // controller's fixed name). Call this after the SBRC itself is NotFound and before recreating
@@ -1645,6 +1673,7 @@ func waitForSBRCOperandsGone(sbrcName string) {
 	dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrcName
 	pvcName := sbrcName + sbrparams.SharedStoragePVCSuffix
 	selector := metav1.ListOptions{LabelSelector: sbrparams.SBRCConfigLabelKey + "=" + sbrcName}
+	deleteSBRCLabeledJobs(sbrcName)
 
 	Eventually(func() error {
 		return sbrcOperandsRemaining(dsName, pvcName, selector)
