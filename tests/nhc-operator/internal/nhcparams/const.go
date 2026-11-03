@@ -3,6 +3,15 @@ package nhcparams
 import "time"
 
 const (
+	// ManualHealthTimeout bounds each controller transition in manual-health coverage.
+	ManualHealthTimeout = 3 * time.Minute
+
+	// ManualHealthHoldDuration confirms recovery alone does not release an indefinite delay.
+	ManualHealthHoldDuration = 30 * time.Second
+
+	// ManualHealthCleanupTimeout bounds restoration of test-owned resources and Node fields.
+	ManualHealthCleanupTimeout = 5 * time.Minute
+
 	// Label is the operator name used in the suite-level Labels array.
 	Label = "nhc"
 	// DefaultPollInterval is the polling interval used with Eventually/Consistently calls.
