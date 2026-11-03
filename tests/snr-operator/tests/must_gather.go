@@ -13,7 +13,6 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/infrastructure"
-	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
 	"github.com/medik8s/system-tests/tests/internal/labels"
@@ -22,7 +21,9 @@ import (
 	"github.com/medik8s/system-tests/tests/internal/mustgather"
 	"github.com/medik8s/system-tests/tests/snr-operator/internal/snrparams"
 
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var _ = Describe(
@@ -84,7 +85,9 @@ var _ = Describe(
 					nodeNames = append(nodeNames, nodeList.Items[i].Name)
 				}
 
-				snrPodNames := collectSNRPodNames()
+				By("Waiting for the SNR agent DaemonSet to be fully available")
+
+				waitForSNRAgentDaemonSetAvailable()
 
 				By("Running oc adm must-gather")
 
@@ -134,38 +137,46 @@ var _ = Describe(
 
 				By("Validating SNR controller and agent pod data is collected")
 
-				for _, podName := range snrPodNames {
-					Expect(mustgather.HasMatchingFile(collectedFiles, podName)).To(BeTrue(),
-						"must-gather should contain data for SNR pod %s", podName)
-				}
-
-				GinkgoWriter.Printf("SNR pod data collected: %d/%d\n", len(snrPodNames), len(snrPodNames))
+				// Match by stable name prefixes under pods/. Exact pod name suffixes churn when
+				// the DaemonSet rolls during must-gather (common under --randomize-all when
+				// sibling specs create SelfNodeRemediation CRs).
+				Expect(mustgather.HasMatchingFile(collectedFiles,
+					"/pods/"+snrparams.OperatorDeploymentName+"-")).To(BeTrue(),
+					"must-gather should contain data for an SNR controller pod (%s-*)",
+					snrparams.OperatorDeploymentName)
+				Expect(mustgather.HasMatchingFile(collectedFiles,
+					"/pods/"+snrparams.AgentDaemonSetName+"-")).To(BeTrue(),
+					"must-gather should contain data for an SNR agent DaemonSet pod (%s-*)",
+					snrparams.AgentDaemonSetName)
 			})
 	})
 
-// collectSNRPodNames returns the names of the SNR controller-manager and agent DaemonSet pods
-// that must-gather is expected to collect data for.
-func collectSNRPodNames() []string {
-	var podNames []string
+// waitForSNRAgentDaemonSetAvailable waits until the SNR agent DaemonSet has every
+// desired pod ready and updated, so must-gather is less likely to race mid-rollout
+// pods (ContainerCreating / disappearing names).
+func waitForSNRAgentDaemonSetAvailable() {
+	GinkgoHelper()
 
-	ctrlPods, ctrlErr := pod.List(APIClient, medik8sparams.OperatorNs, metav1.ListOptions{
-		LabelSelector: snrparams.OperatorControllerPodLabelSelector,
-	})
-	Expect(ctrlErr).ToNot(HaveOccurred(), "Failed to list SNR controller pods")
-	Expect(ctrlPods).ToNot(BeEmpty(), "No SNR controller pods found")
-	dsPods, dsErr := pod.List(APIClient, medik8sparams.OperatorNs, metav1.ListOptions{
-		LabelSelector: snrparams.DaemonSetPodLabelSelector,
-	})
-	Expect(dsErr).ToNot(HaveOccurred(), "Failed to list SNR DaemonSet pods")
-	Expect(dsPods).ToNot(BeEmpty(), "No SNR DaemonSet pods found")
-
-	for _, p := range ctrlPods {
-		podNames = append(podNames, p.Object.Name)
-	}
-
-	for _, p := range dsPods {
-		podNames = append(podNames, p.Object.Name)
-	}
-
-	return podNames
+	Eventually(func(g Gomega) {
+		agentDS := &appsv1.DaemonSet{}
+		g.Expect(APIClient.Get(context.Background(), client.ObjectKey{
+			Name: snrparams.AgentDaemonSetName, Namespace: medik8sparams.OperatorNs,
+		}, agentDS)).To(Succeed(), "Failed to get SNR agent DaemonSet %q", snrparams.AgentDaemonSetName)
+		desired := agentDS.Status.DesiredNumberScheduled
+		g.Expect(desired).To(BeNumerically(">", 0),
+			"SNR agent DaemonSet %q has no desired pods", snrparams.AgentDaemonSetName)
+		g.Expect(agentDS.Status.ObservedGeneration).To(Equal(agentDS.Generation),
+			"SNR agent DaemonSet %q has not observed generation %d (observed %d)",
+			snrparams.AgentDaemonSetName, agentDS.Generation, agentDS.Status.ObservedGeneration)
+		g.Expect(agentDS.Status.UpdatedNumberScheduled).To(Equal(desired),
+			"SNR agent DaemonSet %q UpdatedNumberScheduled=%d, want %d",
+			snrparams.AgentDaemonSetName, agentDS.Status.UpdatedNumberScheduled, desired)
+		g.Expect(agentDS.Status.NumberReady).To(Equal(desired),
+			"SNR agent DaemonSet %q NumberReady=%d, want %d",
+			snrparams.AgentDaemonSetName, agentDS.Status.NumberReady, desired)
+		g.Expect(agentDS.Status.NumberAvailable).To(Equal(desired),
+			"SNR agent DaemonSet %q NumberAvailable=%d, want %d",
+			snrparams.AgentDaemonSetName, agentDS.Status.NumberAvailable, desired)
+	}, medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
+		"SNR agent DaemonSet %q did not become fully available", snrparams.AgentDaemonSetName)
 }
