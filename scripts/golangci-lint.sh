@@ -4,7 +4,15 @@ set -e
 
 . "$(dirname "$0")"/common.sh
 
-GOLANGCI_LINT_VERSION="2.13.2"
+# 2.15.0 is the first release whose go/packages can read the export data Go 1.27.2 writes.
+# Older pins fail every package with "export data version 5 is greater than maximum supported
+# version 4" on a 1.27.2 toolchain.
+GOLANGCI_LINT_VERSION="2.15.0"
+
+# GOLANGCI_LINT_BIN is the executable every function below uses. It starts as the one on $PATH and
+# becomes the absolute path of the binary this script installs, so an unrelated golangci-lint
+# earlier on $PATH cannot shadow the pinned version and run the lint with the wrong linter set.
+GOLANGCI_LINT_BIN="golangci-lint"
 
 # IsGoLangCiLintInstalled is used to check whether golangci-lint executable is on the $PATH.
 function IsGolangCiLintInstalled() {
@@ -27,7 +35,7 @@ function IsGolangCiLintCorrectVersion() {
 	requiredVersion="${1}"
 
 	local installedVersion
-	installedVersion="$(golangci-lint version 2> /dev/null | awk '{ print $4 }')"
+	installedVersion="$("${GOLANGCI_LINT_BIN}" version 2> /dev/null | awk '{ print $4 }')"
 	echo "Checking if installed golang version matches requirement"
 
 	if [[ "${installedVersion}" == "${requiredVersion}" ]]; then
@@ -45,8 +53,14 @@ function DownloadGolangCiLint() {
 	local versionNumber
 	versionNumber="${1}"
 
+	local installDir
+	installDir="$(go env GOPATH)/bin"
+
 	echo "installing golangci-lint version ${versionNumber}"
-	if curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/main/install.sh | sh -s -- -b $(go env GOPATH)/bin v${versionNumber}; then
+	if curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/main/install.sh | sh -s -- -b "${installDir}" v${versionNumber}; then
+		# Call the binary we just installed, not whichever one $PATH resolves first.
+		GOLANGCI_LINT_BIN="${installDir}/golangci-lint"
+
 		return 0
 	fi
 
@@ -56,9 +70,9 @@ function DownloadGolangCiLint() {
 # RunGolangCiLint is used to execute the requested golangci-lint command
 function RunGolangCiLint() {
 
-	echo "Running golangci-lint"
+	echo "Running golangci-lint (${GOLANGCI_LINT_BIN})"
 
-	if golangci-lint "$@"; then
+	if "${GOLANGCI_LINT_BIN}" "$@"; then
 		return 0;
 	fi
 
