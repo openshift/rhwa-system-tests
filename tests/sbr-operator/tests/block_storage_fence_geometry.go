@@ -39,7 +39,6 @@ var _ = Describe(
 
 			By("Clearing residual Ceph OSD blocklist entries from prior tests")
 			clearCephOSDBlocklist()
-
 			testSBRC = setupFenceGeometrySBRC()
 			victimNodeName, victimNodeID, observerPodName = selectHighestNodeIDVictim()
 		})
