@@ -184,6 +184,13 @@ The SBR test suite is organized in the `/tests/sbr-operator/tests/` directory wi
 - Tests multi-instance SBRC support
 - Tests proper cleanup on deletion
 **Expected**: Complete lifecycle operations succeed
+
+The separate [node-map cleanup regression](../../tests/sbr-operator/tests/node_map_cleanup.go)
+(`RHWA-1929`, design [PR #63](https://github.com/openshift/rhwa-system-tests/pull/63))
+checks deletion of the original filesystem node map and same-name recreation on
+the same PVC. OCP-88734 does not make those storage-identity or restart-stability
+assertions. The slot-1 ghost-heartbeat issue, RHWA-1058, remains out of scope.
+
 **Storage Class**: 
 - **Auto-discovered RWX**: CephFS-based (searches for provisioner containing "cephfs")
 - **Override**: Set `SBR_STORAGE_CLASS` env var
