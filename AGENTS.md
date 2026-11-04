@@ -10,6 +10,17 @@ See [docs/TESTCASES/AGENTS.md](docs/TESTCASES/AGENTS.md) for the requirements an
 
 ## Project Conventions for Agents
 
+- **WAO work lands on the `wao` branch, not `main`.** The
+  [workload-availability-operator](https://github.com/medik8s/workload-availability-operator)
+  consolidation — specs under `tests/wao-operator/`, the `helpers`/`medik8sparams`
+  WAO code, and the precondition changes that enable an operand — is developed
+  only on the `wao` branch, which was forked from `main` and will be merged back
+  once the single-operator layout is the one shipped. Base a WAO branch on `wao`
+  and open its PR against `wao`. Everything else still targets `main`. Keep the
+  fork narrow: a fix that is not about WAO goes to `main` so the eventual merge
+  stays reviewable. See
+  [docs/TESTCASES/AGENTS.md](docs/TESTCASES/AGENTS.md#operands-under-the-workload-availability-operator)
+  for what the migration asks of a test.
 - **Assert system behavior.** Test assertions must check externally observable system behavior. Use custom resource conditions, status fields, Kubernetes events, node state, reboot results, or workload operation. Do not use log messages or log parsing to determine whether a test passes or fails. Use a log assertion only when no other check can establish the required behavior. Document why no alternative exists in the test case document.
 - **Keep the repository root clean.** Do not add new files to the root unless strictly required by a tool or standard (e.g. `go.mod`, `Makefile`, `LICENSE`). Documentation, guidelines, and agent-specific files belong in subdirectories.
 - **No agent-proprietary directories or files.** Do not create tool-specific directories (e.g. `.claude/`, `.cursor/`) or files unless the tool itself requires it and there is no neutral alternative. Use `.agents/` for cross-agent content.
