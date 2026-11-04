@@ -395,9 +395,6 @@ var _ = Describe(
 
 				By("Waiting for NHC to delete the StorageBasedRemediation CR")
 
-				// Same ordering as fence_geometry awaitVictimAgentReady: while the CR exists the
-				// out-of-service taint stays, which evicts the Ceph RBD CSI node plugin. Waiting for
-				// the agent before that leaves it stuck in ContainerCreating (FailedMount).
 				Eventually(func() error {
 					if witnessErr := witnessGuard(); witnessErr != nil {
 						return witnessErr
