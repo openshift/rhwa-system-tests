@@ -171,6 +171,12 @@ each is an **operand** that WAO installs when it is enabled. See
 for the design, and the [wao-testing wiki](https://github.com/medik8s/.github/wiki/wao-testing)
 for current test notes.
 
+**This work happens on the `wao` branch only.** It was forked from `main` and is
+merged back once the single-operator layout ships. Branch from `wao` and open
+the PR against `wao` for anything in this section; a change that is not about
+WAO still goes to `main`. See
+[Project Conventions for Agents](../../AGENTS.md#project-conventions-for-agents).
+
 **The goal is to keep the tests as written.** The behaviour under test does not
 change: the operand is the same controller running in the same namespace
 (`medik8sparams.OperatorNs`, `openshift-workload-availability`), reconciling the
