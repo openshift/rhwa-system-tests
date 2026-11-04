@@ -49,7 +49,7 @@ and destructive remediation (kubelet stop, node reboot via NHC detection).
   3+ master nodes for etcd quorum safety
 - For the minPeersForRemediation test (20): 2+ Ready worker nodes; no NHC, SSH
   or kubelet-stop command needed
-- For the control plane isolation test (21): 3+ master nodes. The test
+- For the control plane isolation test (21): 3+ control-plane nodes. The test
   neutralizes any NHC that selects control plane nodes for its duration and
   restores the original selectors after. NHC itself is not required
 
@@ -408,10 +408,10 @@ the pre-existing API-error path. Skips when an NHC selects control plane nodes.
 Full specification: [`../../docs/TESTCASES/rhwa-1927.md`](../../docs/TESTCASES/rhwa-1927.md).
 
 - **Operators**: SNR v5.8.0 (NHC not required)
-- **Cluster**: Multi-node with 3+ Ready masters (etcd quorum safety)
+- **Cluster**: Multi-node with 3+ Ready control-plane nodes (etcd quorum safety)
 - **Storage**: None
 - **Environment**: Connected or disconnected; `SNR_INJECTOR_IMAGE` must be mirrored
   when disconnected (falls back to `SBR_INJECTOR_IMAGE`). **Destructive** — one
   control plane node is isolated and hard-reboots itself
 - **Standalone**: `SNR_INJECTOR_IMAGE=docker.io/nicolaka/netshoot:latest ginkgo --label-filter="snr" --focus="isolated from its SNR peers" ./tests/snr-operator/...` (without an injector image carrying `nsenter`+`pgrep`+`iptables` the test skips at the probe)
-- **Pass criteria**: Victim stays Ready for 45s after the block (proving `/readyz` still passes); boot ID changes within `CPIsolationRebootSLA` (default 12m, override with `SNR_CP_ISOLATION_REBOOT_SLA`; RHWA-1384 targets ~2m detection, the rest is platform reboot time) while creation timestamp is unchanged; no `SelfNodeRemediation` CR is created; peer masters keep their boot IDs; node returns Ready and the DaemonSet recovers. The agent isolation-sequence log (peer consultation, detection, reboot trigger) is asserted best-effort — captured when the reboot does not replace the agent container first, otherwise recorded for triage
+- **Pass criteria**: Victim stays Ready for 45s after the block (proving `/readyz` still passes); boot ID changes within `CPIsolationRebootSLA` (default 12m, override with `SNR_CP_ISOLATION_REBOOT_SLA`; RHWA-1384 targets ~2m detection, the rest is platform reboot time) while creation timestamp is unchanged; no `SelfNodeRemediation` CR is created; peer control-plane nodes keep their boot IDs; node returns Ready and the DaemonSet recovers. The agent isolation-sequence log (peer consultation, detection, reboot trigger) is asserted best-effort — captured when the reboot does not replace the agent container first, otherwise recorded for triage

@@ -38,19 +38,19 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 	func() {
 		var (
 			ctx              context.Context
-			targetMasterName string
-			peerMasterNames  []string
+			targetCPNodeName string
+			peerCPNodeNames  []string
 			peerHealthPort   int
 		)
 
 		BeforeAll(func() {
 			ctx = context.Background()
 
-			By("Verifying at least 3 Ready master nodes for etcd quorum safety")
-			masterCount, err := countReadyMasterNodes(ctx, APIClient)
+			By("Verifying at least 3 Ready control-plane nodes for etcd quorum safety")
+			cpNodeCount, err := countReadyMasterNodes(ctx, APIClient)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(masterCount).To(BeNumerically(">=", snrparams.MinReadyMasterNodes),
-				"Control plane isolation requires at least %d Ready master nodes for etcd quorum",
+			Expect(cpNodeCount).To(BeNumerically(">=", snrparams.MinReadyMasterNodes),
+				"Control plane isolation requires at least %d Ready control-plane nodes for etcd quorum",
 				snrparams.MinReadyMasterNodes)
 
 			By("Neutralizing any NodeHealthCheck that selects control plane nodes")
@@ -61,45 +61,45 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 			Expect(err).ToNot(HaveOccurred(),
 				"Must neutralize NodeHealthCheck CRs that select control plane nodes")
 
-			By("Selecting target master node")
-			masterNode, err := selectMasterNode(ctx, APIClient)
-			Expect(err).ToNot(HaveOccurred(), "Failed to select master node")
-			targetMasterName = masterNode.Name
-			GinkgoWriter.Printf("Target master node: %s\n", targetMasterName)
+			By("Selecting target control-plane node")
+			cpNode, err := selectMasterNode(ctx, APIClient)
+			Expect(err).ToNot(HaveOccurred(), "Failed to select control-plane node")
+			targetCPNodeName = cpNode.Name
+			GinkgoWriter.Printf("Target control-plane node: %s\n", targetCPNodeName)
 
-			By("Recording the peer master nodes")
-			masterList, err := listMasterNodes(ctx, APIClient)
+			By("Recording the peer control-plane nodes")
+			cpNodeList, err := listMasterNodes(ctx, APIClient)
 			Expect(err).ToNot(HaveOccurred())
 
-			for idx := range masterList.Items {
-				if masterList.Items[idx].Name != targetMasterName {
-					peerMasterNames = append(peerMasterNames, masterList.Items[idx].Name)
+			for idx := range cpNodeList.Items {
+				if cpNodeList.Items[idx].Name != targetCPNodeName {
+					peerCPNodeNames = append(peerCPNodeNames, cpNodeList.Items[idx].Name)
 				}
 			}
 
-			Expect(peerMasterNames).ToNot(BeEmpty(), "At least one peer master node must exist")
+			Expect(peerCPNodeNames).ToNot(BeEmpty(), "At least one peer control-plane node must exist")
 
 			By("Verifying SNR DaemonSet pods are running on every control plane node")
 			Eventually(verifyDSPodsRunning,
 				medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
 				"SNR DaemonSet pods must be running before the partition")
-			_, err = agentPodOnNode(targetMasterName)
+			_, err = agentPodOnNode(targetCPNodeName)
 			Expect(err).ToNot(HaveOccurred(),
-				"Target master %s must host a running SNR agent pod", targetMasterName)
+				"Target control-plane node %s must host a running SNR agent pod", targetCPNodeName)
 
 			By("Reading the SNR peer health port from the SelfNodeRemediationConfig")
 			peerHealthPort = peerHealthPortFromSNRC(ctx)
 			GinkgoWriter.Printf("SNR peer health port: %d\n", peerHealthPort)
 
 			By("Skipping when iptables is not usable in the victim agent's network namespace")
-			usable, probeLog := agentNamespaceUsable(targetMasterName)
+			usable, probeLog := agentNamespaceUsable(targetCPNodeName)
 			if !usable {
 				Skip(fmt.Sprintf("Cannot run iptables in the SNR agent namespace on node %q: %s",
-					targetMasterName, probeLog))
+					targetCPNodeName, probeLog))
 			}
 
-			By("Pre-cleaning any stale SNR CR for the target master")
-			cleanupSNRCR(targetMasterName)
+			By("Pre-cleaning any stale SNR CR for the target control-plane node")
+			cleanupSNRCR(targetCPNodeName)
 		})
 
 		BeforeEach(func() {
@@ -113,22 +113,22 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 
 		JustAfterEach(func() {
 			// Cleanup order: CRs first (only needs the API server), then node recovery.
-			if targetMasterName != "" {
-				By("Safety net: deleting any leftover SNR CR for master " + targetMasterName)
-				cleanupSNRCR(targetMasterName)
+			if targetCPNodeName != "" {
+				By("Safety net: deleting any leftover SNR CR for control-plane node " + targetCPNodeName)
+				cleanupSNRCR(targetCPNodeName)
 
-				By("Safety net: waiting for master " + targetMasterName + " to become Ready")
+				By("Safety net: waiting for control-plane node " + targetCPNodeName + " to become Ready")
 
 				if err := helpers.WaitForNodeReady(
-					ctx, APIClient, targetMasterName,
+					ctx, APIClient, targetCPNodeName,
 					snrparams.DefaultPollInterval, snrparams.NodeReadyTimeout,
 					GinkgoWriter.Printf,
 				); err != nil {
 					GinkgoWriter.Printf(
-						"WARNING: master %s did not become Ready within %s: %v\n",
-						targetMasterName, snrparams.NodeReadyTimeout, err)
+						"WARNING: control-plane node %s did not become Ready within %s: %v\n",
+						targetCPNodeName, snrparams.NodeReadyTimeout, err)
 					AddReportEntry("safety-net-recovery-failed",
-						fmt.Sprintf("master %s did not recover: %v", targetMasterName, err))
+						fmt.Sprintf("control-plane node %s did not recover: %v", targetCPNodeName, err))
 				}
 			}
 
@@ -145,40 +145,40 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 			func() {
 				By("Recording boot ID and creation timestamp for every control plane node")
 
-				oldBootID, err := helpers.GetNodeBootIDFromAPI(ctx, APIClient, targetMasterName)
+				oldBootID, err := helpers.GetNodeBootIDFromAPI(ctx, APIClient, targetCPNodeName)
 				Expect(err).ToNot(HaveOccurred(),
-					"Must read boot ID from master node %s", targetMasterName)
+					"Must read boot ID from control-plane node %s", targetCPNodeName)
 				node := &corev1.Node{}
-				Expect(APIClient.Get(ctx, client.ObjectKey{Name: targetMasterName}, node)).To(Succeed())
+				Expect(APIClient.Get(ctx, client.ObjectKey{Name: targetCPNodeName}, node)).To(Succeed())
 				creationTimestamp := node.CreationTimestamp
 				peerBootIDs := map[string]string{}
 
-				for _, peerName := range peerMasterNames {
+				for _, peerName := range peerCPNodeNames {
 					peerBootID, bootErr := helpers.GetNodeBootIDFromAPI(ctx, APIClient, peerName)
-					Expect(bootErr).ToNot(HaveOccurred(), "Must read boot ID from peer master %s", peerName)
+					Expect(bootErr).ToNot(HaveOccurred(), "Must read boot ID from peer control-plane node %s", peerName)
 					peerBootIDs[peerName] = peerBootID
 				}
 
-				GinkgoWriter.Printf("Pre-isolation master boot ID: %s\n", oldBootID)
+				GinkgoWriter.Printf("Pre-isolation control-plane node boot ID: %s\n", oldBootID)
 
 				By("Confirming the victim agent reports no API error before the partition")
 
-				preIsolationLog, ok := agentLogOnNode(targetMasterName, snrparams.CPIsolationLogWindow)
+				preIsolationLog, ok := agentLogOnNode(targetCPNodeName, snrparams.CPIsolationLogWindow)
 				Expect(ok).To(BeTrue(),
-					"Must read the victim agent log on %s before the partition", targetMasterName)
+					"Must read the victim agent log on %s before the partition", targetCPNodeName)
 				Expect(preIsolationLog).NotTo(ContainSubstring(snrparams.APICheckFailureMessage),
 					"Agent on %s must not report an API error before the peer port is blocked; "+
 						"this test must exercise the isolation gate, not the API-error branch",
-					targetMasterName)
+					targetCPNodeName)
 
 				DeferCleanup(func() {
 					By("DeferCleanup: flushing the peer port rules from the agent namespace")
-					flushAgentPeerPort(targetMasterName, peerHealthPort)
+					flushAgentPeerPort(targetCPNodeName, peerHealthPort)
 				})
 
 				By("Blocking the SNR peer health port inside the victim agent's network namespace")
 
-				blockAgentPeerPort(targetMasterName, peerHealthPort)
+				blockAgentPeerPort(targetCPNodeName, peerHealthPort)
 				blockedAt := time.Now()
 
 				By("Confirming the victim node stays Ready while its agent is isolated")
@@ -186,16 +186,16 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 				Consistently(func() bool {
 					currentNode := &corev1.Node{}
 					if getErr := APIClient.Get(ctx,
-						client.ObjectKey{Name: targetMasterName}, currentNode); getErr != nil {
+						client.ObjectKey{Name: targetCPNodeName}, currentNode); getErr != nil {
 						return false
 					}
 
 					return helpers.IsNodeReady(currentNode)
 				}, snrparams.CPIsolationReadyGraceDuration, snrparams.DefaultPollInterval).Should(BeTrue(),
-					"Master %s must stay Ready while only its agent peer port is blocked; "+
+					"Control-plane node %s must stay Ready while only its agent peer port is blocked; "+
 						"this proves the partition is surgical and the kubelet is still healthy "+
 						"(the SNR agent's own /readyz check is a separate path not visible here)",
-					targetMasterName)
+					targetCPNodeName)
 
 				By("Best-effort: capturing the victim agent log that shows the isolation sequence")
 
@@ -216,7 +216,7 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 				)
 
 				Eventually(func() bool {
-					if logText, ok := agentLogOnNode(targetMasterName, snrparams.CPIsolationLogWindow); ok {
+					if logText, ok := agentLogOnNode(targetCPNodeName, snrparams.CPIsolationLogWindow); ok {
 						isolationLog = logText
 						if strings.Contains(logText, snrparams.CPIsolationRebootTriggeredMessage) {
 							sequenceSeen = true
@@ -225,12 +225,12 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 						}
 					}
 
-					newBootID, bootErr := helpers.GetNodeBootIDFromAPI(ctx, APIClient, targetMasterName)
+					newBootID, bootErr := helpers.GetNodeBootIDFromAPI(ctx, APIClient, targetCPNodeName)
 
 					return bootErr == nil && newBootID != oldBootID
 				}, snrparams.CPIsolationRebootTimeout, snrparams.DefaultPollInterval).Should(BeTrue(),
-					"Master %s must either log the reboot trigger or change its boot ID after its agent "+
-						"is isolated", targetMasterName)
+					"Control-plane node %s must either log the reboot trigger or change its boot ID after its agent "+
+						"is isolated", targetCPNodeName)
 
 				if sequenceSeen {
 					By("Verifying the captured agent log shows the full isolation sequence")
@@ -240,7 +240,7 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 						ContainSubstring(snrparams.CPIsolationDetectedMessage),
 						ContainSubstring(snrparams.CPIsolationRebootTriggeredMessage),
 					), "Agent on %s must consult peers after maxApiErrorThreshold failures, detect that "+
-						"readyz passed while no CP peer is reachable, and trigger a reboot", targetMasterName)
+						"readyz passed while no CP peer is reachable, and trigger a reboot", targetCPNodeName)
 				} else {
 					AddReportEntry("cp-isolation-log-not-captured",
 						"victim rebooted before its agent log could be captured; relying on the boot-ID "+
@@ -250,7 +250,7 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 				By("Waiting for the victim node's boot ID to change")
 
 				Eventually(func() string {
-					newBootID, bootErr := helpers.GetNodeBootIDFromAPI(ctx, APIClient, targetMasterName)
+					newBootID, bootErr := helpers.GetNodeBootIDFromAPI(ctx, APIClient, targetCPNodeName)
 					if bootErr != nil {
 						return oldBootID
 					}
@@ -258,54 +258,54 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 					return newBootID
 				}, snrparams.CPIsolationRebootTimeout, snrparams.DefaultPollInterval).
 					ShouldNot(Equal(oldBootID),
-						"Master %s must reboot itself after detecting peer isolation", targetMasterName)
+						"Control-plane node %s must reboot itself after detecting peer isolation", targetCPNodeName)
 
 				rebootedAfter := time.Since(blockedAt)
 				AddReportEntry("cp-isolation-reboot-duration", rebootedAfter.String())
-				GinkgoWriter.Printf("Master %s rebooted %s after the peer port was blocked\n",
-					targetMasterName, rebootedAfter)
+				GinkgoWriter.Printf("Control-plane node %s rebooted %s after the peer port was blocked\n",
+					targetCPNodeName, rebootedAfter)
 
 				By("Verifying the reboot met the remediation time budget from RHWA-1384")
 
 				Expect(rebootedAfter).To(BeNumerically("<", snrparams.CPIsolationRebootSLA),
-					"Master %s must reboot within %s of being isolated (RHWA-1384 expects ~2 minutes), took %s",
-					targetMasterName, snrparams.CPIsolationRebootSLA, rebootedAfter)
+					"Control-plane node %s must reboot within %s of being isolated (RHWA-1384 expects ~2 minutes), took %s",
+					targetCPNodeName, snrparams.CPIsolationRebootSLA, rebootedAfter)
 
 				By("Verifying the victim node was rebooted and not deleted or recreated")
 
 				updatedNode := &corev1.Node{}
 				Expect(APIClient.Get(ctx,
-					client.ObjectKey{Name: targetMasterName}, updatedNode)).To(Succeed())
+					client.ObjectKey{Name: targetCPNodeName}, updatedNode)).To(Succeed())
 				Expect(updatedNode.CreationTimestamp.Equal(&creationTimestamp)).To(BeTrue(),
-					"Master creation timestamp changed -- node was re-created instead of rebooted")
+					"Control-plane node creation timestamp changed -- node was re-created instead of rebooted")
 
 				By("Verifying no SelfNodeRemediation CR was created for the victim node")
 
-				snrCR := buildSNRCR("SelfNodeRemediation", targetMasterName, nil)
+				snrCR := buildSNRCR("SelfNodeRemediation", targetCPNodeName, nil)
 				getErr := APIClient.Get(ctx, client.ObjectKey{
-					Name: targetMasterName, Namespace: medik8sparams.OperatorNs,
+					Name: targetCPNodeName, Namespace: medik8sparams.OperatorNs,
 				}, snrCR)
 				Expect(apierrors.IsNotFound(getErr)).To(BeTrue(),
 					"SelfNodeRemediation CR for %s must be absent (IsNotFound); the reboot must come "+
 						"from the agent's own isolation gate, not from NHC. Get returned: %v",
-					targetMasterName, getErr)
+					targetCPNodeName, getErr)
 
 				By("Waiting for the victim node to become Ready")
 
 				Expect(helpers.WaitForNodeReady(
-					ctx, APIClient, targetMasterName,
+					ctx, APIClient, targetCPNodeName,
 					snrparams.DefaultPollInterval, snrparams.NodeReadyTimeout,
 					GinkgoWriter.Printf,
 				)).To(Succeed(),
-					"Master %s did not become Ready after remediation", targetMasterName)
+					"Control-plane node %s did not become Ready after remediation", targetCPNodeName)
 
 				By("Verifying the surviving control plane nodes never rebooted")
 
 				for peerName, expectedBootID := range peerBootIDs {
 					peerBootID, bootErr := helpers.GetNodeBootIDFromAPI(ctx, APIClient, peerName)
-					Expect(bootErr).ToNot(HaveOccurred(), "Must read boot ID from peer master %s", peerName)
+					Expect(bootErr).ToNot(HaveOccurred(), "Must read boot ID from peer control-plane node %s", peerName)
 					Expect(peerBootID).To(Equal(expectedBootID),
-						"Peer master %s must not reboot; isolating one control plane node "+
+						"Peer control-plane node %s must not reboot; isolating one control plane node "+
 							"must not cascade across the control plane", peerName)
 				}
 
