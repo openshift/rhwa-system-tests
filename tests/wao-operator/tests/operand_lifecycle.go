@@ -65,6 +65,7 @@ var _ = Describe(
 				labels.ComponentController,
 				labels.DisruptionNonDestructive,
 				labels.PlatformAny,
+				labels.FrequencyPresubmit,
 			), func() {
 				DeferCleanup(func() {
 					By("DeferCleanup: disabling every operand")
