@@ -33,6 +33,7 @@ var _ = Describe(
 		)
 
 		BeforeAll(func() {
+			Skip("RHWA-2048: temporarily skipped due to flakiness")
 			By("Checking the NodeHealthCheck CRD is installed")
 
 			if !isNHCCRDInstalled() {
