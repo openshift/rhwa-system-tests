@@ -367,15 +367,6 @@ var _ = Describe(
 					"Only the victim node %q may be fenced; witness nodes %v must be untouched",
 					victimNodeName, witnessNodes)
 
-				By("Waiting for the victim node's agent pod to be Ready again")
-
-				Eventually(func() error {
-					return agentPodReadyOnNode(sbrparams.SBRCBlockSplitBrainTestName, victimNodeName)
-				}, sbrparams.BlockFencingStateCheckTimeout,
-					sbrparams.BlockFencingStateCheckInterval).Should(Succeed(),
-					"The SBRC %q agent pod on node %q must become Ready after it rebooted",
-					sbrparams.SBRCBlockSplitBrainTestName, victimNodeName)
-
 				By(fmt.Sprintf("Consistently asserting for %s that the victim is not fenced again "+
 					"(stable boot-id and Ready)", sbrparams.BlockNoFencingCheckDuration))
 
@@ -404,6 +395,9 @@ var _ = Describe(
 
 				By("Waiting for NHC to delete the StorageBasedRemediation CR")
 
+				// Same ordering as fence_geometry awaitVictimAgentReady: while the CR exists the
+				// out-of-service taint stays, which evicts the Ceph RBD CSI node plugin. Waiting for
+				// the agent before that leaves it stuck in ContainerCreating (FailedMount).
 				Eventually(func() error {
 					if witnessErr := witnessGuard(); witnessErr != nil {
 						return witnessErr
@@ -444,6 +438,15 @@ var _ = Describe(
 				}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).Should(Succeed(),
 					"Node %q must be schedulable with no %s taint after the CR is deleted",
 					victimNodeName, sbrparams.OutOfServiceTaintKey)
+
+				By("Waiting for the victim node's agent pod to be Ready again")
+
+				Eventually(func() error {
+					return agentPodReadyOnNode(sbrparams.SBRCBlockSplitBrainTestName, victimNodeName)
+				}, sbrparams.BlockAgentReadyAfterRebootTimeout,
+					sbrparams.BlockFencingStateCheckInterval).Should(Succeed(),
+					"The SBRC %q agent pod on node %q must become Ready after it rebooted",
+					sbrparams.SBRCBlockSplitBrainTestName, victimNodeName)
 
 				GinkgoWriter.Printf("Block-mode split-brain complete: victim %q fenced and recovered; "+
 					"witnesses %v untouched\n", victimNodeName, witnessNodes)
