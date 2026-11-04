@@ -53,14 +53,13 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 				"Control plane isolation requires at least %d Ready master nodes for etcd quorum",
 				snrparams.MinReadyMasterNodes)
 
-			By("Skipping when a NodeHealthCheck selects control plane nodes")
-			selectsCP, err := nhcSelectsControlPlane(ctx)
-			Expect(err).ToNot(HaveOccurred(),
-				"Must determine whether any NodeHealthCheck selects control plane nodes")
-			if selectsCP {
-				Skip("A NodeHealthCheck selects control plane nodes; it would remediate the victim " +
-					"through the NHC path and the reboot would not prove the isolation gate ran")
+			By("Neutralizing any NodeHealthCheck that selects control plane nodes")
+			neutralizedNHCs, err := neutralizeNHCsSelectingCP(ctx)
+			if len(neutralizedNHCs) > 0 {
+				DeferCleanup(restoreNHCSelectors, ctx, neutralizedNHCs)
 			}
+			Expect(err).ToNot(HaveOccurred(),
+				"Must neutralize NodeHealthCheck CRs that select control plane nodes")
 
 			By("Selecting target master node")
 			masterNode, err := selectMasterNode(ctx, APIClient)
@@ -193,8 +192,10 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 
 					return helpers.IsNodeReady(currentNode)
 				}, snrparams.CPIsolationReadyGraceDuration, snrparams.DefaultPollInterval).Should(BeTrue(),
-					"Master %s must stay Ready while only its agent peer port is blocked, "+
-						"which is what proves /readyz is still returning 200", targetMasterName)
+					"Master %s must stay Ready while only its agent peer port is blocked; "+
+						"this proves the partition is surgical and the kubelet is still healthy "+
+						"(the SNR agent's own /readyz check is a separate path not visible here)",
+					targetMasterName)
 
 				By("Best-effort: capturing the victim agent log that shows the isolation sequence")
 

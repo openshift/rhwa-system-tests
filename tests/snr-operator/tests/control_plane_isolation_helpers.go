@@ -16,8 +16,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -301,29 +303,131 @@ func agentLogOnNode(nodeName string, logWindow time.Duration) (string, bool) {
 	return logText, true
 }
 
-// nhcSelectsControlPlane reports whether any NodeHealthCheck in the cluster
-// selects control plane nodes by matching selectors against actual node labels.
-// One would remediate the victim through the ordinary NHC path, so the test
-// skips rather than reporting a false pass.
+// nhcTestPauseLabelKey is a temporary label key used in the NHC selector patch
+// applied during the control plane isolation test. No real node carries this
+// label, so the NHC selects nothing while the test runs.
+const nhcTestPauseLabelKey = "snr-cp-isolation-test-pause"
+
+// neutralizeNHCsSelectingCP finds all NodeHealthCheck CRs whose selector
+// matches control-plane nodes, patches each to a never-matching selector so
+// they cannot create a SelfNodeRemediation CR that races with the agent's own
+// isolation gate, and returns the original objects for the caller to restore
+// via restoreNHCSelectors in a DeferCleanup.
 //
-// It returns an error when the NHC inventory cannot be determined. When the
-// NodeHealthCheck CRD is not installed the cluster has no NHC, so it returns
-// (false, nil); any other error is returned so the precondition fails instead
-// of silently proceeding as if no NHC selected the victim.
-func nhcSelectsControlPlane(ctx context.Context) (bool, error) {
+// When the NHC CRD is not installed, returns (nil, nil).
+func neutralizeNHCsSelectingCP(ctx context.Context) ([]unstructured.Unstructured, error) {
 	masterList, err := listMasterNodes(ctx, APIClient)
 	if err != nil {
-		return false, fmt.Errorf("could not list control-plane nodes: %w", err)
+		return nil, fmt.Errorf("could not list control-plane nodes: %w", err)
 	}
 
-	selectingNHCs, err := nhcNamesSelectingNodes(ctx, masterList.Items)
+	nhcList := &unstructured.UnstructuredList{}
+	nhcList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   snrparams.NHCAPIGroup,
+		Version: snrparams.NHCAPIVersion,
+		Kind:    "NodeHealthCheckList",
+	})
+
+	if err := APIClient.List(ctx, nhcList); err != nil {
+		if meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("failed to list NodeHealthChecks: %w", err)
+	}
+
+	// Use nhcNamesMatchingNodes with the already-fetched list to avoid a second
+	// API round-trip and the TOCTOU window between two independent list calls.
+	selectingNames, err := nhcNamesMatchingNodes(nhcList.Items, masterList.Items)
 	if err != nil {
-		return false, fmt.Errorf("could not evaluate NodeHealthCheck selectors: %w", err)
+		return nil, fmt.Errorf("could not evaluate NodeHealthCheck selectors: %w", err)
 	}
 
-	for _, name := range selectingNHCs {
-		GinkgoWriter.Printf("NodeHealthCheck %q selects control plane nodes\n", name)
+	nameSet := make(map[string]struct{}, len(selectingNames))
+	for _, n := range selectingNames {
+		nameSet[n] = struct{}{}
 	}
 
-	return len(selectingNHCs) > 0, nil
+	// A selector that matches no real node: requires a label no cluster node carries.
+	neverMatchSelector := map[string]interface{}{
+		"matchExpressions": []interface{}{
+			map[string]interface{}{
+				"key":      nhcTestPauseLabelKey,
+				"operator": "Exists",
+			},
+		},
+	}
+
+	var neutralized []unstructured.Unstructured
+
+	for idx := range nhcList.Items {
+		nhc := &nhcList.Items[idx]
+		if _, ok := nameSet[nhc.GetName()]; !ok {
+			continue
+		}
+
+		original := nhc.DeepCopy()
+		patched := nhc.DeepCopy()
+
+		if err := unstructured.SetNestedMap(patched.Object, neverMatchSelector, "spec", "selector"); err != nil {
+			return neutralized, fmt.Errorf("could not build selector patch for NHC %q: %w", nhc.GetName(), err)
+		}
+
+		if err := APIClient.Update(ctx, patched); err != nil {
+			return neutralized, fmt.Errorf("could not neutralize NHC %q: %w", nhc.GetName(), err)
+		}
+
+		GinkgoWriter.Printf(
+			"Neutralized NHC %q for the control plane isolation test (selector replaced with never-match)\n",
+			nhc.GetName())
+		neutralized = append(neutralized, *original)
+	}
+
+	return neutralized, nil
+}
+
+// restoreNHCSelectors patches each NHC in originals back to its pre-test
+// spec.selector. Called from DeferCleanup after the isolation spec completes.
+// Errors are logged and recorded but never fail the suite, because the test
+// itself has already finished and the cluster must be left in a usable state
+// regardless.
+func restoreNHCSelectors(ctx context.Context, originals []unstructured.Unstructured) {
+	for _, original := range originals {
+		originalSelector, found, _ := unstructured.NestedMap(original.Object, "spec", "selector")
+
+		// Fetch the current object to get a valid ResourceVersion for the update.
+		current := &unstructured.Unstructured{}
+		current.SetGroupVersionKind(original.GroupVersionKind())
+
+		if err := APIClient.Get(ctx, client.ObjectKey{
+			Name: original.GetName(), Namespace: original.GetNamespace(),
+		}, current); err != nil {
+			GinkgoWriter.Printf("Warning: could not fetch NHC %q for restore: %v\n", original.GetName(), err)
+			AddReportEntry("nhc-restore-failed",
+				fmt.Sprintf("NHC %q fetch failed: %v", original.GetName(), err))
+
+			continue
+		}
+
+		if found && len(originalSelector) > 0 {
+			if err := unstructured.SetNestedMap(current.Object, originalSelector, "spec", "selector"); err != nil {
+				GinkgoWriter.Printf("Warning: could not set restored selector on NHC %q: %v\n",
+					original.GetName(), err)
+
+				continue
+			}
+		} else {
+			unstructured.RemoveNestedField(current.Object, "spec", "selector")
+		}
+
+		if err := APIClient.Update(ctx, current); err != nil {
+			GinkgoWriter.Printf("Warning: could not restore NHC %q selector: %v\n", original.GetName(), err)
+			AddReportEntry("nhc-restore-failed",
+				fmt.Sprintf("NHC %q selector restore failed: %v", original.GetName(), err))
+
+			continue
+		}
+
+		GinkgoWriter.Printf("Restored NHC %q selector after control plane isolation test\n", original.GetName())
+	}
 }

@@ -49,9 +49,9 @@ and destructive remediation (kubelet stop, node reboot via NHC detection).
   3+ master nodes for etcd quorum safety
 - For the minPeersForRemediation test (20): 2+ Ready worker nodes; no NHC, SSH
   or kubelet-stop command needed
-- For the control plane isolation test (21): 3+ master nodes, and **no** NHC
-  selecting control plane nodes (the test skips if one exists). NHC itself is not
-  required
+- For the control plane isolation test (21): 3+ master nodes. The test
+  neutralizes any NHC that selects control plane nodes for its duration and
+  restores the original selectors after. NHC itself is not required
 
 ## Running
 

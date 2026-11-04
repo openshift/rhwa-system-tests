@@ -340,9 +340,13 @@ const (
 	CPIsolationPodTimeout = 3 * time.Minute
 
 	// CPIsolationReadyGraceDuration is how long the victim node must stay
-	// Ready after its agent is isolated. Three apiCheckInterval ticks: long
-	// enough to prove /readyz is still passing, short enough to finish before
-	// the agent decides to reboot.
+	// Ready after its agent is isolated. It sits inside the safe window before
+	// the agent can possibly trigger a reboot:
+	//   - error threshold crossing: maxApiErrorThreshold (3) × apiCheckInterval (15s) = 45s
+	//   - peer-response wait:       maxTimeForNoPeersResponse = 30s
+	//   - earliest reboot trigger:  t ≈ 75s after isolation
+	// The 45s window ends before the agent reaches its verdict, so the
+	// Consistently check can never be raced by an on-time reboot.
 	CPIsolationReadyGraceDuration = 45 * time.Second
 
 	// CPIsolationDetectTimeout is how long the victim agent may take to log

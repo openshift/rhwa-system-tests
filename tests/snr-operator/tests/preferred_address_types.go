@@ -997,9 +997,16 @@ func nhcNamesSelectingNodes(ctx context.Context, nodes []corev1.Node) ([]string,
 		return nil, fmt.Errorf("failed to list NodeHealthCheck CRs: %w", err)
 	}
 
+	return nhcNamesMatchingNodes(nhcList.Items, nodes)
+}
+
+// nhcNamesMatchingNodes filters nhcItems for those whose spec.selector matches
+// any node in nodes. It is the selector-matching core of nhcNamesSelectingNodes,
+// separated so callers with an already-fetched list avoid a second API round-trip.
+func nhcNamesMatchingNodes(nhcItems []unstructured.Unstructured, nodes []corev1.Node) ([]string, error) {
 	matched := make([]string, 0)
 
-	for _, nhc := range nhcList.Items {
+	for _, nhc := range nhcItems {
 		rawSelector, found, err := unstructured.NestedMap(nhc.Object, "spec", "selector")
 		if err != nil {
 			return nil, fmt.Errorf("failed to read spec.selector of NHC %q: %w", nhc.GetName(), err)
