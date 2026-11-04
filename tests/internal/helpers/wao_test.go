@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -202,5 +203,96 @@ func TestWAOComponentPhase(t *testing.T) {
 		if phase != want {
 			t.Errorf("operand %s phase = %q, want %q", component, phase, want)
 		}
+	}
+}
+
+// waoStatus sets status.components for the given operand phases.
+func waoStatus(config *unstructured.Unstructured, phases map[string]string) *unstructured.Unstructured {
+	statuses := make([]interface{}, 0, len(phases))
+	for component, phase := range phases {
+		statuses = append(statuses, map[string]interface{}{"name": component, "phase": phase})
+	}
+	config.Object["status"] = map[string]interface{}{"components": statuses}
+
+	return config
+}
+
+func TestEnsureWAOComponentsLeavesAnAvailableOperandAlone(t *testing.T) {
+	config := waoStatus(waoConfig(map[string]interface{}{
+		medik8sparams.WAOComponentSNR: map[string]interface{}{
+			"enabled": true,
+			"manager": map[string]interface{}{"replicas": int64(2)},
+		},
+	}), map[string]string{medik8sparams.WAOComponentSNR: medik8sparams.WAOPhaseAvailable})
+	k8sClient := waoClient(config)
+	before, err := GetWAOConfig(context.Background(), k8sClient)
+	if err != nil {
+		t.Fatalf("GetWAOConfig: %v", err)
+	}
+
+	if ensureErr := EnsureWAOComponents(
+		context.Background(), k8sClient, medik8sparams.WAOComponentSNR); ensureErr != nil {
+		t.Fatalf("EnsureWAOComponents: %v", ensureErr)
+	}
+
+	after, err := GetWAOConfig(context.Background(), k8sClient)
+	if err != nil {
+		t.Fatalf("GetWAOConfig: %v", err)
+	}
+	// An operand that is already Available must not be patched: a bumped resourceVersion here
+	// means a suite rerun restarted a manager its specs were about to use.
+	if before.GetResourceVersion() != after.GetResourceVersion() {
+		t.Errorf("configuration was patched for an already Available operand: resourceVersion %s -> %s",
+			before.GetResourceVersion(), after.GetResourceVersion())
+	}
+}
+
+func TestEnsureWAOComponentsReportsAPreWAOCluster(t *testing.T) {
+	err := EnsureWAOComponents(context.Background(), waoClient(), medik8sparams.WAOComponentSNR)
+	if !errors.Is(err, ErrWAONotInstalled) {
+		t.Fatalf("EnsureWAOComponents error = %v, want one matching ErrWAONotInstalled", err)
+	}
+}
+
+func TestEnsureWAOComponentsRejectsNoOperand(t *testing.T) {
+	if err := EnsureWAOComponents(context.Background(), waoClient()); err == nil {
+		t.Fatal("expected an error when no operand is named")
+	}
+}
+
+func TestWAORunRequestedReadsTheLabelFilter(t *testing.T) {
+	for filter, want := range map[string]bool{
+		"operator:wao":                                 true,
+		"operator:wao || operator:snr":                 true,
+		"operator:snr||operator:wao":                   true,
+		"(operator:wao || operator:snr) && tier:smoke": true,
+		"operator:snr":                                 false,
+		"":                                             false,
+		"!operator:wao":                                false,
+		"operator:snr && !operator:wao":                false,
+		"operator:waox":                                false,
+		"operator:snr && tier:smoke && !tier:upgrade": false,
+	} {
+		t.Setenv("ECO_TEST_LABELS", "")
+
+		if got := WAORunRequested(filter); got != want {
+			t.Errorf("WAORunRequested(%q) = %v, want %v", filter, got, want)
+		}
+	}
+}
+
+func TestWAORunRequestedPrefersTheEnvironment(t *testing.T) {
+	// scripts/test-runner.sh turns ECO_TEST_LABELS into --label-filter, so the two normally
+	// agree; when a run sets only the environment, that is the filter.
+	t.Setenv("ECO_TEST_LABELS", "operator:wao || operator:snr")
+
+	if !WAORunRequested("") {
+		t.Error("WAORunRequested ignored ECO_TEST_LABELS")
+	}
+
+	t.Setenv("ECO_TEST_LABELS", "operator:snr")
+
+	if WAORunRequested("operator:wao") {
+		t.Error("WAORunRequested used the ginkgo filter while ECO_TEST_LABELS was set")
 	}
 }

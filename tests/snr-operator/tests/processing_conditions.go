@@ -57,7 +57,7 @@ var _ = Describe(
 				Label(labels.TierAcceptance, labels.DisruptionNonDestructive,
 					labels.PlatformAny, labels.FrequencyWeekly,
 					labels.ComponentController), func() {
-					snrName := "snr-test-nhc-timed-out"
+					snrName := snrparams.TestCRNamePrefix + "nhc-timed-out"
 
 					By("Creating SNR with nhc-timed-out annotation")
 
@@ -107,7 +107,7 @@ var _ = Describe(
 				Label(labels.TierAcceptance, labels.DisruptionNonDestructive,
 					labels.PlatformAny, labels.FrequencyWeekly,
 					labels.ComponentController), func() {
-					snrName := "snr-test-nonexistent-node"
+					snrName := snrparams.TestCRNamePrefix + "nonexistent-node"
 
 					By("Verifying test node name does not exist in the cluster")
 

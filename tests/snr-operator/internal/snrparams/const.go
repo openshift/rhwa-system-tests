@@ -49,6 +49,11 @@ const (
 		"in the cluster, a name other than " +
 		"self-node-remediation-config is not allowed"
 
+	// TestCRNamePrefix is the name prefix every CR this suite creates carries, so a post-run
+	// sweep can tell the suite's own leftovers from a remediation the cluster is really
+	// running. Keep new fixture names behind it.
+	TestCRNamePrefix = "snr-test-"
+
 	// SNRTestNodeName is the fake node name used in negative tests.
 	SNRTestNodeName = "incorrect-node-name"
 
