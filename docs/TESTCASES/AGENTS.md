@@ -161,6 +161,118 @@ These are enforced in review and, where noted, by `make lint`.
   known to fail on a current build without a gate.
 - `make fmt && make lint && make test` pass before pushing.
 
+## Operands under the workload-availability-operator
+
+The medik8s operators are being consolidated into a single operator,
+[workload-availability-operator](https://github.com/medik8s/workload-availability-operator)
+(WAO). FAR, MDR, NHC, NMO, SNR and SBR are no longer installed individually;
+each is an **operand** that WAO installs when it is enabled. See
+[medik8s/workload-availability-operator#55](https://github.com/medik8s/workload-availability-operator/pull/55)
+for the design, and the [wao-testing wiki](https://github.com/medik8s/.github/wiki/wao-testing)
+for current test notes.
+
+**The goal is to keep the tests as written.** The behaviour under test does not
+change: the operand is the same controller running in the same namespace
+(`medik8sparams.OperatorNs`, `openshift-workload-availability`), reconciling the
+same CRs. Only the *pre-test* functions change — what used to assume "the
+operator is installed" must now make sure the operand is **enabled**. Do not
+rewrite the body of an `It`, re-scope a test, or change its assertions as part of
+a WAO migration; if a spec genuinely cannot work under WAO, say so in section 8
+of its document rather than quietly reshaping it.
+
+### What the cluster looks like now
+
+| Before | Under WAO |
+| ------ | --------- |
+| One CSV per operator, each installed on demand | One CSV, `waoparams.CSVNamePattern` (`workload-availability-operator`) |
+| Operator CRDs arrive with their operator | OLM installs **every** operand CRD and RBAC when WAO is installed, regardless of what is enabled |
+| Operator Deployment present ⇒ operator usable | WAO's own manager is the only Deployment running until an operand is enabled |
+| — | WAO creates a cluster-scoped singleton `WorkloadAvailabilityConfig` named `cluster` on bootstrap, with **every operand disabled** |
+
+Enabling an operand (`spec.components.<key>.enabled: true`) makes WAO deploy that
+operand's runtime manifests — Deployment, Service, ConfigMaps, webhooks.
+Disabling removes them. The operand keys, phases and the helpers for reading and
+patching the singleton live in
+[`medik8sparams/wao.go`](../../tests/internal/medik8sparams/wao.go) and
+[`helpers/wao.go`](../../tests/internal/helpers/wao.go); per-operand Deployment
+names and timeouts are in
+[`waoparams`](../../tests/wao-operator/internal/waoparams).
+
+### The precondition contract
+
+A suite's `BeforeAll`/`BeforeSuite` ensures its operands are enabled and running
+before the first `It`. In order:
+
+1. Read the singleton with `helpers.GetWAOConfig`.
+2. For each operand the spec uses, check `helpers.WAOComponentEnabled`. If it is
+   already enabled and `Available`, change nothing — the precondition must be
+   idempotent and must not patch a cluster that is already correct.
+3. Otherwise enable it with `helpers.EnableWAOComponents(ctx, APIClient,
+   medik8sparams.WAOComponent<OP>)` — one patch naming only the operands the
+   suite needs.
+4. `Eventually` on `helpers.WAOComponentPhase` reaching
+   `medik8sparams.WAOPhaseAvailable`, bounded by
+   `waoparams.OperandAvailableTimeout` and `waoparams.DefaultPollInterval`.
+   Never `time.Sleep` after a patch.
+5. Keep the existing readiness check the spec already had — `deployment.Pull(…)`
+   plus `IsReady`. It is still the externally observable assertion, and it is
+   what tells you WAO reported `Available` for a manager that really came up.
+
+`Available` already accounts for webhook admission readiness
+(`status.components[].admissionReady`, which waits on the service CA bundle), so
+once an operand is `Available` its CRs can be created without a further wait.
+While an operand is disabled its webhooks are gone, so CRs are admitted
+unvalidated — a spec that asserts a webhook rejection is meaningless unless its
+operand is enabled first.
+
+Both layouts exist during the transition. Branch on the singleton, not on an env
+var or a cluster name: if the `WorkloadAvailabilityConfig` is `IsNotFound`, the
+cluster is a pre-WAO deployment — fall back to the per-operator check the spec
+already had rather than failing. Specs then run unchanged on either cluster.
+
+### Do not
+
+- **Do not treat a CRD as proof an operand is running.** Every operand CRD is
+  installed with WAO and outlives any disable, so `CustomResourceDefinition`
+  presence asserts nothing. Assert `status.components[].phase` and the manager
+  Deployment.
+- **Do not look up a per-operator CSV.** There is one CSV now. A spec that reads
+  a per-operator CSV name, version, or annotation needs real rework — treat it
+  as its own change with its own document update, not a precondition tweak.
+- **Do not enable `medik8sparams.WAOAllComponents` from a suite precondition.**
+  Enable only what the spec uses. Extra operands change what else is reconciling
+  on the cluster and make a failure harder to read. The operand-lifecycle spec
+  under `tests/wao-operator` is the only one that owns all six.
+- **Do not disable operands in cleanup.** Enabling is an installation step, not
+  state the test created, so `DeferCleanup`/`AfterAll` leave it enabled: a
+  disable is slow, can land in `DisableIncomplete` with
+  `status.components[].retainedResources` still on the cluster, and strands the
+  next suite. The exception is a spec whose subject *is* enable/disable, which
+  restores exactly what it found.
+- **Do not assume enabling creates operand CRs.** Enabling starts the manager
+  only. `NodeHealthCheck`, `StorageBasedRemediationConfig` and `NodeMaintenance`
+  are still created by the spec.
+
+### Cross-operand dependencies
+
+A spec usually needs more than its own operand: an NHC remediation test needs
+the remediator operand (SNR, FAR or MDR) enabled too, and an SBR test needs SBR
+plus whatever triggers it. Enable every operand the spec actually exercises,
+name each one in section 5 of the document, and name the remediator in section 3
+so the scope boundary stays explicit.
+
+### What this changes in the document
+
+| Section | Add |
+| ------- | --- |
+| 1 Metadata | The WAO version alongside the operand version (`WAO v0.1.0`, `NHC v0.9.0`) |
+| 3 Scope | Whether the test proves anything about WAO itself — for most tests, explicitly out of scope |
+| 4 Environment | That the cluster has WAO installed, and the operand keys the test enables |
+| 5 Preconditions | Each operand enabled and the phase waited on, as an asserted precondition |
+| 7 Pass criteria | Nothing — "the operand is enabled" is a precondition, not something the test proves |
+| 9 Cleanup | That operands are left enabled, and why |
+| 11 Running it standalone | `tools/watch/wao-watch.sh` when the run turns an operand on, alongside the operand's own watch script |
+
 ## Porting a test from Python (ocp-edge-auto)
 
 Read the full Python implementation before writing Go — the test method body,
@@ -189,6 +301,12 @@ the work item is gone or you cannot find it, write `None` and move on.
       component set, plus every other axis the test is constrained on
 - [ ] No `time.Sleep`; timeouts come from `<op>params`/`medik8sparams`
 - [ ] Preconditions clean stale state and wait for removal
+- [ ] Preconditions enable every WAO operand the spec uses — and only those —
+      wait for phase `Available`, are idempotent when it is already enabled, and
+      fall back to the pre-WAO check when the `WorkloadAvailabilityConfig`
+      singleton is absent
+- [ ] Operands are left enabled by cleanup; no CRD-presence or per-operator-CSV
+      check is used to prove an operand is running
 - [ ] Cleanup idempotent and `IsNotFound`-tolerant
 - [ ] Known-bug specs gated behind an env var with a `Skip` message
 - [ ] `tests/<operator>/README.md` catalog entry added
