@@ -33,8 +33,6 @@ var _ = Describe(
 	Ordered,
 	ContinueOnFailure,
 	Label(labels.OperatorSNR), func() {
-		var snrCSV *olm.ClusterServiceVersionBuilder
-
 		BeforeAll(func() {
 			By("Get SNR deployment object and verify readiness")
 
@@ -42,29 +40,6 @@ var _ = Describe(
 				APIClient, snrparams.OperatorDeploymentName, medik8sparams.OperatorNs)
 			Expect(err).ToNot(HaveOccurred(), "Failed to get SNR deployment")
 			Expect(snrDeployment.IsReady(medik8sparams.DefaultTimeout)).To(BeTrue(), "SNR deployment is not Ready")
-
-			By("Get SNR ClusterServiceVersion")
-
-			Eventually(func() error {
-				snrCSVs, listErr := olm.ListClusterServiceVersionWithNamePattern(
-					APIClient, snrparams.CSVNamePattern, medik8sparams.OperatorNs)
-				if listErr != nil {
-					return fmt.Errorf("failed to list SNR ClusterServiceVersions: %w", listErr)
-				}
-
-				if len(snrCSVs) == 0 {
-					return fmt.Errorf("no SNR ClusterServiceVersion found in namespace %s",
-						medik8sparams.OperatorNs)
-				}
-
-				snrCSV = helpers.FindActiveCSV(snrCSVs)
-				if snrCSV == nil {
-					return fmt.Errorf("no SNR CSV in Succeeded phase found yet")
-				}
-
-				return nil
-			}, medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
-				"SNR CSV must reach Succeeded phase")
 		})
 
 		It("Verify SNR resources are installed and running",
@@ -223,6 +198,8 @@ var _ = Describe(
 			Label(labels.TierSmoke, labels.DisruptionNonDestructive,
 				labels.PlatformAny, labels.FrequencyPresubmit,
 				labels.ComponentOLM), func() {
+				snrCSV := requireSNRCSV()
+
 				if !helpers.IsDownstream() {
 					Skip("CSV product annotations are absent when ECO_IS_DOWNSTREAM=false")
 				}
@@ -261,6 +238,8 @@ var _ = Describe(
 			Label(labels.TierSmoke, labels.DisruptionNonDestructive,
 				labels.PlatformAny, labels.FrequencyPresubmit,
 				labels.ComponentOLM), func() {
+				snrCSV := requireSNRCSV()
+
 				By("Checking required CSV annotations")
 
 				if !helpers.IsDownstream() {
@@ -347,3 +326,51 @@ var _ = Describe(
 					"SNR controller replicas not matching expected count")
 			})
 	})
+
+// requireSNRCSV returns the SNR ClusterServiceVersion for the specs that assert on operator
+// packaging rather than on operand behaviour.
+//
+// Under the workload-availability-operator there is no per-operand CSV. WAO ships one bundle
+// covering every operand, so a CSV named after SNR does not exist and its version, annotations
+// and `replaces` chain describe packaging that no longer applies to the operand. Those specs
+// skip on a WAO run rather than fail: they still carry their value on a cluster where SNR is
+// installed as its own operator, and the operand's own behaviour is covered by the specs above,
+// which read no CSV at all.
+//
+// The lookup lives here and not in BeforeAll so that it blocks only the two specs that need a
+// CSV. Keeping it in the container's setup made every post-deployment spec wait five minutes
+// for a CSV that was never coming.
+func requireSNRCSV() *olm.ClusterServiceVersionBuilder {
+	GinkgoHelper()
+	suiteConfig, _ := GinkgoConfiguration()
+	if helpers.WAORunRequested(suiteConfig.LabelFilter) {
+		Skip("SNR is a WAO operand on this run: there is no per-operand CSV to assert on, " +
+			"only the workload-availability-operator bundle")
+	}
+
+	var snrCSV *olm.ClusterServiceVersionBuilder
+
+	By("Get SNR ClusterServiceVersion")
+	Eventually(func() error {
+		snrCSVs, listErr := olm.ListClusterServiceVersionWithNamePattern(
+			APIClient, snrparams.CSVNamePattern, medik8sparams.OperatorNs)
+		if listErr != nil {
+			return fmt.Errorf("failed to list SNR ClusterServiceVersions: %w", listErr)
+		}
+
+		if len(snrCSVs) == 0 {
+			return fmt.Errorf("no SNR ClusterServiceVersion found in namespace %s",
+				medik8sparams.OperatorNs)
+		}
+
+		snrCSV = helpers.FindActiveCSV(snrCSVs)
+		if snrCSV == nil {
+			return fmt.Errorf("no SNR CSV in Succeeded phase found yet")
+		}
+
+		return nil
+	}, medik8sparams.DefaultTimeout, snrparams.DefaultPollInterval).Should(Succeed(),
+		"SNR CSV must reach Succeeded phase")
+
+	return snrCSV
+}
