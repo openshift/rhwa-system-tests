@@ -73,4 +73,4 @@ jobs:
             -e ECO_DRY_RUN=true -e KUBECONFIG=/dev/null \
             -e WORKLOAD_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:latest \
             system-tests:ci -c \
-            'ginkgo run --dry-run ./tests/far-operator ./tests/mdr-operator ./tests/nhc-operator ./tests/nmo-operator ./tests/sbr-operator ./tests/snr-operator'
+            'ginkgo run --dry-run ./tests/far-operator ./tests/mdr-operator ./tests/nhc-operator ./tests/nmo-operator ./tests/sbr-operator ./tests/snr-operator ./tests/wao-operator'

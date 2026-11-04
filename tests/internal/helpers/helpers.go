@@ -180,8 +180,8 @@ func validateCapabilities(secCtx *corev1.SecurityContext, containerName, podName
 			containerName, podName)}
 	}
 
-	for _, cap := range secCtx.Capabilities.Drop {
-		if cap == "ALL" {
+	for _, dropped := range secCtx.Capabilities.Drop {
+		if dropped == "ALL" {
 			return nil
 		}
 	}
