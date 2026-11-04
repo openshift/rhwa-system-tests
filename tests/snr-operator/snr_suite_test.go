@@ -52,12 +52,37 @@ var _ = BeforeSuite(func() {
 		return
 	}
 
-	By("Ensuring the SNR operand is enabled and Available")
-	Expect(helpers.EnsureWAOComponents(
-		context.Background(), APIClient, medik8sparams.WAOComponentSNR)).To(Succeed(),
-		"Operand %s must be enabled and Available before the SNR suite runs",
-		medik8sparams.WAOComponentSNR)
+	By("Ensuring the SNR operand is enabled, Available, configured and serving agents")
+	Expect(helpers.EnsureWAOOperandReady(context.Background(), APIClient, snrOperandReadiness())).
+		To(Succeed(),
+			"Operand %s must be fully running before the SNR suite starts",
+			medik8sparams.WAOComponentSNR)
 })
+
+// snrOperandReadiness is everything that must be running before an SNR spec may assume the
+// operand works. Phase Available covers only the manager Deployment: the SNR controller then
+// creates the default SelfNodeRemediationConfig and reconciles the agent DaemonSet from it,
+// and specs that read either will fail if they run in between.
+//
+// Measured on a cold enable: Available at 0s, SelfNodeRemediationConfig at +8s, agent
+// DaemonSet created at +12s and its pods ready at +17s. Waiting on the DaemonSet covers the
+// whole chain -- it cannot exist before the configuration it is reconciled from -- but the
+// configuration is listed too so that a failure names the step that actually stalled.
+func snrOperandReadiness() helpers.WAOOperandReadiness {
+	return helpers.WAOOperandReadiness{
+		Component: medik8sparams.WAOComponentSNR,
+		Configs: []helpers.WAOOperandConfigRef{{
+			GVK: schema.GroupVersionKind{
+				Group:   snrparams.CRDGroup,
+				Version: snrparams.CRDVersion,
+				Kind:    "SelfNodeRemediationConfig",
+			},
+			Namespace: medik8sparams.OperatorNs,
+			Name:      snrparams.SNRConfigName,
+		}},
+		DaemonSets: []string{snrparams.AgentDaemonSetName},
+	}
+}
 
 // The post-run counterpart of the precondition, gated on the same label so a pre-WAO run is
 // untouched. It does not disable the operand -- enabling was an installation step, not state

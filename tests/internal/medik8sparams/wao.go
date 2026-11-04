@@ -103,4 +103,15 @@ const (
 
 	// WAOPollInterval is the polling interval used while waiting on an operand phase.
 	WAOPollInterval = 5 * time.Second
+
+	// WAOOperandReconcileTimeout bounds the wait for an operand to finish creating the
+	// resources it owns itself, after WAO has reported it Available.
+	//
+	// WAO reports Available once its own manifests are deployed; the operand's controller then
+	// has to start, create its default configuration, and reconcile that into agents. Measured
+	// on a 6-node cluster with a cold SNR enable: the SelfNodeRemediationConfig appeared 8s
+	// after Available, the agent DaemonSet 12s after, and its pods were ready at 17s. Three
+	// minutes is generous headroom over that, and short enough to fail a genuinely stuck
+	// operand inside a test run.
+	WAOOperandReconcileTimeout = 3 * time.Minute
 )

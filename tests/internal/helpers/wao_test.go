@@ -5,11 +5,15 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -294,5 +298,190 @@ func TestWAORunRequestedPrefersTheEnvironment(t *testing.T) {
 
 	if WAORunRequested("operator:wao") {
 		t.Error("WAORunRequested used the ginkgo filter while ECO_TEST_LABELS was set")
+	}
+}
+
+// snrcRef is a stand-in for an operand's default configuration CR.
+var snrcRef = WAOOperandConfigRef{
+	GVK: schema.GroupVersionKind{
+		Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediationConfig",
+	},
+	Namespace: medik8sparams.OperatorNs,
+	Name:      "self-node-remediation-config",
+}
+
+// readyOperand builds the cluster state a fully reconciled SNR operand leaves behind.
+func readyOperand() []client.Object {
+	config := waoStatus(waoConfig(map[string]interface{}{
+		medik8sparams.WAOComponentSNR: map[string]interface{}{"enabled": true},
+	}), map[string]string{medik8sparams.WAOComponentSNR: medik8sparams.WAOPhaseAvailable})
+	manager := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      medik8sparams.WAOOperandDeployments[medik8sparams.WAOComponentSNR][0],
+			Namespace: medik8sparams.OperatorNs,
+		},
+		Status: appsv1.DeploymentStatus{Replicas: 2, ReadyReplicas: 2},
+	}
+	agents := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "self-node-remediation-ds", Namespace: medik8sparams.OperatorNs},
+		Status: appsv1.DaemonSetStatus{
+			DesiredNumberScheduled: 6, NumberReady: 6, UpdatedNumberScheduled: 6,
+		},
+	}
+	snrc := &unstructured.Unstructured{}
+	snrc.SetGroupVersionKind(snrcRef.GVK)
+	snrc.SetNamespace(snrcRef.Namespace)
+	snrc.SetName(snrcRef.Name)
+
+	return []client.Object{config, manager, agents, snrc}
+}
+
+func readyScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(WAOConfigGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(WAOConfigGVK.GroupVersion().WithKind(WAOConfigGVK.Kind+"List"),
+		&unstructured.UnstructuredList{})
+	scheme.AddKnownTypeWithName(snrcRef.GVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(snrcRef.GVK.GroupVersion().WithKind(snrcRef.GVK.Kind+"List"),
+		&unstructured.UnstructuredList{})
+	_ = appsv1.AddToScheme(scheme)
+
+	return scheme
+}
+
+func TestEnsureWAOOperandReadyAcceptsAFullyReconciledOperand(t *testing.T) {
+	k8sClient := fake.NewClientBuilder().WithScheme(readyScheme()).WithObjects(readyOperand()...).Build()
+	err := EnsureWAOOperandReady(context.Background(), k8sClient, WAOOperandReadiness{
+		Component:  medik8sparams.WAOComponentSNR,
+		Configs:    []WAOOperandConfigRef{snrcRef},
+		DaemonSets: []string{"self-node-remediation-ds"},
+	})
+	if err != nil {
+		t.Fatalf("EnsureWAOOperandReady on a ready operand: %v", err)
+	}
+}
+
+// The race this exists to close: WAO reports Available, but the operand's controller has not
+// yet written its configuration or its agents. Each wait must reject that state rather than
+// let a spec run against a half-built operand.
+func TestEnsureWAOOperandReadyRejectsAHalfReconciledOperand(t *testing.T) {
+	t.Parallel()
+
+	for name, drop := range map[string]string{
+		"no default configuration": "config",
+		"no agent DaemonSet":       "daemonset",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var objects []client.Object
+
+			for _, object := range readyOperand() {
+				if drop == "config" && object.GetObjectKind().GroupVersionKind() == snrcRef.GVK {
+					continue
+				}
+
+				if _, isAgents := object.(*appsv1.DaemonSet); isAgents && drop == "daemonset" {
+					continue
+				}
+
+				objects = append(objects, object)
+			}
+
+			k8sClient := fake.NewClientBuilder().WithScheme(readyScheme()).WithObjects(objects...).Build()
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+
+			err := EnsureWAOOperandReady(ctx, k8sClient, WAOOperandReadiness{
+				Component:  medik8sparams.WAOComponentSNR,
+				Configs:    []WAOOperandConfigRef{snrcRef},
+				DaemonSets: []string{"self-node-remediation-ds"},
+			})
+			if err == nil {
+				t.Fatalf("EnsureWAOOperandReady accepted an operand with %s", name)
+			}
+		})
+	}
+}
+
+// A DaemonSet reporting zero desired pods is what a just-created one looks like; treating it
+// as ready would reintroduce the race one layer down.
+func TestEnsureWAOOperandReadyRejectsAnUnscheduledDaemonSet(t *testing.T) {
+	var objects []client.Object
+
+	for _, object := range readyOperand() {
+		if agents, isAgents := object.(*appsv1.DaemonSet); isAgents {
+			agents.Status = appsv1.DaemonSetStatus{}
+		}
+
+		objects = append(objects, object)
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(readyScheme()).WithObjects(objects...).Build()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	err := EnsureWAOOperandReady(ctx, k8sClient, WAOOperandReadiness{
+		Component:  medik8sparams.WAOComponentSNR,
+		DaemonSets: []string{"self-node-remediation-ds"},
+	})
+	if err == nil {
+		t.Fatal("EnsureWAOOperandReady accepted a DaemonSet with no scheduled pods")
+	}
+}
+
+// A DaemonSet whose status still describes the previous generation is mid-rollout: ready and
+// up to date, but about to replace its pods. Accepting it is what let the must-gather spec
+// capture pod names that no longer existed thirteen seconds later.
+func TestWaitForDaemonSetStableRejectsAStaleGeneration(t *testing.T) {
+	agents := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "self-node-remediation-ds", Namespace: medik8sparams.OperatorNs, Generation: 8,
+		},
+		Status: appsv1.DaemonSetStatus{
+			ObservedGeneration: 7, DesiredNumberScheduled: 6, NumberReady: 6, UpdatedNumberScheduled: 6,
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(readyScheme()).WithObjects(agents).Build()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	if err := WaitForDaemonSetStable(ctx, k8sClient, "self-node-remediation-ds"); err == nil {
+		t.Fatal("WaitForDaemonSetStable accepted a DaemonSet whose status lags its generation")
+	}
+}
+
+func TestWaitForDaemonSetStableRejectsUnavailablePods(t *testing.T) {
+	agents := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "self-node-remediation-ds", Namespace: medik8sparams.OperatorNs, Generation: 3,
+		},
+		Status: appsv1.DaemonSetStatus{
+			ObservedGeneration: 3, DesiredNumberScheduled: 6, NumberReady: 6,
+			UpdatedNumberScheduled: 6, NumberUnavailable: 1,
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(readyScheme()).WithObjects(agents).Build()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	if err := WaitForDaemonSetStable(ctx, k8sClient, "self-node-remediation-ds"); err == nil {
+		t.Fatal("WaitForDaemonSetStable accepted a DaemonSet reporting an unavailable pod")
+	}
+}
+
+func TestWaitForDaemonSetStableAcceptsASettledRollout(t *testing.T) {
+	agents := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "self-node-remediation-ds", Namespace: medik8sparams.OperatorNs, Generation: 8,
+		},
+		Status: appsv1.DaemonSetStatus{
+			ObservedGeneration: 8, DesiredNumberScheduled: 6, NumberReady: 6, UpdatedNumberScheduled: 6,
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(readyScheme()).WithObjects(agents).Build()
+
+	if err := WaitForDaemonSetStable(context.Background(), k8sClient, "self-node-remediation-ds"); err != nil {
+		t.Fatalf("WaitForDaemonSetStable rejected a settled DaemonSet: %v", err)
 	}
 }

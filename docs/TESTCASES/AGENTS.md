@@ -204,6 +204,52 @@ patching the singleton live in
 names and timeouts are in
 [`waoparams`](../../tests/wao-operator/internal/waoparams).
 
+### `Available` is not ready
+
+**An operand's phase reaching `Available` does not mean the operand works.** It
+means WAO finished deploying *its* manifests — the manager Deployment, Service
+and webhooks. The operand's controller then starts and creates the resources it
+owns itself: its default configuration CR, and the agents it reconciles from
+that configuration. A spec that runs in the gap sees an operand that is
+`Available` and has no configuration and no agents.
+
+```
+WAO:   enable ──► Deployment ready + admissionReady ──► phase=Available
+                                                         │
+operand controller: ──► starts ──► creates default config ──► reconciles agents
+```
+
+Measured on a six-node cluster with a cold SNR enable: `Available` at 0s, the
+`SelfNodeRemediationConfig` at **+8s**, the agent DaemonSet created at **+12s**,
+its pods ready at **+17s**. A spec that read the configuration 84ms after
+`Available` failed outright. On a warm cluster none of this is visible, which is
+exactly what makes it a flake rather than an obvious break.
+
+So a precondition waits for **everything the operand owns**, not just the phase:
+
+| Wait for | Why |
+| -------- | --- |
+| phase `Available` | WAO's manifests are deployed |
+| every manager Deployment ready | so a failure names the Deployment, not a later missing agent |
+| every configuration CR the operand creates for itself | the agents are reconciled from it |
+| every agent DaemonSet fully rolled out | `desired > 0`, `ready == desired`, `updated == desired` |
+
+`helpers.EnsureWAOOperandReady` does all four. Each suite passes a
+`helpers.WAOOperandReadiness` naming its own operand's configuration CR and
+agent DaemonSets, with the names and kinds coming from that operand's `<op>params`
+package rather than from anything shared — see `snrOperandReadiness` in
+[`snr_suite_test.go`](../../tests/snr-operator/snr_suite_test.go).
+
+Two details worth keeping:
+
+- **A DaemonSet reporting zero desired pods is not ready.** That is what a
+  just-created one looks like, and accepting it puts the race back one layer
+  down.
+- **List the configuration CR even though waiting on the DaemonSet implies it.**
+  The agents cannot exist before the configuration they are reconciled from, so
+  the DaemonSet wait subsumes it — but when an operand stalls, the failure
+  message should name the step that actually stalled.
+
 ### The precondition contract
 
 A suite's `BeforeAll`/`BeforeSuite` ensures its operands are enabled and running
@@ -216,13 +262,19 @@ before the first `It`. In order:
 3. Otherwise enable it with `helpers.EnableWAOComponents(ctx, APIClient,
    medik8sparams.WAOComponent<OP>)` — one patch naming only the operands the
    suite needs.
-4. `Eventually` on `helpers.WAOComponentPhase` reaching
-   `medik8sparams.WAOPhaseAvailable`, bounded by
-   `waoparams.OperandAvailableTimeout` and `waoparams.DefaultPollInterval`.
+4. Wait for the operand to reach `medik8sparams.WAOPhaseAvailable`, **and then
+   for everything the operand owns** — see "`Available` is not ready" above.
    Never `time.Sleep` after a patch.
 5. Keep the existing readiness check the spec already had — `deployment.Pull(…)`
    plus `IsReady`. It is still the externally observable assertion, and it is
    what tells you WAO reported `Available` for a manager that really came up.
+
+In practice steps 1–4 are one call:
+
+```go
+Expect(helpers.EnsureWAOOperandReady(ctx, APIClient, <op>OperandReadiness())).To(Succeed(),
+    "Operand %s must be fully running before the suite starts", medik8sparams.WAOComponent<OP>)
+```
 
 `Available` already accounts for webhook admission readiness
 (`status.components[].admissionReady`, which waits on the service CA bundle), so
@@ -308,9 +360,11 @@ the work item is gone or you cannot find it, write `None` and move on.
 - [ ] No `time.Sleep`; timeouts come from `<op>params`/`medik8sparams`
 - [ ] Preconditions clean stale state and wait for removal
 - [ ] Preconditions enable every WAO operand the spec uses — and only those —
-      wait for phase `Available`, are idempotent when it is already enabled, and
-      fall back to the pre-WAO check when the `WorkloadAvailabilityConfig`
-      singleton is absent
+      and are idempotent when it is already enabled
+- [ ] Preconditions wait past phase `Available` for everything the operand owns:
+      manager Deployments ready, its default configuration CR created, and its
+      agent DaemonSets fully rolled out. `Available` alone is a cold-start race
+      that passes on a warm cluster
 - [ ] Operands are left enabled by cleanup; no CRD-presence or per-operator-CSV
       check is used to prove an operand is running
 - [ ] Cleanup idempotent and `IsNotFound`-tolerant
