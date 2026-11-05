@@ -427,7 +427,6 @@ func restoreNHCSelectors(ctx context.Context, originals []unstructured.Unstructu
 
 			continue
 		}
-
 		GinkgoWriter.Printf("Restored NHC %q selector after control plane isolation test\n", original.GetName())
 	}
 }

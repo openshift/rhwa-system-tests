@@ -403,7 +403,8 @@ The test rejects traffic on the SNR peer health port (`spec.hostPort`, default
 Geneve-encapsulated peer traffic. The kube-apiserver connection is untouched, so
 the node stays Ready and `/readyz` keeps returning 200 for the whole run; that is
 what makes the reboot attributable to the isolation gate rather than to NHC or to
-the pre-existing API-error path. Skips when an NHC selects control plane nodes.
+the pre-existing API-error path. Any NHC that selects control plane nodes is neutralized
+(its selector patched to a never-match) for the duration and restored in `DeferCleanup`.
 
 Full specification: [`../../docs/TESTCASES/rhwa-1927.md`](../../docs/TESTCASES/rhwa-1927.md).
 
