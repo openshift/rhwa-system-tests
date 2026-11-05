@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,12 +17,14 @@ import (
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
+	"github.com/medik8s/system-tests/tests/internal/helpers"
 	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/internal/mustgather"
 	"github.com/medik8s/system-tests/tests/snr-operator/internal/snrparams"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -69,6 +72,20 @@ var _ = Describe(
 
 				destDir, mkdirErr := mustgather.CreateDestDir("snr-must-gather-", GinkgoT().TempDir())
 				Expect(mkdirErr).ToNot(HaveOccurred(), "Failed to create must-gather output directory")
+
+				By("Waiting for the SNR agent DaemonSet to finish rolling out")
+
+				// The pod names captured below are compared against must-gather's output
+				// thirteen seconds later, so they have to belong to a DaemonSet that is not
+				// about to replace them. Any earlier spec that edits the
+				// SelfNodeRemediationConfig rolls the agents -- network_policy patches it six
+				// times in its race step -- and a six-node rolling update is still draining
+				// two specs later. Spec order is randomised, so whether that happened is not
+				// something this spec can assume either way.
+				Expect(helpers.WaitForDaemonSetStable(
+					context.Background(), APIClient, snrparams.AgentDaemonSetName)).To(Succeed(),
+					"Agent DaemonSet %s must finish rolling out before pod names are captured",
+					snrparams.AgentDaemonSetName)
 
 				By("Capturing cluster state before must-gather for validation")
 
@@ -134,12 +151,35 @@ var _ = Describe(
 
 				By("Validating SNR controller and agent pod data is collected")
 
+				collected, vanished := 0, 0
+
 				for _, podName := range snrPodNames {
-					Expect(mustgather.HasMatchingFile(collectedFiles, podName)).To(BeTrue(),
-						"must-gather should contain data for SNR pod %s", podName)
+					if mustgather.HasMatchingFile(collectedFiles, podName) {
+						collected++
+
+						continue
+					}
+
+					// must-gather collects what is live when it runs. A pod deleted since the
+					// capture above -- a late rollout, or a node that stopped reporting -- was
+					// never there to collect, so its absence says nothing about must-gather.
+					// Only a pod that still exists proves a gap.
+					if !snrPodExists(podName) {
+						GinkgoWriter.Printf(
+							"SNR pod %s was deleted during must-gather; not requiring its data\n", podName)
+						vanished++
+
+						continue
+					}
+
+					Fail(fmt.Sprintf(
+						"must-gather should contain data for SNR pod %s, which still exists", podName))
 				}
 
-				GinkgoWriter.Printf("SNR pod data collected: %d/%d\n", len(snrPodNames), len(snrPodNames))
+				Expect(collected).To(BeNumerically(">", 0),
+					"must-gather collected data for none of the %d SNR pods", len(snrPodNames))
+				GinkgoWriter.Printf("SNR pod data collected: %d/%d (%d pods deleted mid-run)\n",
+					collected, len(snrPodNames), vanished)
 			})
 	})
 
@@ -168,4 +208,24 @@ func collectSNRPodNames() []string {
 	}
 
 	return podNames
+}
+
+// snrPodExists reports whether a pod is still on the cluster. Used to tell a real gap in
+// must-gather's collection from a pod that was deleted while it ran: only the former is a
+// failure. An API error is reported as "still exists" so a lookup problem cannot quietly
+// excuse missing data.
+func snrPodExists(name string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), medik8sparams.DefaultTimeout)
+	defer cancel()
+
+	_, err := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).Get(ctx, name, metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return false
+	}
+
+	if err != nil {
+		GinkgoWriter.Printf("Could not check whether pod %s still exists: %v\n", name, err)
+	}
+
+	return true
 }

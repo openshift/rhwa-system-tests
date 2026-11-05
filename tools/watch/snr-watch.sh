@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Snapshot of everything an SNR remediation touches: node Ready/cordon/boot ID
-# /taints, any SelfNodeRemediation or NodeHealthCheck CR, the live
+# Snapshot of everything an SNR remediation touches: node Ready/cordon/full boot
+# ID/taints, any SelfNodeRemediation or NodeHealthCheck CR, the live
 # minPeersForRemediation, and the agent pods with their ages.
 #
 #   watch -n 5 -d tools/watch/snr-watch.sh   # Linux, or macOS with `brew install watch`
@@ -81,19 +81,20 @@ fi
 # tools are installed.
 nodes() {
 	oc get nodes --no-headers -o custom-columns=\
-'N:.metadata.name,R:.status.conditions[?(@.type=="Ready")].status,C:.spec.unschedulable,B:.status.nodeInfo.bootID,T:.spec.taints[*].key' \
+	'N:.metadata.name,R:.status.conditions[?(@.type=="Ready")].status,C:.spec.unschedulable,B:.status.nodeInfo.bootID,TK:.spec.taints[*].key,TV:.spec.taints[*].value,TE:.spec.taints[*].effect' \
 		2>/dev/null |
 		awk '
-			BEGIN { printf "  %-12s %-8s %-7s %-9s %s\n", "NAME", "READY", "CORDON", "BOOTID", "TAINTS" }
+			BEGIN { printf "  %-12s %-8s %-7s %-36s %s\n", "NAME", "READY", "CORDON", "BOOTID", "TAINTS (KEY | VALUE | EFFECT)" }
 			{
 				cordon = ($3 == "true") ? "YES" : "-"
-				boot   = ($4 == "<none>" || $4 == "") ? "?" : substr($4, 1, 8)
+				boot   = ($4 == "<none>" || $4 == "") ? "?" : $4
 				taints = $5
-				# Keep only the last path segment so out-of-service and
-				# unreachable stay readable in a narrow column.
-				gsub(/node-role\.kubernetes\.io\/|node\.kubernetes\.io\//, "", taints)
-				if (taints == "<none>" || taints == "") taints = "-"
-				printf "  %-12s %-8s %-7s %-9s %s\n", $1, $2, cordon, boot, taints
+				if (taints == "<none>" || taints == "") {
+					taints = "-"
+				} else {
+					taints = $5 " | " $6 " | " $7
+				}
+				printf "  %-12s %-8s %-7s %-36s %s\n", $1, $2, cordon, boot, taints
 				seen++
 			}
 			END { if (seen == 0) print "  <api unreachable>" }

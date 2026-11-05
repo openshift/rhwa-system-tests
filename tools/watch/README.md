@@ -18,6 +18,7 @@ for the person running the test, not for the test itself.
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
 | [`wao-watch.sh`](wao-watch.sh) | Per-operand `desiredState`/`phase`/`admissionReady`/retained count from the `WorkloadAvailabilityConfig`, WAO's own conditions, and the Deployments, DaemonSets and pods in the operator namespace | [`rhwa-2040`](../../docs/TESTCASES/rhwa-2040.md) — suits any spec that enables or disables a WAO operand |
+| [`snr-conditions-watch.sh`](snr-conditions-watch.sh) | Every `SelfNodeRemediation` CR with its `Processing`/`Succeeded` status and reason, which node it fences and whether that node exists, and its deletion/finalizer state; the `NodeHealthCheck` CRs and conditions that produce those remediations; plus the SNR and NHC operand phases, the controller pods' restart counts, and a node invariant line | SNR processing-condition specs `70584` and `60881` — suits any spec that asserts on SNR conditions rather than on a reboot |
 
 ## `snr-watch.sh`
 
@@ -36,7 +37,7 @@ eyeballing them.
 
 | Block | Shows |
 | ----- | ----- |
-| `nodes` | name, `Ready`, cordon, first 8 chars of `status.nodeInfo.bootID`, taint keys |
+| `nodes` | name, `Ready`, cordon, full `status.nodeInfo.bootID`, and taint keys, values and effects |
 | `remediation CRs` | `SelfNodeRemediation` and `NodeHealthCheck` across all namespaces |
 | `snrc` | live `spec.minPeersForRemediation` from the default `SelfNodeRemediationConfig` |
 | `agent pods` | name, ready, status, age and node for everything in the operator namespace |
@@ -51,7 +52,7 @@ A rebooting node appears in three stages, and the last is the slowest:
    heartbeating — the node-lifecycle controller marking a stale status, which is right for
    a node that vanished rather than one reporting itself unhealthy.
 2. The taint manager adds `unreachable` and `not-ready`, each twice: once `NoSchedule` and
-   once `NoExecute`. The script prints keys only, so the repetition is expected.
+   once `NoExecute`. The taint column includes the value and effect when present.
 3. `bootID` changes — only once the kubelet re-registers, so this marks the node coming
    *back*, not going down.
 
@@ -94,6 +95,84 @@ failure:
 What must *not* change is `workload-availability-operator-controller-manager`, which stays
 `1/1` throughout. If WAO's own manager restarts mid-run, the operand phases are reporting a WAO
 recovery rather than operand health.
+
+## `snr-conditions-watch.sh`
+
+```bash
+watch -n 5 -d tools/watch/snr-conditions-watch.sh   # Linux, or macOS with `brew install watch`
+tools/watch/snr-conditions-watch.sh --loop          # anywhere, no `watch` needed
+tools/watch/snr-conditions-watch.sh                 # one snapshot and exit
+```
+
+For the SNR processing-condition specs — "Verify SNR conditions with non-existent node
+name" (`70584`) and "Verify SNR conditions with nhc-timed-out annotation" (`60881`) — and
+for any other spec that asserts on `SelfNodeRemediation` status rather than on a reboot.
+Use [`snr-watch.sh`](snr-watch.sh) instead when the spec actually remediates a node: boot
+IDs and taints are what a destructive run turns on, and they are not in this one.
+
+| Block | Shows |
+| ----- | ----- |
+| `operand` | the `selfNodeRemediation` **and** `nodeHealthCheck` rows of the `WorkloadAvailabilityConfig` (`desiredState`, `phase`, `admissionReady`) and both sets of controller pods with their restart counts |
+| `NodeHealthCheck CRs` | per CR: `PHASE`, `DISABL` (the `Disabled` condition), `MINHLT`, `OBS`/`HEALTH` node counts, and `UNHEALTHY->REMEDIATION` naming the CR created for each unhealthy node; a `reason:` line underneath whenever the phase is not plain `Enabled` |
+| `SelfNodeRemediation CRs` | per CR: `NODE` and `EXISTS` (which node it fences, and whether that node is real), `VIA` (the owning `NodeHealthCheck`, or `-` when a spec created it directly), `NHC-TO` (the `nhc-timed-out` annotation), `PROC`/`SUCC` condition status, `DELETING`, and the reason |
+| `nodes (must not change)` | one row per node: `ROLE`, `READY`, `CORDON`, `REBOOT-CAP`, `WD`, `EXCLUDED` and a `NOTES` column, with a count line underneath |
+
+**Start it before the run.** Both specs create a CR, assert on it, and delete it in
+`DeferCleanup` within a few seconds; a snapshot taken afterwards shows an empty table.
+
+Reading the NHC table — this is where a remediation spec's hand-off either happens or does
+not, and the two ways it fails look nothing alike even though both leave the SNR table
+empty:
+
+| What you see | What it means |
+| ------------ | ------------- |
+| `PHASE` empty, `DISABL ?` | the CR was accepted and never reconciled. Nothing is running the NHC controller — check the operand rows. WAO installs every CRD whatever is enabled, so a disabled `nodeHealthCheck` operand takes these CRs happily and then ignores them |
+| `PHASE Enabled`, `UNHEALTHY -` | the controller is running and does not consider the node unhealthy yet: selector mismatch, or the unhealthy duration has not elapsed |
+| `PHASE Remediating` | the hand-off worked; `UNHEALTHY->REMEDIATION` names the CR the SNR table should now be showing |
+
+Reading the CR table:
+
+1. **`EXISTS` must stay `MISSING`** for spec `70584`. The spec asserts no such node exists
+   precisely so that a conditions test cannot trigger real fencing. `yes` there means the
+   run is about to remediate a live node — stop it. `NODE` is read from the
+   `remediation.medik8s.io/node-name` annotation rather than the CR's own name: the two
+   agree only for a CR a spec wrote itself, since NHC names the ones it creates
+   `<node>-<random>`.
+2. **`PROC` never passes through `True`.** A remediation that is skipped or timed out goes
+   straight to `Processing=False`, so waiting to see `True` first is waiting for something
+   that will not happen. The discriminator is `REASON`:
+   `RemediationSkippedNodeNotFound` for `70584`, `RemediationTimeoutByNHC` for `60881`.
+3. **`REASON` splits as `proc/succ`** only when the two conditions disagree. One value
+   means both carry it, which is the normal case.
+4. **`DELETING=BLOCKED`** is a CR with a deletion timestamp and finalizers still attached —
+   cleanup blocked, not cleanup finished. SNR's own controller removes that finalizer, so
+   a CR that sits there means the controller stopped watching: most often the operand was
+   disabled while the CR was still alive. Re-enable the operand and it drains.
+
+`restarts` climbing on a controller pod explains a condition that never appears, and it is
+worth ruling out before reading a timeout as a product bug.
+
+The node block carries the conditions and the labels and annotations SNR itself acts on,
+one row per node. For a conditions spec none of it may change, but these are the same
+columns a destructive SNR run needs, so they are listed rather than merely counted:
+
+| Column | Source | Why it is here |
+| ------ | ------ | -------------- |
+| `ROLE` | `oc get nodes` | Control-plane remediation carries an etcd-quorum constraint that worker remediation does not. `,master` is trimmed — it is one role wearing two labels. |
+| `READY` | the `Ready` condition | The only node condition SNR and NHC act on by default. A remediated node goes to **`Unknown`**, not `False`. |
+| `CORDON` | `.spec.unschedulable` | Left cordoned by an interrupted run; blocks scheduling for everything after it. |
+| `REBOOT-CAP` | `is-reboot-capable.self-node-remediation.medik8s.io` | Written by the SNR agent. `false` means SNR will not watchdog-fence the node, and `unset` means no agent has run there yet — either way a remediation spec silently proves less than it looks like it does. |
+| `WD` | `self-node-remediation.medik8s.io/watchdog-timeout` | The agent's watchdog timeout, in seconds. |
+| `EXCLUDED` | `remediation.medik8s.io/exclude-from-remediation` | `YES` makes NHC skip the node permanently. A leftover from an earlier run is a common reason a remediation never fires. |
+| `NOTES` | conditions and taints | Only anomalies: `MemoryPressure`/`DiskPressure`/`PIDPressure`/`NetworkUnavailable` when `True`, and taints matching `medik8s`, `out-of-service`, `unreachable` or `not-ready`. The node-role taint every control-plane node carries is deliberately not shown — printing it on every line would bury the one taint that means something. |
+
+`ROLE` is read from `oc get nodes` rather than from the node-role labels because those
+carry an empty value, and an empty value renders as nothing and silently shifts every
+column after it. The rest is one tab-separated jsonpath, where an absent field stays an
+empty field instead of disappearing — worth copying if you add a column.
+
+`SNR_WATCH_NS` overrides the namespace, `WAO_WATCH_WAC` the configuration name. Requires
+only `oc` and `awk`.
 
 ## Adding one
 
