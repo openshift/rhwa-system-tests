@@ -18,7 +18,7 @@ for the person running the test, not for the test itself.
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
 | [`wao-watch.sh`](wao-watch.sh) | Per-operand `desiredState`/`phase`/`admissionReady`/retained count from the `WorkloadAvailabilityConfig`, WAO's own conditions, and the Deployments, DaemonSets and pods in the operator namespace | [`rhwa-2040`](../../docs/TESTCASES/rhwa-2040.md) — suits any spec that enables or disables a WAO operand |
-| [`snr-conditions-watch.sh`](snr-conditions-watch.sh) | Every `SelfNodeRemediation` CR with its `Processing`/`Succeeded` status and reason, whether a node of that name exists, and its deletion/finalizer state; plus the SNR operand phase, the controller pods' restart counts, and a node invariant line | SNR processing-condition specs `70584` and `60881` — suits any spec that asserts on SNR conditions rather than on a reboot |
+| [`snr-conditions-watch.sh`](snr-conditions-watch.sh) | Every `SelfNodeRemediation` CR with its `Processing`/`Succeeded` status and reason, which node it fences and whether that node exists, and its deletion/finalizer state; the `NodeHealthCheck` CRs and conditions that produce those remediations; plus the SNR and NHC operand phases, the controller pods' restart counts, and a node invariant line | SNR processing-condition specs `70584` and `60881` — suits any spec that asserts on SNR conditions rather than on a reboot |
 
 ## `snr-watch.sh`
 
@@ -37,7 +37,7 @@ eyeballing them.
 
 | Block | Shows |
 | ----- | ----- |
-| `nodes` | name, `Ready`, cordon, first 8 chars of `status.nodeInfo.bootID`, taint keys |
+| `nodes` | name, `Ready`, cordon, full `status.nodeInfo.bootID`, and taint keys, values and effects |
 | `remediation CRs` | `SelfNodeRemediation` and `NodeHealthCheck` across all namespaces |
 | `snrc` | live `spec.minPeersForRemediation` from the default `SelfNodeRemediationConfig` |
 | `agent pods` | name, ready, status, age and node for everything in the operator namespace |
@@ -52,7 +52,7 @@ A rebooting node appears in three stages, and the last is the slowest:
    heartbeating — the node-lifecycle controller marking a stale status, which is right for
    a node that vanished rather than one reporting itself unhealthy.
 2. The taint manager adds `unreachable` and `not-ready`, each twice: once `NoSchedule` and
-   once `NoExecute`. The script prints keys only, so the repetition is expected.
+   once `NoExecute`. The taint column includes the value and effect when present.
 3. `bootID` changes — only once the kubelet re-registers, so this marks the node coming
    *back*, not going down.
 
@@ -112,19 +112,32 @@ IDs and taints are what a destructive run turns on, and they are not in this one
 
 | Block | Shows |
 | ----- | ----- |
-| `operand` | the `selfNodeRemediation` row of the `WorkloadAvailabilityConfig` (`desiredState`, `phase`, `admissionReady`) and the controller pods with their restart counts |
-| `SelfNodeRemediation CRs` | per CR: `NODE` (does a node of that name exist), `NHC-TO` (the `nhc-timed-out` annotation), `PROC`/`SUCC` condition status, `DELETING`, and the reason |
+| `operand` | the `selfNodeRemediation` **and** `nodeHealthCheck` rows of the `WorkloadAvailabilityConfig` (`desiredState`, `phase`, `admissionReady`) and both sets of controller pods with their restart counts |
+| `NodeHealthCheck CRs` | per CR: `PHASE`, `DISABL` (the `Disabled` condition), `MINHLT`, `OBS`/`HEALTH` node counts, and `UNHEALTHY->REMEDIATION` naming the CR created for each unhealthy node; a `reason:` line underneath whenever the phase is not plain `Enabled` |
+| `SelfNodeRemediation CRs` | per CR: `NODE` and `EXISTS` (which node it fences, and whether that node is real), `VIA` (the owning `NodeHealthCheck`, or `-` when a spec created it directly), `NHC-TO` (the `nhc-timed-out` annotation), `PROC`/`SUCC` condition status, `DELETING`, and the reason |
 | `nodes (must not change)` | one row per node: `ROLE`, `READY`, `CORDON`, `REBOOT-CAP`, `WD`, `EXCLUDED` and a `NOTES` column, with a count line underneath |
 
 **Start it before the run.** Both specs create a CR, assert on it, and delete it in
 `DeferCleanup` within a few seconds; a snapshot taken afterwards shows an empty table.
 
+Reading the NHC table — this is where a remediation spec's hand-off either happens or does
+not, and the two ways it fails look nothing alike even though both leave the SNR table
+empty:
+
+| What you see | What it means |
+| ------------ | ------------- |
+| `PHASE` empty, `DISABL ?` | the CR was accepted and never reconciled. Nothing is running the NHC controller — check the operand rows. WAO installs every CRD whatever is enabled, so a disabled `nodeHealthCheck` operand takes these CRs happily and then ignores them |
+| `PHASE Enabled`, `UNHEALTHY -` | the controller is running and does not consider the node unhealthy yet: selector mismatch, or the unhealthy duration has not elapsed |
+| `PHASE Remediating` | the hand-off worked; `UNHEALTHY->REMEDIATION` names the CR the SNR table should now be showing |
+
 Reading the CR table:
 
-1. **`NODE` must stay `missing`** for spec `70584`. An SNR CR is named after the node it
-   fences, and the spec asserts no such node exists precisely so that a conditions test
-   cannot trigger real fencing. `EXISTS` there means the run is about to remediate a live
-   node — stop it.
+1. **`EXISTS` must stay `MISSING`** for spec `70584`. The spec asserts no such node exists
+   precisely so that a conditions test cannot trigger real fencing. `yes` there means the
+   run is about to remediate a live node — stop it. `NODE` is read from the
+   `remediation.medik8s.io/node-name` annotation rather than the CR's own name: the two
+   agree only for a CR a spec wrote itself, since NHC names the ones it creates
+   `<node>-<random>`.
 2. **`PROC` never passes through `True`.** A remediation that is skipped or timed out goes
    straight to `Processing=False`, so waiting to see `True` first is waiting for something
    that will not happen. The discriminator is `REASON`:

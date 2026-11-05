@@ -5,6 +5,12 @@
 # reason behind them, whether a node of that name actually exists, and the
 # deletion/finalizer state that cleanup depends on.
 #
+# Alongside it, the NodeHealthCheck CRs and conditions that produce those
+# SelfNodeRemediations in the first place. A spec that waits forever for a
+# remediation is usually not an SNR problem at all: it is an NHC CR that no
+# controller reconciled, or one whose selector never matched the node. Reading
+# the two tables together tells those apart at a glance.
+#
 #   watch -n 5 -d tools/watch/snr-conditions-watch.sh   # Linux, or macOS with `brew install watch`
 #   tools/watch/snr-conditions-watch.sh --loop          # anywhere: self-refreshing, marks changes with *
 #   tools/watch/snr-conditions-watch.sh                 # one snapshot and exit
@@ -24,7 +30,7 @@
 # alike. Needs only `oc` and `awk` -- the BSD awk on macOS and gawk on Fedora
 # both handle what is used here. Set SNR_WATCH_NS to override the namespace.
 #
-# Each tick is four small reads.
+# Each tick is six small reads.
 
 set -u
 
@@ -76,28 +82,46 @@ if ! command -v oc >/dev/null 2>&1; then
 	exit 2
 fi
 
-# operand prints the one WorkloadAvailabilityConfig row that matters here. The
-# suite enables selfNodeRemediation in BeforeSuite, so an operand that is not
-# Available means the run failed before any CR was created.
+# operand prints the two WorkloadAvailabilityConfig rows that matter here.
+# The suite enables both in BeforeSuite, so an operand that is not Available
+# means the run failed before any CR was created.
+#
+# nodeHealthCheck is here because the remediation specs never create a
+# SelfNodeRemediation themselves: they create NodeHealthCheck CRs and wait for
+# the NHC controller to instantiate SNR from a template. A disabled NHC operand
+# accepts those CRs -- WAO ships every CRD whatever is enabled -- and then
+# reconciles nothing, which looks exactly like a spec that is still waiting.
+#
+# Ranging over every component and filtering in awk, rather than a jsonpath
+# filter per name: one read instead of two, and a component WAO stops reporting
+# shows up as a missing row rather than a silently empty one.
 operand() {
 	oc get workloadavailabilityconfig "$WAC" -o jsonpath=\
-'{range .status.components[?(@.name=="selfNodeRemediation")]}{.desiredState}{"\t"}{.phase}{"\t"}{.admissionReady}{"\n"}{end}' \
+'{range .status.components[*]}{.name}{"\t"}{.desiredState}{"\t"}{.phase}{"\t"}{.admissionReady}{"\n"}{end}' \
 		2>/dev/null |
 		awk -F '\t' '
-			{
-				admit = ($3 == "") ? "?" : $3
-				printf "  selfNodeRemediation  desired=%-9s phase=%-18s admissionReady=%s\n", $1, $2, admit
-				seen++
+			$1 == "selfNodeRemediation" || $1 == "nodeHealthCheck" {
+				admit = ($4 == "") ? "?" : $4
+				printf "  %-20s desired=%-9s phase=%-18s admissionReady=%s\n", $1, $2, $3, admit
+				seen[$1] = 1
 			}
-			END { if (seen == 0) print "  <no WorkloadAvailabilityConfig: pre-WAO cluster, or api unreachable>" }
+			END {
+				if (length(seen) == 0) {
+					print "  <no WorkloadAvailabilityConfig: pre-WAO cluster, or api unreachable>"
+				} else {
+					if (!("selfNodeRemediation" in seen)) print "  selfNodeRemediation  <not reported by WAO>"
+					if (!("nodeHealthCheck" in seen))     print "  nodeHealthCheck      <not reported by WAO>"
+				}
+			}
 		'
 }
 
 # manager prints the controller pods with their restart counts. Conditions are
-# written by this controller, so a pod that is restarting is the first thing to
-# rule out when a condition never appears. custom-columns rather than the
-# default output because `oc get pods` renders a recent restart as
-# "1 (5m ago)", which shifts every column after it.
+# written by these controllers, so a pod that is restarting is the first thing
+# to rule out when a condition never appears -- and an NHC row that is missing
+# entirely is the first thing to rule out when a NodeHealthCheck CR never gets
+# a status. custom-columns rather than the default output because `oc get pods`
+# renders a recent restart as "1 (5m ago)", which shifts every column after it.
 manager() {
 	oc get pods -n "$NS" --no-headers -o custom-columns=\
 'N:.metadata.name,P:.status.phase,RD:.status.containerStatuses[*].ready,RS:.status.containerStatuses[*].restartCount' \
@@ -105,15 +129,35 @@ manager() {
 		awk '
 			$1 ~ /^self-node-remediation-controller-manager-/ {
 				printf "  %-58s %-10s ready=%-11s restarts=%s\n", $1, $2, $3, $4
-				seen++
+				snr++
 			}
-			END { if (seen == 0) print "  <no controller pod: operand disabled, or api unreachable>" }
+			$1 ~ /^node-healthcheck-controller-manager-/ {
+				printf "  %-58s %-10s ready=%-11s restarts=%s\n", $1, $2, $3, $4
+				nhc++
+			}
+			END {
+				if (snr == 0) print "  <no SNR controller pod: operand disabled, or api unreachable>"
+				if (nhc == 0) print "  <no NHC controller pod: operand disabled -- NodeHealthCheck CRs will not be reconciled>"
+			}
 		'
 }
 
-# crs is the subject of the spec. NODE answers the question the spec asserts
-# first -- an SNR CR is named after the node it fences, so "missing" is what
-# keeps a conditions test from triggering real fencing.
+# crs is the subject of the spec. NODE and EXISTS answer the question the
+# conditions specs assert first: which node this CR fences, and whether that
+# node is real -- a name matching nothing is what keeps a conditions test from
+# triggering actual fencing.
+#
+# Which node a CR fences is read from the remediation.medik8s.io/node-name
+# annotation, not from the CR's own name. The two agree only for a CR a spec
+# created itself. NHC names the ones it creates <node>-<random>, so comparing
+# the CR name against the node list reports every NHC-driven remediation as
+# fencing a node that does not exist -- the opposite of the truth, in the one
+# table you would check to find out. The name is still the fallback, because a
+# hand-written CR carries no annotation.
+#
+# VIA names the NodeHealthCheck that owns the CR, which is what ties this table
+# to the one above: a row with an owner came from the hand-off, a row without
+# one was created directly by a spec.
 crs() {
 	node_names="$(oc get nodes --no-headers -o custom-columns=N:.metadata.name 2>/dev/null)"
 	# Assembled in parts rather than written across continued lines: inside
@@ -121,6 +165,8 @@ crs() {
 	# continuation, and jsonpath would carry both it and the newline into the
 	# output as extra fields and extra records.
 	jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations}{"\t"}'
+	jsonpath="$jsonpath"'{.metadata.annotations.remediation\.medik8s\.io/node-name}{"\t"}'
+	jsonpath="$jsonpath"'{.metadata.ownerReferences[?(@.kind=="NodeHealthCheck")].name}{"\t"}'
 	jsonpath="$jsonpath"'{.status.conditions[?(@.type=="Processing")].status}{"\t"}'
 	jsonpath="$jsonpath"'{.status.conditions[?(@.type=="Processing")].reason}{"\t"}'
 	jsonpath="$jsonpath"'{.status.conditions[?(@.type=="Succeeded")].status}{"\t"}'
@@ -136,26 +182,102 @@ crs() {
 					gsub(/[ \t\r]/, "", name)
 					if (name != "") known[name] = 1
 				}
-				printf "  %-28s %-8s %-7s %-6s %-6s %-9s %s\n", \
-					"NAME", "NODE", "NHC-TO", "PROC", "SUCC", "DELETING", "REASON"
+				printf "  %-22s %-12s %-7s %-22s %-6s %-7s %-7s %-9s %s\n", \
+					"NAME", "NODE", "EXISTS", "VIA", "NHC-TO", "PROC", "SUCC", "DELETING", "REASON"
 			}
 			$1 != "" {
-				node   = ($1 in known) ? "EXISTS" : "missing"
+				node   = ($3 == "") ? $1 : $3
+				exists = (node in known) ? "yes" : "MISSING"
+				via    = ($4 == "") ? "-" : $4
 				nhc    = ($2 ~ /nhc-timed-out/) ? "yes" : "-"
-				proc   = ($3 == "") ? "-" : $3
-				succ   = ($5 == "") ? "-" : $5
+				proc   = ($5 == "") ? "-" : $5
+				succ   = ($7 == "") ? "-" : $7
 				# A CR with a deletionTimestamp and finalizers still on it is
 				# cleanup blocked, not cleanup finished.
 				del    = "-"
-				if ($7 != "") del = ($8 == "" || $8 == "[]") ? "yes" : "BLOCKED"
+				if ($9 != "") del = ($10 == "" || $10 == "[]") ? "yes" : "BLOCKED"
 				# Both conditions normally carry the same reason; show one
 				# column, and only split it when the controller disagrees.
-				reason = ($6 == "") ? "-" : $6
-				if ($4 != "" && $4 != $6) reason = $4 "/" reason
-				printf "  %-28s %-8s %-7s %-6s %-6s %-9s %s\n", $1, node, nhc, proc, succ, del, reason
+				reason = ($8 == "") ? "-" : $8
+				if ($6 != "" && $6 != $8) reason = $6 "/" reason
+				printf "  %-22s %-12s %-7s %-22s %-6s %-7s %-7s %-9s %s\n", \
+					$1, node, exists, via, nhc, proc, succ, del, reason
 				seen++
 			}
 			END { if (seen == 0) print "  none (created and deleted within seconds -- start this before the run)" }
+		'
+}
+
+# nhccrs is the upstream half of the story crs() tells. A remediation spec
+# creates NodeHealthCheck CRs and then waits for a SelfNodeRemediation to
+# appear; this is where that hand-off either happens or does not, and the two
+# failures look nothing alike here even though both show an empty crs() table:
+#
+#   PHASE empty, DISABLED '?'  -- the CR was accepted and never reconciled.
+#                                 Nothing is running the NHC controller. Check
+#                                 the operand rows above.
+#   PHASE Enabled, UNHEALTHY - -- the controller is running and does not think
+#                                 the node is unhealthy yet: selector mismatch,
+#                                 or the unhealthy duration has not elapsed.
+#   PHASE Remediating          -- the hand-off worked; REMEDIATION names the CR
+#                                 that crs() should now be showing.
+#
+# NodeHealthCheck is cluster-scoped, so this read is not namespaced.
+#
+# The nested range over unhealthyNodes[].remediations[] is what maps a node to
+# the CR created for it. jsonpath renders a missing field as an empty field
+# rather than dropping it, so the column count holds whatever the status
+# contains.
+nhccrs() {
+	jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}'
+	jsonpath="$jsonpath"'{.status.conditions[?(@.type=="Disabled")].status}{"\t"}'
+	jsonpath="$jsonpath"'{.spec.minHealthy}{"\t"}{.status.observedNodes}{"\t"}{.status.healthyNodes}{"\t"}'
+	jsonpath="$jsonpath"'{range .status.unhealthyNodes[*]}{.name}{"->"}'
+	jsonpath="$jsonpath"'{range .remediations[*]}{.resource.name}{" "}{end}{end}{"\t"}'
+	jsonpath="$jsonpath"'{.status.reason}{"\n"}{end}'
+
+	oc get nodehealthcheck -o jsonpath="$jsonpath" 2>/dev/null |
+		awk -F '\t' '
+			BEGIN {
+				printf "  %-24s %-13s %-6s %-6s %-5s %-6s %s\n", \
+					"NAME", "PHASE", "DISABL", "MINHLT", "OBS", "HEALTH", "UNHEALTHY->REMEDIATION"
+			}
+			$1 != "" {
+				total++
+				# An empty phase on a CR that exists is the signature worth
+				# naming: the API accepted it because WAO installs every CRD,
+				# and no controller ever picked it up.
+				phase = ($2 == "") ? "<none>" : $2
+				if ($2 == "") orphaned++
+				# The condition is named Disabled, so False is the healthy
+				# value and an unset one means nothing has written status yet.
+				disabl = ($3 == "") ? "?" : (($3 == "True") ? "YES" : "-")
+				minhlt = ($4 == "") ? "-" : $4
+				obs    = ($5 == "") ? "-" : $5
+				health = ($6 == "") ? "-" : $6
+				unhlth = $7
+				sub(/ +$/, "", unhlth)
+				if (unhlth == "") unhlth = "-"
+				if ($7 != "") remediating++
+				printf "  %-24s %-13s %-6s %-6s %-5s %-6s %s\n", \
+					$1, phase, disabl, minhlt, obs, health, unhlth
+				# The reason carries why a CR is Disabled or stuck -- a missing
+				# remediation template, a selector matching nothing. Only shown
+				# when the phase is not the plain Enabled case, so a healthy
+				# table stays one line per CR.
+				if ($8 != "" && $2 != "Enabled") printf "  %-24s   reason: %s\n", "", $8
+			}
+			END {
+				if (total == 0) {
+					print "  none (the spec creates these first -- start this before the run)"
+				} else {
+					printf "  %d NodeHealthCheck CRs, %d remediating", total, remediating + 0
+					if (orphaned > 0) {
+						printf ", %d with no status at all -- no NHC controller is running", orphaned
+					}
+					printf "\n"
+				}
+			}
 		'
 }
 
@@ -197,7 +319,7 @@ nodes() {
 						roleOf[pair[1]] = role
 					}
 				}
-				printf "  %-24s %-14s %-6s %-7s %-11s %-4s %-9s %s\n", \
+				printf "  %-24s %-14s %-7s %-7s %-11s %-4s %-9s %s\n", \
 					"NAME", "ROLE", "READY", "CORDON", "REBOOT-CAP", "WD", "EXCLUDED", "NOTES"
 			}
 			$1 != "" {
@@ -225,16 +347,24 @@ nodes() {
 				# Only remediation taints. Every control-plane node carries a
 				# node-role taint, and printing it on every line would bury
 				# the one taint that means something here.
+				# Deduplicated on the key: a taint is keyed by key *and*
+				# effect, so an unreachable node carries
+				# node.kubernetes.io/unreachable twice -- once NoSchedule,
+				# once NoExecute -- and printing both says nothing the first
+				# one did not.
 				taintCount = split($11, taintKeys, " ")
+				delete shown
 				for (tIdx = 1; tIdx <= taintCount; tIdx++) {
-					if (taintKeys[tIdx] ~ /medik8s|out-of-service|unreachable|not-ready/) {
-						notes = notes taintKeys[tIdx] " "
+					key = taintKeys[tIdx]
+					if (key ~ /medik8s|out-of-service|unreachable|not-ready/ && !(key in shown)) {
+						shown[key] = 1
+						notes = notes key " "
 						taintFlagged++
 					}
 				}
 				if (notes == "") notes = "-"
 
-				printf "  %-24s %-14s %-6s %-7s %-11s %-4s %-9s %s\n", \
+				printf "  %-24s %-14s %-7s %-7s %-11s %-4s %-9s %s\n", \
 					$1, role, ready, cordon, reboot, wd, excl, notes
 			}
 			END {
@@ -252,6 +382,10 @@ snapshot() {
 	echo "=== operand ==="
 	operand
 	manager
+
+	echo
+	echo "=== NodeHealthCheck CRs ==="
+	nhccrs
 
 	echo
 	echo "=== SelfNodeRemediation CRs ==="

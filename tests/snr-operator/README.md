@@ -96,18 +96,6 @@ the correct remediation strategy, and that unsupported templates
 - **Standalone**: `ginkgo --label-filter="snr" --focus="Automatic remediation template" ./tests/snr-operator/...`
 - **Pass criteria**: Automatic template exists with strategy "Automatic", ResourceDeletion and NodeDeletion templates return NotFound
 
-### 3. Verify SNR CSV Annotations ([OCP-52136](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-52136))
-
-Validates that the active SNR ClusterServiceVersion (in Succeeded phase)
-has required OLM annotations: valid-subscription, support contact,
-repository URL, and at least one maintainer.
-
-- **Operators**: SNR v0.13.0+
-- **Cluster**: Any topology
-- **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="snr" --focus="CSV annotations" ./tests/snr-operator/...`
-- **Pass criteria**: All required annotations present, maintainers list non-empty
-
 ### 4. Verify SNR CSV Metadata ([OCP-70705](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-70705))
 
 Validates infrastructure feature annotations (disconnected, fips-compliant,

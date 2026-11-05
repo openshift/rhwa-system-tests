@@ -2,12 +2,12 @@ package snr
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/medik8s/system-tests/tests/internal/helpers"
-	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/internal/reporter"
@@ -36,27 +36,54 @@ func TestSNR(t *testing.T) {
 // exists until spec.components.selfNodeRemediation.enabled is true. Enabling it is a precondition
 // of the suite, not something any spec asserts, so it runs once here and the specs are unchanged.
 //
-// It runs only when the label filter asks for the WAO layout — see helpers.WAORunRequested. On a
-// pre-WAO cluster SNR is installed as its own operator and there is nothing to enable, so the
-// suite goes straight to the per-operator readiness check each Describe already makes.
+// NHC is enabled alongside it for the same reason. The remediation specs never create a
+// SelfNodeRemediation directly: they create NodeHealthCheck CRs, stop kubelet, and wait for the
+// NHC controller to notice the NotReady node and instantiate SNR from its template. With the NHC
+// operand disabled, those CRs are accepted -- WAO ships every CRD regardless of which operands
+// are on -- and then nothing reconciles them, so no remediation is ever created and the node sits
+// with a stopped kubelet until the spec times out and somebody reboots it by hand. Enabling the
+// operand here is what turns that silent 45-minute hang into a working run.
 //
-// The operand is deliberately left enabled afterwards. Enabling is an installation step rather
+// Both are preconditions of running the SNR suite at all, so neither is gated on the run's label
+// filter. The filter says which specs the caller wants, not which layout the cluster uses, and a
+// run selected with operator:snr alone needs the same two operands running as one that also asked
+// for operator:wao. Gating on the filter is what let an operator:snr run start against a disabled
+// NHC, stop kubelet on two nodes, and wait fifteen minutes for a remediation that nothing was
+// going to create.
+//
+// What does decide whether there is anything to enable is the cluster: a pre-WAO cluster has no
+// WorkloadAvailabilityConfig singleton, SNR and NHC are installed as their own operators, and
+// patching a configuration that is not there would fail for the wrong reason. That shows up as
+// helpers.ErrWAONotInstalled on the first call and the suite goes straight to the per-operator
+// readiness check each Describe already makes.
+//
+// The operands are deliberately left enabled afterwards. Enabling is an installation step rather
 // than state this suite created, and a disable is slow and can strand resources in
 // DisableIncomplete for the next suite.
 var _ = BeforeSuite(func() {
-	suiteConfig, _ := GinkgoConfiguration()
-	if !helpers.WAORunRequested(suiteConfig.LabelFilter) {
-		GinkgoWriter.Printf("%s not in the label filter: leaving operand %s alone\n",
-			labels.OperatorWAO, medik8sparams.WAOComponentSNR)
+	ctx := context.Background()
+
+	By("Ensuring the SNR operand is enabled, Available, configured and serving agents")
+
+	snrErr := helpers.EnsureWAOOperandReady(ctx, APIClient, snrOperandReadiness())
+	if errors.Is(snrErr, helpers.ErrWAONotInstalled) {
+		GinkgoWriter.Printf(
+			"No WorkloadAvailabilityConfig on this cluster: pre-WAO layout, leaving operands %s and %s alone\n",
+			medik8sparams.WAOComponentSNR, medik8sparams.WAOComponentNHC)
 
 		return
 	}
 
-	By("Ensuring the SNR operand is enabled, Available, configured and serving agents")
-	Expect(helpers.EnsureWAOOperandReady(context.Background(), APIClient, snrOperandReadiness())).
+	Expect(snrErr).To(Succeed(),
+		"Operand %s must be fully running before the SNR suite starts",
+		medik8sparams.WAOComponentSNR)
+
+	By("Ensuring the NHC operand is enabled and Available to drive the remediation specs")
+	Expect(helpers.EnsureWAOOperandReady(ctx, APIClient, nhcOperandReadiness())).
 		To(Succeed(),
-			"Operand %s must be fully running before the SNR suite starts",
-			medik8sparams.WAOComponentSNR)
+			"Operand %s must be fully running before the SNR suite starts: the remediation specs "+
+				"create NodeHealthCheck CRs and rely on its controller to create the SelfNodeRemediation",
+			medik8sparams.WAOComponentNHC)
 })
 
 // snrOperandReadiness is everything that must be running before an SNR spec may assume the
@@ -84,10 +111,25 @@ func snrOperandReadiness() helpers.WAOOperandReadiness {
 	}
 }
 
-// The post-run counterpart of the precondition, gated on the same label so a pre-WAO run is
-// untouched. It does not disable the operand -- enabling was an installation step, not state
-// this suite created -- but it does report what the operand ended the run in, and sweeps up
-// CRs the specs' own DeferCleanup did not manage to remove.
+// nhcOperandReadiness is the dependency the remediation specs rely on rather than an operand
+// this suite exercises, so it asks for less than snrOperandReadiness does. Phase Available
+// already covers both Deployments WAO lists for the operand -- the controller manager and the
+// console plugin -- and that controller is the whole requirement here.
+//
+// Nothing is listed under Configs. NHC's own default NodeHealthCheck is not a precondition: the
+// specs create the NodeHealthCheck CRs they remediate through, and waiting on a resource no spec
+// reads would only add a way for the suite to fail before it starts.
+func nhcOperandReadiness() helpers.WAOOperandReadiness {
+	return helpers.WAOOperandReadiness{
+		Component: medik8sparams.WAOComponentNHC,
+	}
+}
+
+// The post-run counterpart of the precondition, gated the same way so that whatever the
+// precondition touched is what gets reported and swept. It does not disable the operand --
+// enabling was an installation step, not state this suite created -- but it does report what the
+// operand ended the run in, and sweeps up CRs the specs' own DeferCleanup did not manage to
+// remove.
 //
 // That sweep matters more under WAO than it did before: a SelfNodeRemediation whose operand is
 // disabled while the CR is still alive strands on its finalizer, because the controller that
@@ -95,8 +137,7 @@ func snrOperandReadiness() helpers.WAOOperandReadiness {
 //
 // Cleanup never fails the suite. Everything below logs and carries on.
 var _ = AfterSuite(func() {
-	suiteConfig, _ := GinkgoConfiguration()
-	if !helpers.WAORunRequested(suiteConfig.LabelFilter) {
+	if _, err := helpers.GetWAOConfig(context.Background(), APIClient); err != nil {
 		return
 	}
 

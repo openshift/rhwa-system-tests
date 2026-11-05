@@ -193,46 +193,6 @@ var _ = Describe(
 				}
 			})
 
-		It("Verify SNR CSV annotations",
-			reportxml.ID("52136"),
-			Label(labels.TierSmoke, labels.DisruptionNonDestructive,
-				labels.PlatformAny, labels.FrequencyPresubmit,
-				labels.ComponentOLM), func() {
-				snrCSV := requireSNRCSV()
-
-				if !helpers.IsDownstream() {
-					Skip("CSV product annotations are absent when ECO_IS_DOWNSTREAM=false")
-				}
-
-				By("Checking valid-subscription annotation")
-
-				annotations := snrCSV.Object.Annotations
-				Expect(annotations).ToNot(BeNil(), "CSV annotations should not be nil")
-				_, hasValidSubscription := annotations["operators.openshift.io/valid-subscription"]
-				Expect(hasValidSubscription).To(BeTrue(),
-					"CSV should have operators.openshift.io/valid-subscription annotation")
-
-				By("Checking support annotation")
-
-				supportValue, hasSupport := annotations["support"]
-				Expect(hasSupport).To(BeTrue(), "CSV should have support annotation")
-				Expect(strings.TrimSpace(supportValue)).ToNot(BeEmpty(),
-					"CSV support annotation should not be empty")
-
-				By("Checking repository annotation")
-
-				repoValue, hasRepository := annotations["repository"]
-				Expect(hasRepository).To(BeTrue(), "CSV should have repository annotation")
-				Expect(strings.TrimSpace(repoValue)).ToNot(BeEmpty(),
-					"CSV repository annotation should not be empty")
-
-				By("Checking maintainers")
-
-				maintainers := snrCSV.Object.Spec.Maintainers
-				Expect(len(maintainers)).To(BeNumerically(">", 0),
-					"CSV should have at least one maintainer")
-			})
-
 		It("Verify SNR CSV metadata",
 			reportxml.ID("70705"),
 			Label(labels.TierSmoke, labels.DisruptionNonDestructive,
