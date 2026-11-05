@@ -188,9 +188,14 @@ func runHostCommandPod(nodeName, podName, script string) (corev1.PodPhase, strin
 }
 
 // agentNamespaceUsable reports whether the SNR agent process can be found on
-// nodeName and iptables runs inside its network namespace.
+// nodeName and iptables runs inside its network namespace. Uses the
+// non-asserting tryRunHostCommandPod so that a stuck-Pending pod (e.g. image
+// pull timeout) causes a Skip rather than a hard Fail.
 func agentNamespaceUsable(nodeName string) (bool, string) {
-	phase, podLog := runHostCommandPod(nodeName, snrparams.CPIsolationProbePodName, agentProbeScript())
+	phase, podLog, err := tryRunHostCommandPod(nodeName, snrparams.CPIsolationProbePodName, agentProbeScript())
+	if err != nil {
+		return false, fmt.Sprintf("probe pod did not reach a terminal phase: %v", err)
+	}
 
 	return phase == corev1.PodSucceeded, podLog
 }
