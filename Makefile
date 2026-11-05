@@ -19,7 +19,7 @@ $(LOCALBIN):
 GINKGO_DIR ?= $(LOCALBIN)/ginkgo
 GINKGO = $(GINKGO_DIR)/$(GINKGO_VERSION)/ginkgo
 
-GO_PACKAGES=$(shell go list ./... | grep -v vendor)
+GO_PACKAGES=$(shell go list ./...)
 .PHONY: lint \
         lint-blanklines \
         fmt \
@@ -66,8 +66,7 @@ deps-download:
 	go mod verify
 
 deps-update:
-	go mod tidy && \
-	go mod vendor
+	go mod tidy
 
 # ECO_GOINFRA_BRANCH: optional branch to sync from (e.g. release-4.20). Empty = default branch.
 ECO_GOINFRA_BRANCH ?=
@@ -78,7 +77,6 @@ else
 	go get github.com/rh-ecosystem-edge/eco-goinfra
 endif
 	go mod tidy
-	go mod vendor
 
 .PHONY: ginkgo
 ginkgo: $(LOCALBIN) ## Download ginkgo locally if necessary.
@@ -130,7 +128,7 @@ build-docker-image:
 	@echo "Building docker image"
 	podman build -t "${BASE_IMG}:${BASE_TAG}" -f Dockerfile
 
-install: deps-update ginkgo
+install: deps-download ginkgo
 	@echo "Installing needed dependencies"
 
 run-tests: ginkgo

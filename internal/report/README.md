@@ -16,6 +16,12 @@ Documentation may be viewed using the following command:
 go doc ./internal/report
 ```
 
+Report generation compiles tests from each selected branch. Those branches may
+pin different modules, so an offline run needs a module cache prepared for every
+selected revision, plus the matching Go toolchain and Ginkgo. A cache prepared for
+`main` alone may be incomplete. Allow dependency access for uncached revisions;
+keep `GOMODCACHE` readable and `GOCACHE` writable by the report process.
+
 ### Examples
 
 For viewing the tree for a single branch while printing all logs:
