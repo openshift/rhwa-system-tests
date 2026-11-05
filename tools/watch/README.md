@@ -18,6 +18,7 @@ for the person running the test, not for the test itself.
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
 | [`wao-watch.sh`](wao-watch.sh) | Per-operand `desiredState`/`phase`/`admissionReady`/retained count from the `WorkloadAvailabilityConfig`, WAO's own conditions, and the Deployments, DaemonSets and pods in the operator namespace | [`rhwa-2040`](../../docs/TESTCASES/rhwa-2040.md) — suits any spec that enables or disables a WAO operand |
+| [`far-watch.sh`](far-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `FenceAgentsRemediation`/`FenceAgentsRemediationTemplate`/`NodeHealthCheck` CRs, each FAR CR's `Processing`/`FenceAgentActionSucceeded`/`Succeeded` conditions, the controller leader `Lease` holder, and the controller pods with their ages | any FAR spec — destructive fence/reboot tests, controller-lifecycle leader handover, and FAR↔NHC interop |
 
 ## `snr-watch.sh`
 
@@ -94,6 +95,56 @@ failure:
 What must *not* change is `workload-availability-operator-controller-manager`, which stays
 `1/1` throughout. If WAO's own manager restarts mid-run, the operand phases are reporting a WAO
 recovery rather than operand health.
+
+## `far-watch.sh`
+
+```bash
+watch -n 5 -d tools/watch/far-watch.sh   # Linux, or macOS with `brew install watch`
+tools/watch/far-watch.sh --loop          # anywhere, no `watch` needed
+tools/watch/far-watch.sh                 # one snapshot and exit
+```
+
+| Block             | Shows                                                                                                 |
+| ----------------- | ----------------------------------------------------------------------------------------------------- |
+| `nodes`           | name, `Ready`, cordon, first 8 chars of `status.nodeInfo.bootID`, taint keys                           |
+| `remediation CRs` | `FenceAgentsRemediation`, `FenceAgentsRemediationTemplate` and `NodeHealthCheck` across all namespaces |
+| `FAR conditions`  | one row per `FenceAgentsRemediation` with its `Processing`, `FenceAgentActionSucceeded` and `Succeeded` conditions |
+| `controller lease`| `spec.holderIdentity` of the FAR leader election `Lease` (`cb305759.medik8s.io`)                       |
+| `controller pods` | name, ready, status, age and node for everything in the operator namespace                             |
+
+`FAR_WATCH_NS` overrides the namespace, `FAR_WATCH_LEASE` the controller lease name (default
+`cb305759.medik8s.io`). Requires only `oc` and `awk`.
+
+Record the boot IDs of the nodes under test **before** starting a run. A real fence reboots the
+node and changes its boot ID; a node that merely went briefly unreachable keeps the same one, and
+most FAR remediation specs assert on exactly that difference.
+
+A fenced node appears in stages, and the last is the slowest:
+
+1. `Ready` becomes **`Unknown`** (not `False`) roughly 40s after the kubelet stops heartbeating —
+   the node-lifecycle controller marking a stale status, which is right for a node that vanished
+   rather than one reporting itself unhealthy.
+2. FAR adds its own **`fence-agents-remediation`** `NoSchedule` taint, and with the default
+   `OutOfServiceTaint` strategy the **`out-of-service`** taint lands too; the taint manager then
+   adds `unreachable` and `not-ready`. The script prints taint keys only, stripped of their
+   `remediation.medik8s.io/` and `node.kubernetes.io/` prefixes.
+3. The FAR CR walks `Processing` → `FenceAgentActionSucceeded` → `Succeeded` in the `FAR conditions`
+   block alongside the node changes.
+4. `bootID` changes — only once the kubelet re-registers, so this marks the node coming *back*, not
+   going down.
+
+Two things are worth knowing before reading a run as a failure:
+
+- **The FAR `NoSchedule` taint is removed when the CR is deleted, not when `Succeeded` flips.** Seeing
+  the taint linger while the CR still exists is expected; it should be gone shortly after the CR is.
+- **`controller lease` holder changing is the subject of the controller-lifecycle spec, not a fault.**
+  That test deletes the leader pod and asserts the `Lease` moves to a different one. What must *not*
+  change outside that test is the holder; a handover with no spec driving it means the controller
+  restarted.
+
+The controller runs two replicas with anti-affinity, so expect two pods on two nodes in the
+`controller pods` block; if one disappears and does not reschedule, that is the regression, not the
+reboot.
 
 ## Adding one
 
