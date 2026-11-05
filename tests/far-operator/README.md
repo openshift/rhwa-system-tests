@@ -13,6 +13,9 @@ Real AWS fencing and recovery are optional with `FAR_FBC_REMEDIATION=true`.
 - `KUBECONFIG` set with cluster-admin access
 - FAR installed in `openshift-workload-availability` namespace
 
+NHC+FAR interop tests also require SSH access to the nodes to stop and recover
+kubelet. See [AWS bastion setup](../../docs/aws-bastion.md) for the launch script.
+
 ## Running
 
 ```bash
@@ -31,17 +34,6 @@ Validates that FAR controller-manager pods are in Running state and the pod coun
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="far" --focus="pod is running" ./tests/far-operator/...`
 - **Pass criteria**: All pods Running, count matches expected replicas for the topology
-
-### 2. Verify FAR CSV Has Required Annotations ([OCP-70637](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-70637))
-
-Validates that the active FAR ClusterServiceVersion (in Succeeded phase) has all required OLM feature annotations: disconnected support, FIPS compliance, suggested namespace, and feature flags.
-
-- **Operators**: FAR v0.8.0
-- **Cluster**: Any topology
-- **Storage**: None
-- **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="far" --focus="required annotations" ./tests/far-operator/...`
-- **Pass criteria**: All required annotations present with expected values on the active CSV
 
 ### 3. Verify FAR Controller Replicas and Node Distribution ([OCP-61222](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-61222))
 
