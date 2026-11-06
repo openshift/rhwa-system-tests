@@ -323,6 +323,13 @@ const (
 	// "manager" cmdline but not the literal "[m]anager" in the script text.
 	AgentProcessPattern = "[m]anager --is-manager=false"
 
+	// AgentProcCmdlinePattern is the plain substring matched against each
+	// /proc/<pid>/cmdline entry (after NUL→space conversion) to locate the
+	// SNR agent. Unlike AgentProcessPattern it carries no pgrep bracket trick:
+	// shell case-pattern matching never sees its own command line, so there is
+	// no self-match risk.
+	AgentProcCmdlinePattern = "--is-manager=false"
+
 	// CPIsolationInjectorPodName is the privileged pod that adds the REJECT
 	// rules inside the victim agent's network namespace.
 	CPIsolationInjectorPodName = "snr-cp-isolation-injector"

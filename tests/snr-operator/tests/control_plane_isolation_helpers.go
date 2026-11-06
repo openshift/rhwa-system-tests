@@ -28,14 +28,23 @@ import (
 // process's network namespace.
 //
 // The agent DaemonSet sets hostPID but not hostNetwork, so the agent is visible
-// to pgrep from a hostPID pod while its peer traffic stays inside the pod
-// network namespace. Rules added with "nsenter --target 1 --net" would land on
-// the host and never match that traffic.
+// from a hostPID pod while its peer traffic stays inside the pod network
+// namespace. Rules added with "nsenter --target 1 --net" would land on the
+// host and never match that traffic.
+//
+// PID discovery uses a /proc/*/cmdline scan instead of pgrep so the script
+// works with ubi9/ubi (which ships nsenter and iptables but not pgrep).
+// cmdline entries are NUL-separated; tr converts them to spaces for matching.
 func agentNamespaceScript(iptablesCmds []string) string {
 	var builder strings.Builder
 
 	builder.WriteString("set -e\n")
-	fmt.Fprintf(&builder, "pid=$(pgrep -f %q | head -1)\n", snrparams.AgentProcessPattern)
+	fmt.Fprintf(&builder,
+		"pid=$(for d in /proc/[0-9]*; do\n"+
+			"  cmdline=$(cat \"$d/cmdline\" 2>/dev/null | tr '\\0' ' ')\n"+
+			"  case \"$cmdline\" in *%s*) echo \"${d##*/}\"; break;; esac\n"+
+			"done)\n",
+		snrparams.AgentProcCmdlinePattern)
 	builder.WriteString(`if [ -z "$pid" ]; then echo AGENT_PID_NOT_FOUND; exit 1; fi` + "\n")
 	builder.WriteString(`echo "agent pid: $pid"` + "\n")
 
