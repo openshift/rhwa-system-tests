@@ -1,7 +1,7 @@
 # File-Based Catalog Operator Upgrades
 
 The shared `tier:upgrade-operator` runner handles the catalog and OLM transition
-for NHC, SBR, SNR, FAR, MDR, and NMO. Operator-specific lifecycle hooks supply
+for SBR, SNR, FAR, MDR, and NMO. Operator-specific lifecycle hooks supply
 the configuration and behavior checks:
 
 1. Apply the release-provided ImageDigestMirrorSet and wait for any
@@ -16,15 +16,7 @@ the configuration and behavior checks:
 
 ## Validation coverage
 
-NHC's validations moved from `upgrade_operator.go` into
-`tests/nhc-operator/tests/upgrade_lifecycle.go`; they are not deferred to a stub.
-`BeforeUpgrade` creates the configuration, captures its UID and complete spec,
-and exercises baseline reconciliation and remediation. `AfterUpgrade` compares
-the UID and complete spec, requires a fresh pause response, restores the original
-configuration, and exercises candidate remediation. The shared runner calls both
-hooks around the Subscription upgrade and requires them to succeed.
-
-SBR also has concrete hooks in `tests/sbr-operator/tests/upgrade_lifecycle.go`.
+SBR has concrete hooks in `tests/sbr-operator/tests/upgrade_lifecycle.go`.
 They capture and compare the config UID and complete spec, prove fresh
 reconciliation, and restore the original configuration. Its default no-storage
 mode and optional remediation check are described below.
@@ -78,26 +70,26 @@ A unique reason change and restoration must each produce a newer controller
 The worker must remain Ready, cordoned, drain-tainted, and excluded from remediation.
 Cleanup deletes only the owned CR, requires the original worker to recover and its
 lease to disappear, and only then removes the operator. This is destructive
-maintenance, not a reboot or a full acceptance suite. All six suites have real hooks.
+maintenance, not a reboot or a full acceptance suite. All five suites have real hooks.
 
 ## Inputs
 
-Each suite uses variables prefixed by its operator name. For NHC:
+Each suite uses variables prefixed by its operator name. For SBR:
 
 ```bash
-export NHC_FBC_CATALOG_IMAGE='quay.io/example/rhwa-fbc@sha256:...'
+export SBR_FBC_CATALOG_IMAGE='quay.io/example/rhwa-fbc@sha256:...'
 # Required only when the catalog relies on registry mirrors:
-export NHC_FBC_IDMS_PATH=/absolute/path/to/idms.yaml
-export NHC_FBC_CANDIDATE_VERSION=5.8.0
-export NHC_FBC_CANDIDATE_IMAGE='registry.example/operator@sha256:...'
+export SBR_FBC_IDMS_PATH=/absolute/path/to/idms.yaml
+export SBR_FBC_CANDIDATE_VERSION=5.8.0
+export SBR_FBC_CANDIDATE_IMAGE='registry.example/operator@sha256:...'
 
 # Optional defaults:
-export NHC_FBC_CATALOG_NAME=nhc-upgrade-candidate
-export NHC_FBC_CHANNEL=stable
-export NHC_FBC_SKIP_CLEANUP=false
+export SBR_FBC_CATALOG_NAME=sbr-upgrade-candidate
+export SBR_FBC_CHANNEL=stable
+export SBR_FBC_SKIP_CLEANUP=false
 ```
 
-Use the corresponding `SBR_FBC_*`, `SNR_FBC_*`, `FAR_FBC_*`, `MDR_FBC_*`, or
+Use the corresponding `SNR_FBC_*`, `FAR_FBC_*`, `MDR_FBC_*`, or
 `NMO_FBC_*` variables for another operator. This lets multiple suites use
 different catalogs, versions, and images in the same test process.
 
@@ -111,15 +103,15 @@ present in the cluster pull secret; tests never acquire or print registry creden
 
 ```bash
 export KUBECONFIG=/absolute/path/to/kubeconfig
-export ECO_TEST_FEATURES=nhc-operator
+export ECO_TEST_FEATURES=sbr-operator
 export ECO_TEST_LABELS='tier:upgrade-operator'
 export WORKLOAD_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:latest
 export ECO_REPORTS_DUMP_DIR="$(mktemp -d)"
 make run-tests
 ```
 
-Replace `nhc-operator` with `sbr-operator`, `snr-operator`, `far-operator`,
-`mdr-operator`, or `nmo-operator`. All six have operator-specific lifecycle checks.
+Replace `sbr-operator` with `snr-operator`, `far-operator`, `mdr-operator`, or
+`nmo-operator`. All five have operator-specific lifecycle checks.
 
 ## SBR: upgrade and configuration without storage
 

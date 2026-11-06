@@ -16,7 +16,7 @@ This directory contains cross-cutting architecture, shared testing workflows, an
 
 ## Guides
 
-- [File-Based Catalog (FBC) Operator Upgrades](fbc-upgrades.md) (`tier:upgrade-operator`): Common release upgrade contract, environment inputs, and execution for all six operators.
+- [File-Based Catalog (FBC) Operator Upgrades](fbc-upgrades.md) (`tier:upgrade-operator`): Common release upgrade contract, environment inputs, and execution for standalone operator upgrade suites.
 - [SBR Test Analysis](SBR/sbr_test_analysis.md): SBR coverage analysis, storage class requirements, and proposed tests.
 
 ## Test Case Documents

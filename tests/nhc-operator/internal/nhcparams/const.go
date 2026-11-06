@@ -30,9 +30,6 @@ const (
 	// CRDVersion is the API version for NHC custom resources.
 	CRDVersion = "v1alpha1"
 
-	// CSVNamePattern is the CSV name pattern used to find the NHC ClusterServiceVersion.
-	CSVNamePattern = "node-healthcheck-operator"
-
 	// ManagerContainerName is the name of the main controller container in the NHC pod.
 	ManagerContainerName = "manager"
 
@@ -49,8 +46,6 @@ const (
 
 	// SNRTemplateName is the default SNR template name deployed by the operator.
 	SNRTemplateName = "self-node-remediation-automatic-strategy-template"
-	// SNRDaemonSetName is the node-agent DaemonSet that performs self-remediation.
-	SNRDaemonSetName = "self-node-remediation-ds"
 
 	// TestNHCNamePrefix is the name prefix shared by NHC CRs created by these
 	// tests; destructive specs delete any leftover CR with this prefix first.
