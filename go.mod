@@ -11,7 +11,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.40.0
 	github.com/openshift-kni/k8sreporter v1.0.7
-	github.com/openshift/api v0.0.0-20260521125114-09730f85d883 // release-4.21
+	github.com/openshift/api v0.0.0-20260817165856-9fda5179a7f7 // release-4.21
 	github.com/rh-ecosystem-edge/eco-goinfra v0.0.0-20261012180502-325d029faf4f
 	golang.org/x/tools v0.49.0
 	gopkg.in/yaml.v2 v2.4.0
@@ -84,7 +84,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nxadm/tail v1.4.11 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
-	github.com/openshift/client-go v0.0.0-20260330134249-7e1499aaacd7 // indirect; release-4.21
+	github.com/openshift/client-go v0.0.0-20261014230554-789886cb6f51 // indirect; release-4.22
 	github.com/openshift/custom-resource-status v1.1.3-0.20220503160415-f2fdb4999d87 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -106,7 +106,7 @@ require (
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/k8snetworkplumbingwg/multus-cni.v4 v4.3.0 // indirect
@@ -127,7 +127,7 @@ require (
 replace (
 	github.com/imdario/mergo => github.com/imdario/mergo v0.3.16
 	github.com/k8snetworkplumbingwg/sriov-network-operator => github.com/openshift/sriov-network-operator v0.0.0-20251223102349-9cac901c5313 // release-4.21
-	github.com/openshift/api => github.com/openshift/api v0.0.0-20260521125114-09730f85d883 // release-4.21
+	github.com/openshift/api => github.com/openshift/api v0.0.0-20260817165856-9fda5179a7f7 // release-4.22
 	k8s.io/client-go => k8s.io/client-go v0.36.5
 	k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20260821135717-be32def86098
 	sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.24.1
