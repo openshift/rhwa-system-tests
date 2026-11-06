@@ -128,6 +128,7 @@ replace (
 	github.com/imdario/mergo => github.com/imdario/mergo v0.3.16
 	github.com/k8snetworkplumbingwg/sriov-network-operator => github.com/openshift/sriov-network-operator v0.0.0-20251223102349-9cac901c5313 // release-4.21
 	github.com/openshift/api => github.com/openshift/api v0.0.0-20260817165856-9fda5179a7f7 // release-4.22
+	github.com/openshift/client-go => github.com/openshift/client-go v0.0.0-20261014230554-789886cb6f51 // release-4.22
 	k8s.io/client-go => k8s.io/client-go v0.36.5
 	k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20260821135717-be32def86098
 	sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.24.1
