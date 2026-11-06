@@ -1,97 +1,11 @@
 # NHC Operator Post-Deployment Tests
 
-## Standalone operator upgrade through FBC (OpenShift 5.0)
-
-The common six-operator input contract is documented in
-[`../../docs/fbc-upgrades.md`](../../docs/fbc-upgrades.md).
-
-The `tier:upgrade-operator` scenario installs GA NHC and SNR from the
-cluster's built-in `redhat-operators` catalog. It then creates a test-owned
-CatalogSource from the supplied file-based catalog image and switches the
-existing NHC Subscription to that catalog. The test requires OLM to install a
-new CSV with the exact expected version and controller image, while preserving
-and freshly reconciling the existing NodeHealthCheck configuration.
-
-This path does not use a candidate bundle or `operator-sdk bundle-upgrade`.
-Provide a pullable FBC image containing a valid upgrade edge from the installed
-GA version to the expected candidate:
-
-```bash
-: "${KUBECONFIG:?}" "${NHC_FBC_CATALOG_IMAGE:?}"
-: "${NHC_FBC_CANDIDATE_VERSION:?}" "${NHC_FBC_CANDIDATE_IMAGE:?}"
-export ECO_TEST_FEATURES=nhc-operator
-export ECO_TEST_LABELS='tier:upgrade-operator'
-export WORKLOAD_IMAGE=unused-by-nhc-fbc-upgrade
-make run-tests
-```
-
-`NHC_FBC_IDMS_PATH` is optional for source-built catalogs whose image
-references are directly pullable. Downstream catalogs supply it when registry
-mirroring is required. Cleanup is enabled by default. For debugging only, set
-`NHC_FBC_SKIP_CLEANUP=true` to preserve resources. The next run rejects
-leftovers, so remove them manually before rerunning.
-
-## OpenShift 4.22 to 5.0 cluster-upgrade scenario
-
-`tier:upgrade-cluster` is a separate destructive scenario. It installs released
-NHC and SNR from the OpenShift 4.22 `redhat-operators` catalog, records the NHC
-CSV and controller image, performs the real OpenShift update to the supplied 5.0
-release payload, requires the same NHC CSV and image afterward, and completes a
-real NHC/SNR node-remediation cycle. The test owns its setup and does not require
-another Ginkgo spec or a hand-installed SNR prerequisite.
-
-Select only this scenario with:
-
-```bash
-export KUBECONFIG=/absolute/path/to/the/disposable-4.22-cluster-kubeconfig
-export ECO_TEST_FEATURES=nhc-operator
-export ECO_TEST_LABELS='tier:upgrade-cluster'
-export MEDIK8S_OPERATOR_PACKAGE=node-healthcheck-operator
-export OPENSHIFT_UPGRADE_RELEASE_IMAGE_OVERRIDE='the-approved-5.0-release-payload-pullspec'
-export MEDIK8S_SKIP_DOWNSTREAM_OPERATOR_UPGRADE=true
-export ECO_SSH_KEY_PATH=/absolute/path/to/the-cluster-private-key
-make run-tests
-```
-
-This invocation does not simulate the update: the test changes the cluster's
-`ClusterVersion` desired payload and waits for the update to finish healthy. It
-requires a disposable multi-node 4.22 cluster and reboots one worker during the
-functional check. If SSH is unavailable, set
-`MEDIK8S_KUBELET_STOP_OCDEBUG=true`; automatic SNR recovery still performs the
-reboot, but SSH provides the safer failure-recovery path.
-
-`MEDIK8S_SKIP_DOWNSTREAM_OPERATOR_UPGRADE=true` stops only after the complete
-4.22-to-5.0 survival and remediation checkpoint. Omit it only when the real
-downstream catalog, its IDMS files in `SHARED_DIR`, and `medik8s-catalog`
-CatalogSource are present; the remaining steps then switch the Subscription,
-require the downstream operator upgrade, and repeat remediation. A source-bundle
-upgrade result and a downstream-catalog result must be reported separately.
-
-For a directly pullable public catalog, set
-`MEDIK8S_SKIP_UPGRADE_IDMS=true` and provide the exact
-`NHC_UPGRADE_CANDIDATE_NHC_VERSION` and `NHC_UPGRADE_CANDIDATE_NHC_IMAGE`. The test
-still switches the existing Subscription to `medik8s-catalog`, requires the
-exact candidate CSV and controller image, and repeats remediation; it only
-skips the IDMS and MachineConfigPool rollout that public image references do
-not need.
-
-For a candidate source PR, unset `MEDIK8S_SKIP_DOWNSTREAM_OPERATOR_UPGRADE` and
-provide the digest-pinned bundle, operator, and catalog images using
-`NHC_UPGRADE_CANDIDATE_NHC_{BUNDLE,IMAGE,CATALOG}`, plus the exact candidate
-version. Supplying the catalog image automatically selects this path; no
-separate mode flag is needed. After the real 4.22-to-5.0 update and released-NHC remediation
-checkpoint, the scenario creates its own `nhc-upgrade-candidate` CatalogSource,
-switches the surviving Subscription to that catalog, requires the new CSV and
-exact PR-built controller image, and repeats remediation. Cleanup deletes that
-test-owned catalog; it never runs operator-sdk cleanup against the built-in Red
-Hat catalog.
-
 Automated tests validating the Node Health Check (NHC) operator
-deployment, OLM metadata, and security posture.
+deployment, security posture, and node health management.
 
 ## Prerequisites
 
-- OpenShift cluster with NHC operator installed via OLM
+- OpenShift cluster with the NHC operand enabled through WAO
 - `KUBECONFIG` set with cluster-admin access
 - NHC installed in `openshift-workload-availability` namespace
 - Minimum tested version: NHC v0.12.0 (RHWA 4.22 GA baseline)
@@ -99,7 +13,7 @@ deployment, OLM metadata, and security posture.
 ## Running
 
 ```bash
-ginkgo --label-filter="nhc && !tier:upgrade-operator && !tier:fresh-install && !tier:upgrade-cluster" ./tests/nhc-operator/...
+ginkgo --label-filter="nhc" ./tests/nhc-operator/...
 ```
 
 Or via the test runner:
@@ -107,7 +21,7 @@ Or via the test runner:
 ```bash
 export KUBECONFIG=/path/to/kubeconfig
 export ECO_TEST_FEATURES="nhc-operator"
-export ECO_TEST_LABELS='!tier:upgrade-operator && !tier:fresh-install && !tier:upgrade-cluster'
+export ECO_TEST_LABELS='operator:nhc'
 make run-tests
 ```
 
@@ -125,30 +39,16 @@ containers ready.
 - **Standalone**: `ginkgo --label-filter="nhc" --focus="resources are installed" ./tests/nhc-operator/...`
 - **Pass criteria**: NodeHealthCheck API is listable; all controller-manager pods are Running with all containers ready
 
-### 2. Verify NHC CSV Annotations ([OCP-89630](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89630))
+### 3. Verify NHC Controller Replicas ([OCP-89631](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89631))
 
-Validates that the active NHC ClusterServiceVersion (in Succeeded phase)
-has required OLM annotations: valid-subscription, support contact,
-repository URL, and at least one maintainer.
-
-- **Operators**: NHC v0.12.0+
-- **Cluster**: Any topology
-- **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="nhc" --focus="CSV annotations" ./tests/nhc-operator/...`
-- **Pass criteria**: All required annotations present, maintainers list non-empty
-
-### 3. Verify NHC CSV Metadata ([OCP-89631](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89631))
-
-Validates that infrastructure feature annotations (disconnected, fips-compliant,
-proxy-aware, etc.) match expected values, the `replaces` field references
-the previous NHC version when present, and controller replicas match the
-expected count on multi-node clusters. Skips replica validation on SNO.
+Validates that the controller deployment has the expected desired and ready
+replica counts on multi-node clusters. Skips replica validation on SNO.
 
 - **Operators**: NHC v0.12.0+
 - **Cluster**: Multi-node for replica check (skips replica validation on SNO)
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="nhc" --focus="CSV metadata" ./tests/nhc-operator/...`
-- **Pass criteria**: All infrastructure annotations match expected values, suggested-namespace correct, replaces field contains "node-healthcheck-operator" when set, 2 ready replicas on MNO
+- **Standalone**: `ginkgo --label-filter="nhc" --focus="correct number of replicas" ./tests/nhc-operator/...`
+- **Pass criteria**: 2 desired and 2 ready controller replicas on MNO
 
 ### 4. Verify NHC Container Runs as Non-Root User ([OCP-89632](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89632))
 

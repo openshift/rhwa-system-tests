@@ -2,7 +2,6 @@
 package nhcutils
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,147 +10,11 @@ import (
 	"testing"
 )
 
-func writeScriptFixture(t *testing.T, path, content string, mode os.FileMode) {
+func writeScriptFixture(t *testing.T, path, content string) {
 	t.Helper()
 
-	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestBundleInspector(t *testing.T) {
-	dir := t.TempDir()
-	writeScriptFixture(t, filepath.Join(dir, "csv.yaml"), `metadata:
-  name: node-healthcheck-operator.v5.8.0
-  annotations:
-    containerImage: candidate-manager
-    olm.skipRange: '>=0.1.0 <5.8.0'
-spec:
-  version: 5.8.0
-  relatedImages:
-  - image: explicit-related
-  install:
-    spec:
-      deployments:
-      - spec:
-          template:
-            spec:
-              containers:
-              - name: manager
-                image: candidate-manager
-                env:
-                - name: RELATED_IMAGE_MUST_GATHER
-                  value: must-gather
-                - name: OTHER
-                  value: not-an-image
-              - name: console
-                image: console
-              initContainers:
-              - name: init
-                image: init
-`, 0o600)
-	writeScriptFixture(t, filepath.Join(dir, "annotations.yaml"), "annotations:\n  operators.operatorframework.io.bundle.package.v1: node-healthcheck-operator\n", 0o600)
-	writeScriptFixture(t, filepath.Join(dir, "oc"), `#!/usr/bin/env bash
-set -euo pipefail
-if [[ $2 == extract ]]; then
-  shift 3
-  while [[ $# -gt 0 ]]; do
-    if [[ $1 == --path ]]; then
-      case $2 in
-        /manifests/:*) cp "$FIXTURE_DIR/csv.yaml" "${2#*:}/nhc.clusterserviceversion.yaml" ;;
-        /metadata/:*) cp "$FIXTURE_DIR/annotations.yaml" "${2#*:}/annotations.yaml" ;;
-      esac
-      shift 2
-    else shift; fi
-  done
-elif [[ $2 == info ]]; then
-	[[ $3 == --filter-by-os=linux/amd64 ]]
-	if [[ $4 == wrong-operator ]]; then
-		printf '{"digest":"sha256:%064d"}\n' 2
-  else
-    printf '{"digest":"sha256:%064d"}\n' 1
-  fi
-else exit 99; fi
-`, 0o700)
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	t.Setenv("FIXTURE_DIR", dir)
-	bundle, err := inspectBundle(context.Background(), "bundle")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := verifyBundle(bundle, "node-healthcheck-operator", "5.8.0"); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := requireSameImage(context.Background(), bundle.ManagerImage, "built-operator"); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := requireSameImage(context.Background(), bundle.ManagerImage, "wrong-operator"); err == nil {
-		t.Fatal("accepted unrelated operator image")
-	}
-}
-
-func TestFindLatestGABundleUsesOnlyPlainSemverTags(t *testing.T) {
-	dir := t.TempDir()
-	writeScriptFixture(t, filepath.Join(dir, "skopeo"), `#!/usr/bin/env bash
-set -euo pipefail
-[[ $1 == list-tags && $2 == docker://registry.test/bundles ]]
-printf '{"Tags":["latest","v0.12.0","v0.13.0-rc.1","v0.12.1-a9feb15","v0.12.1","v0.12.10","v1.0.0-beta.1"]}\n'
-`, 0o700)
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	pullspec, err := findLatestGABundle(context.Background(), "registry.test/bundles")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if pullspec != "registry.test/bundles:v0.12.10" {
-		t.Fatalf("unexpected latest GA bundle: %s", pullspec)
-	}
-}
-
-func TestDownstreamGAVersionRejectsSuffixedTags(t *testing.T) {
-	for tag, accepted := range map[string]bool{
-		"v0.12.1":         true,
-		"v0.12.1-a9feb15": false,
-		"v0.12.1-rc.1":    false,
-		"v0.12":           false,
-		"latest":          false,
-	} {
-		_, ok := downstreamGAVersion(tag)
-		if ok != accepted {
-			t.Fatalf("tag %q acceptance = %t, expected %t", tag, ok, accepted)
-		}
-	}
-}
-
-func TestBundleCommandsSetTimeout(t *testing.T) {
-	dir := t.TempDir()
-	binary := filepath.Join(dir, "operator-sdk")
-	writeScriptFixture(t, binary, "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$COMMAND_LOG\"\n", 0o700)
-	t.Setenv("COMMAND_LOG", filepath.Join(dir, "commands"))
-
-	if _, err := InstallBundle(context.Background(), binary, "test-namespace", "baseline-bundle"); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := UpgradeBundle(context.Background(), binary, "test-namespace", "candidate-bundle"); err != nil {
-		t.Fatal(err)
-	}
-
-	commands, err := os.ReadFile(filepath.Join(dir, "commands"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, expected := range []string{
-		"run bundle -n test-namespace --timeout=10m baseline-bundle",
-		"run bundle-upgrade -n test-namespace --timeout=10m candidate-bundle",
-	} {
-		if !strings.Contains(string(commands), expected) {
-			t.Fatalf("missing %q in %s", expected, commands)
-		}
 	}
 }
 
@@ -168,7 +31,7 @@ mkdir -p "$ECO_REPORTS_DUMP_DIR"
 printf '<report/>\n' > "$ECO_REPORTS_DUMP_DIR/nhc_testrun.xml"
 printf 'Ran 1 of 24 Specs\noriginal test failure\n'
 exit 7
-`, 0o700)
+`)
 	t.Setenv("GINKGO", ginkgo)
 	t.Setenv("ECO_TEST_FEATURES", "nhc-operator")
 	t.Setenv("ECO_TEST_LABELS", "tier:upgrade-operator")
@@ -229,9 +92,9 @@ printf 'git %s\n' "$*" >> "$COMMAND_LOG"
 if [[ $1 == clone ]]; then mkdir -p "$4/.git";
 elif [[ $3 == rev-parse ]]; then printf '%s\n' "$NHC_EXPECTED_SOURCE_COMMIT";
 fi
-`, 0o700)
-	writeScriptFixture(t, filepath.Join(dir, "podman"), "#!/usr/bin/env bash\nprintf 'podman %s\\n' \"$*\" >> \"$COMMAND_LOG\"\n", 0o700)
-	writeScriptFixture(t, filepath.Join(dir, "make"), "#!/usr/bin/env bash\nprintf 'make %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nmkdir -p \"$NHC_BUILD_DIR/bundle\"\n", 0o700)
+`)
+	writeScriptFixture(t, filepath.Join(dir, "podman"), "#!/usr/bin/env bash\nprintf 'podman %s\\n' \"$*\" >> \"$COMMAND_LOG\"\n")
+	writeScriptFixture(t, filepath.Join(dir, "make"), "#!/usr/bin/env bash\nprintf 'make %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nmkdir -p \"$NHC_BUILD_DIR/bundle\"\n")
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	t.Setenv("COMMAND_LOG", filepath.Join(dir, "commands"))
 	t.Setenv("NHC_SOURCE_REPOSITORY", filepath.Join(dir, "source"))

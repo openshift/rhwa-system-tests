@@ -18,6 +18,7 @@ for the person running the test, not for the test itself.
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
 | [`wao-watch.sh`](wao-watch.sh) | Per-operand `desiredState`/`phase`/`admissionReady`/retained count from the `WorkloadAvailabilityConfig`, WAO's own conditions, and the Deployments, DaemonSets and pods in the operator namespace | [`rhwa-2040`](../../docs/TESTCASES/rhwa-2040.md) — suits any spec that enables or disables a WAO operand |
+| [`nhc-watch.sh`](nhc-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), each `NodeHealthCheck` CR's `phase`/`healthyNodes`/`observedNodes`/in-flight count/`reason`, the remediation CRs NHC spawns (SNR, FAR, MDR, `TestRemediation`), the controller leader `Lease` holder, and the controller pods with their ages | any NHC spec — remediation-trigger and escalation runs, negative-validation and status-field specs, controller failover |
 
 ## `snr-watch.sh`
 
@@ -94,6 +95,54 @@ failure:
 What must *not* change is `workload-availability-operator-controller-manager`, which stays
 `1/1` throughout. If WAO's own manager restarts mid-run, the operand phases are reporting a WAO
 recovery rather than operand health.
+
+## `nhc-watch.sh`
+
+```bash
+watch -n 5 -d tools/watch/nhc-watch.sh   # Linux, or macOS with `brew install watch`
+tools/watch/nhc-watch.sh --loop          # anywhere, no `watch` needed
+tools/watch/nhc-watch.sh                 # one snapshot and exit
+```
+
+| Block                 | Shows                                                                                                           |
+| --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `nodes`               | name, `Ready`, cordon, first 8 chars of `status.nodeInfo.bootID`, taint keys                                     |
+| `NodeHealthCheck CRs` | one row per NHC: `phase`, `healthyNodes`, `observedNodes`, in-flight remediation count, and `reason`             |
+| `remediation CRs`     | the CRs NHC spawns — `SelfNodeRemediation`, `FenceAgentsRemediation`, `MachineDeletionRemediation`, `TestRemediation` — across all namespaces, each Kind probed separately |
+| `controller lease`    | `spec.holderIdentity` of the NHC leader election `Lease` (`e1f13584.medik8s.io`)                                 |
+| `controller pods`     | name, ready, status, age and node for everything in the operator namespace                                       |
+
+`NHC_WATCH_NS` overrides the namespace, `NHC_WATCH_LEASE` the controller lease name (default
+`e1f13584.medik8s.io`). Requires only `oc` and `awk`.
+
+A remediation reads as a sequence, and the slow part is the reboot at the end:
+
+1. A node's `Ready` goes **`False` or `Unknown`**, and NHC holds it for the `unhealthyConditions`
+   duration (default 30s) before acting — so the node block changes up to half a minute before the
+   NHC CR does.
+2. The NHC CR moves **`Enabled` → `Remediating`**, `healthyNodes` drops, the in-flight count rises,
+   and `reason` changes from "no ongoing remediation" to a remediating message.
+3. A **remediation CR named after the node** appears in the `remediation CRs` block. Which Kind
+   depends on the NHC's `remediationTemplate` — the live specs use `SelfNodeRemediation` for real
+   reboots and the dummy `TestRemediation` for logic-only coverage.
+4. The remediator taints and reboots the node; `bootID` changes only once the kubelet re-registers,
+   so it marks the node coming *back*.
+5. The remediation CR is deleted and the NHC CR returns to **`Enabled`** with `healthyNodes` restored.
+
+Two things are worth knowing before reading a run as a failure:
+
+- **`Disabled` is not `Remediating`.** NHC reports `Disabled` when its `remediationTemplate` is missing
+  or the remediator is installed but its controller is not running. That is the subject of the
+  negative-validation specs; on a remediation run it means the remediator operand is down, so check
+  the `controller pods` block.
+- **The `remediation CRs` block probes each Kind separately on purpose.** A Kind whose CRD is not
+  installed — an operand that is not enabled, or a dummy test CRD already torn down — is skipped
+  silently rather than blanking the Kinds that do exist. `none` means no remediation CRs of any Kind,
+  not that a query failed.
+
+The controller runs two replicas; expect two `node-healthcheck` manager pods in the `controller pods`
+block, alongside the console-plugin pod and whichever remediator operand is enabled. A `controller
+lease` holder changing with no failover spec driving it means the controller restarted.
 
 ## Adding one
 
