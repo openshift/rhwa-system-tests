@@ -132,7 +132,7 @@ var _ = Describe(
 		})
 
 		It("Verify fencing state persists on Ceph RBD block storage across node reboot",
-			reportxml.ID("TBD"),
+			reportxml.ID("1916"),
 			Label(
 				labels.OperatorSBR,
 				labels.DisruptionDestructive,
@@ -355,7 +355,7 @@ var _ = Describe(
 					}
 
 					return nil
-				}, sbrparams.BlockFencingStateCheckTimeout, sbrparams.BlockFencingStateCheckInterval).
+				}, sbrparams.BlockAgentReadyAfterRebootTimeout, sbrparams.BlockFencingStateCheckInterval).
 					Should(Succeed(), "Agent pod must be Running on node %s after reboot", targetNodeName)
 
 				GinkgoWriter.Printf("Agent pod %s is Running on node %s\n", agentPod.Object.Name, targetNodeName)
