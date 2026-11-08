@@ -323,6 +323,13 @@ const (
 	// "manager" cmdline but not the literal "[m]anager" in the script text.
 	AgentProcessPattern = "[m]anager --is-manager=false"
 
+	// AgentProcCmdlinePattern is the plain substring matched against each
+	// /proc/<pid>/cmdline entry (after NUL→space conversion) to locate the
+	// SNR agent. Unlike AgentProcessPattern it carries no pgrep bracket trick:
+	// shell case-pattern matching never sees its own command line, so there is
+	// no self-match risk.
+	AgentProcCmdlinePattern = "--is-manager=false"
+
 	// CPIsolationInjectorPodName is the privileged pod that adds the REJECT
 	// rules inside the victim agent's network namespace.
 	CPIsolationInjectorPodName = "snr-cp-isolation-injector"
@@ -336,8 +343,10 @@ const (
 	CPIsolationProbePodName = "snr-cp-isolation-probe"
 
 	// CPIsolationPodTimeout is the budget for a one-shot injector, flush or
-	// probe pod to pull its image and finish.
-	CPIsolationPodTimeout = 3 * time.Minute
+	// probe pod to pull its image and finish. 5 minutes matches
+	// KubeletProbePodTimeout and gives enough headroom for a cold image pull
+	// of a larger injector image (e.g. nicolaka/netshoot) on a fresh node.
+	CPIsolationPodTimeout = 5 * time.Minute
 
 	// CPIsolationReadyGraceDuration is how long the victim node must stay
 	// Ready after its agent is isolated. It sits inside the safe window before

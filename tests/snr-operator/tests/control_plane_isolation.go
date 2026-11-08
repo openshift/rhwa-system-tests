@@ -91,12 +91,9 @@ var _ = Describe("SNR Functional - Control Plane Isolation",
 			peerHealthPort = peerHealthPortFromSNRC(ctx)
 			GinkgoWriter.Printf("SNR peer health port: %d\n", peerHealthPort)
 
-			By("Skipping when iptables is not usable in the victim agent's network namespace")
-			usable, probeLog := agentNamespaceUsable(targetCPNodeName)
-			if !usable {
-				Skip(fmt.Sprintf("Cannot run iptables in the SNR agent namespace on node %q: %s",
-					targetCPNodeName, probeLog))
-			}
+			By("Verifying iptables is usable in the victim agent's network namespace")
+			Expect(agentNamespaceUsable(targetCPNodeName)).To(Succeed(),
+				"Probe pod must confirm iptables works in the SNR agent namespace on node %q", targetCPNodeName)
 
 			By("Pre-cleaning any stale SNR CR for the target control-plane node")
 			cleanupSNRCR(targetCPNodeName)

@@ -28,19 +28,32 @@ import (
 // process's network namespace.
 //
 // The agent DaemonSet sets hostPID but not hostNetwork, so the agent is visible
-// to pgrep from a hostPID pod while its peer traffic stays inside the pod
-// network namespace. Rules added with "nsenter --target 1 --net" would land on
-// the host and never match that traffic.
+// from a hostPID pod while its peer traffic stays inside the pod network
+// namespace. Rules added with "nsenter --target 1 --net" would land on the
+// host and never match that traffic.
+//
+// PID discovery uses a /proc/*/cmdline scan instead of pgrep so the script
+// works with ubi9/ubi (which ships nsenter but not pgrep or iptables).
+// cmdline entries are NUL-separated; tr converts them to spaces for matching.
+//
+// iptables commands use "nsenter -t 1 -m" to borrow the host mount namespace
+// (PID 1 = systemd) before entering the agent network namespace, so the host
+// iptables binary is on PATH regardless of what the probe pod image ships.
 func agentNamespaceScript(iptablesCmds []string) string {
 	var builder strings.Builder
 
 	builder.WriteString("set -e\n")
-	fmt.Fprintf(&builder, "pid=$(pgrep -f %q | head -1)\n", snrparams.AgentProcessPattern)
+	fmt.Fprintf(&builder,
+		"pid=$(for d in /proc/[0-9]*; do\n"+
+			"  cmdline=$(cat \"$d/cmdline\" 2>/dev/null | tr '\\0' ' ')\n"+
+			"  case \"$cmdline\" in *%s*) echo \"${d##*/}\"; break;; esac\n"+
+			"done)\n",
+		snrparams.AgentProcCmdlinePattern)
 	builder.WriteString(`if [ -z "$pid" ]; then echo AGENT_PID_NOT_FOUND; exit 1; fi` + "\n")
 	builder.WriteString(`echo "agent pid: $pid"` + "\n")
 
 	for _, cmd := range iptablesCmds {
-		fmt.Fprintf(&builder, "nsenter -t \"$pid\" -n -- %s\n", cmd)
+		fmt.Fprintf(&builder, "nsenter -t 1 -m -- nsenter -t \"$pid\" -n -- %s\n", cmd)
 	}
 
 	builder.WriteString("echo DONE\n")
@@ -70,8 +83,7 @@ func peerPortRuleCmds(operation string, peerPort int) []string {
 }
 
 // agentProbeScript proves the agent PID can be found and that iptables works
-// inside its network namespace, so a node where either fails skips the test
-// instead of failing part-way through.
+// inside its network namespace before the destructive isolation is attempted.
 func agentProbeScript() string {
 	return agentNamespaceScript([]string{"iptables -L OUTPUT -n"})
 }
@@ -187,12 +199,23 @@ func runHostCommandPod(nodeName, podName, script string) (corev1.PodPhase, strin
 	return phase, podLog
 }
 
-// agentNamespaceUsable reports whether the SNR agent process can be found on
-// nodeName and iptables runs inside its network namespace.
-func agentNamespaceUsable(nodeName string) (bool, string) {
-	phase, podLog := runHostCommandPod(nodeName, snrparams.CPIsolationProbePodName, agentProbeScript())
+// agentNamespaceUsable verifies that the SNR agent process can be found on
+// nodeName and that iptables runs inside its network namespace. Returns nil
+// when the probe succeeds. Any failure returns a non-nil error describing the
+// infrastructure problem; the caller should Fail (not Skip) because by the
+// time this probe runs the BeforeAll guards have already confirmed SNR is
+// installed and the DaemonSet is running on the node.
+func agentNamespaceUsable(nodeName string) error {
+	phase, podLog, err := tryRunHostCommandPod(nodeName, snrparams.CPIsolationProbePodName, agentProbeScript())
+	if err != nil {
+		return fmt.Errorf("probe pod did not reach a terminal phase: %w", err)
+	}
 
-	return phase == corev1.PodSucceeded, podLog
+	if phase != corev1.PodSucceeded {
+		return fmt.Errorf("probe pod exited %s on node %q: %s", phase, nodeName, podLog)
+	}
+
+	return nil
 }
 
 // blockAgentPeerPort rejects traffic on the SNR peer health port inside the
