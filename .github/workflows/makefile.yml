@@ -54,6 +54,18 @@ jobs:
       - name: Check module files
         run: git diff --exit-code -- go.mod go.sum
 
+      - name: Check vendor consistency
+        run: |
+          go mod vendor
+          git diff --exit-code vendor/
+          if [ -n "$(git status --porcelain --untracked-files=all -- vendor/)" ]; then
+            git status --porcelain --untracked-files=all -- vendor/
+            echo "Untracked vendor files found; re-run 'go mod vendor' and commit all changes"
+            exit 1
+          fi
+        env:
+          GOFLAGS: ""
+
   docker-build:
     strategy:
       matrix:
