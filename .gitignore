@@ -21,8 +21,9 @@
 reports
 .vscode
 
-# Test dump directories
+# Test dump directories (vendor packages exempt)
 **/dump/
+!vendor/**/dump/
 
 .claude/
 CLAUDE.local.md
