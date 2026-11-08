@@ -42,7 +42,8 @@ const (
 	RebootTimeout = 10 * time.Minute
 	// UncordonTimeout is the maximum wait for a node to become schedulable after maintenance ends.
 	UncordonTimeout = 2 * time.Minute
-	// CRDeletionTimeout is the maximum wait for a NodeMaintenance CR to be deleted during cleanup.
+	// CRDeletionTimeout is the maximum wait for test-created objects (NodeMaintenance CRs,
+	// drain feedback fixtures) to be deleted during cleanup.
 	CRDeletionTimeout = 2 * time.Minute
 	// ScheduleCheckTimeout is the timeout for verifying pod scheduling behavior on cordoned nodes.
 	ScheduleCheckTimeout = 30 * time.Second
@@ -182,4 +183,26 @@ const (
 	ControllerLogEvictedText = "all pods were evicted"
 	// ControllerLogFileName is the file name must-gather uses for a container's current log.
 	ControllerLogFileName = "current.log"
+
+	// FeedbackNMNamePrefix prefixes the NodeMaintenance CR name created by the drain feedback
+	// test; the target node name is appended, matching the Python's node-maintenance-<node>.
+	// Same value as MustGatherNMNamePrefix, which both tests derive from the Python; kept
+	// separate so each test's CR naming stays independent.
+	FeedbackNMNamePrefix = "node-maintenance-"
+
+	// FeedbackReason is the spec.reason recorded on the drain feedback test's CR.
+	FeedbackReason = "system-tests drain feedback validation (RHWA-1252)"
+
+	// FeedbackDeploymentName is the drain feedback test's workload Deployment, pinned to
+	// the node going under maintenance.
+	FeedbackDeploymentName = "nmo-drain-feedback"
+	// FeedbackPdbName is the PodDisruptionBudget that blocks the drain feedback workload's
+	// eviction, holding the drain open.
+	FeedbackPdbName = "nmo-drain-feedback-pdb"
+	// FeedbackPodLabelKey is the label key on the drain feedback workload pod.
+	FeedbackPodLabelKey = "app"
+	// FeedbackPodLabelValue is the label value selecting the drain feedback workload pod.
+	FeedbackPodLabelValue = "nmo-drain-feedback"
+	// FeedbackPodLabelSelector is the label selector string for the drain feedback workload.
+	FeedbackPodLabelSelector = FeedbackPodLabelKey + "=" + FeedbackPodLabelValue
 )

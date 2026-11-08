@@ -214,3 +214,24 @@ the Python (followed here) pins the exact value.
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="system-cluster-critical priority class" ./tests/nmo-operator/...`
 - **Pass criteria**: At least one running (container-ready) NMO controller pod owned by the NMO deployment is found in the operator namespace; every running controller pod has spec.priorityClassName equal to system-cluster-critical
+
+### 16. Report Drain Feedback While Maintenance Is Running ([OCP-50537](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-50537))
+
+Starts maintenance on a worker node whose drain is held open by a
+PodDisruptionBudget-blocked workload, and verifies the NodeMaintenance
+status reports the running drain (phase Running, the workload pod in
+pendingPods) and then the completed drain (phase Succeeded,
+drainProgress 100, no pendingPods).
+
+The Python original relies on whatever workload happens to run on the
+node to keep the drain observable and accepts an already-completed
+drain; the PDB-blocked workload makes the running feedback
+deterministic. Polarion-only checks (pendingPods shrinking while
+drainProgress rises, the initial evictionPods equality, the 30s update
+cadence) are not ported; the Python asserts none of them.
+
+- **Operators**: NMO v0.17.0+
+- **Cluster**: MNO with at least one schedulable non-control-plane worker node not hosting the NMO controller; skipped otherwise
+- **Environment**: Connected, or disconnected with WORKLOAD_IMAGE set to a mirrored image
+- **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="Report pending pods while the drain is running" ./tests/nmo-operator/...`
+- **Pass criteria**: The workload Deployment's pod runs container-ready on the target node before maintenance starts (exactly one such pod); the PodDisruptionBudget is enforced (status synced, DisruptionsAllowed=0) before maintenance starts; while the PDB blocks eviction the NodeMaintenance phase is Running and status.pendingPods contains the workload pod; after the PDB is deleted the NodeMaintenance reaches Succeeded phase with DrainProgress=100 and an empty PendingPods list; teardown best-effort deletes the PDB, the Deployment and the NodeMaintenance CR and waits for the node to return to Ready, uncordoned and free of the medik8s.io/drain taint

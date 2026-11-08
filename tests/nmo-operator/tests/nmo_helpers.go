@@ -166,19 +166,27 @@ func assertMaintenanceSucceeded(ctx context.Context, name, nodeName string) {
 // through any transient (non-NotFound) API error until the timeout, logging a warning, so a
 // single blip on a busy cluster does not abandon the deletion.
 func deleteNMBestEffort(ctx context.Context, name string) {
-	nm := &nmov1beta1.NodeMaintenance{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	deleteObjectBestEffort(ctx,
+		&nmov1beta1.NodeMaintenance{ObjectMeta: metav1.ObjectMeta{Name: name}},
+		"NodeMaintenance "+name)
+}
 
-	waitErr := wait.PollUntilContextTimeout(ctx, nmoparams.DefaultPollInterval, nmoparams.UncordonTimeout, true,
+// deleteObjectBestEffort deletes the given object and waits until it is gone. It is safe
+// to call from cleanup for the same reasons as deleteNMBestEffort, and generalizes it to
+// any typed object, so fixture resources (Deployments, PodDisruptionBudgets) share one
+// retry loop instead of each test growing its own variant.
+func deleteObjectBestEffort(ctx context.Context, obj client.Object, description string) {
+	waitErr := wait.PollUntilContextTimeout(ctx, nmoparams.DefaultPollInterval, nmoparams.CRDeletionTimeout, true,
 		func(ctx context.Context) (bool, error) {
-			if delErr := APIClient.Delete(ctx, nm); delErr != nil && !errors.IsNotFound(delErr) {
-				GinkgoWriter.Printf("WARNING: deleting NodeMaintenance %s failed, retrying: %v\n", name, delErr)
+			if delErr := APIClient.Delete(ctx, obj); delErr != nil && !errors.IsNotFound(delErr) {
+				GinkgoWriter.Printf("WARNING: deleting %s failed, retrying: %v\n", description, delErr)
 
 				return false, nil
 			}
 
-			getErr := APIClient.Get(ctx, client.ObjectKey{Name: name}, &nmov1beta1.NodeMaintenance{})
+			getErr := APIClient.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 			if getErr != nil && !errors.IsNotFound(getErr) {
-				GinkgoWriter.Printf("WARNING: checking NodeMaintenance %s after delete failed, retrying: %v\n", name, getErr)
+				GinkgoWriter.Printf("WARNING: checking %s after delete failed, retrying: %v\n", description, getErr)
 
 				return false, nil
 			}
@@ -186,7 +194,7 @@ func deleteNMBestEffort(ctx context.Context, name string) {
 			return errors.IsNotFound(getErr), nil
 		})
 	if waitErr != nil {
-		GinkgoWriter.Printf("WARNING: NodeMaintenance %s not confirmed deleted within timeout: %v\n", name, waitErr)
+		GinkgoWriter.Printf("WARNING: %s not confirmed deleted within timeout: %v\n", description, waitErr)
 	}
 }
 
