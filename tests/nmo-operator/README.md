@@ -199,3 +199,18 @@ the CRD and node YAMLs and every presence check would pass on an idle cluster.
 - **Environment**: Connected, or disconnected with `MUST_GATHER_IMAGE` set to a mirrored ref
 - **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="collects NMO data via oc adm must-gather" ./tests/nmo-operator/...`
 - **Pass criteria**: The NMO deployment is Ready; at least 2 schedulable non-control-plane worker nodes exist (skipped otherwise); a running NMO controller pod owned by the NMO deployment is found in the operator namespace, and the node hosting it is excluded from selection; the NodeMaintenance CR reaches Succeeded phase; the target node is cordoned (Unschedulable=true) with the medik8s.io/drain NoSchedule taint; DrainProgress=100 and PendingPods empty; a SucceedMaintenance event is emitted; `oc adm must-gather` completes successfully; the collected output contains a `<node>.yaml` under a nodes path for every node present before collection, a `node-maintenance-<node>.yaml` under a nodemaintenances path, a `nodemaintenances.nodemaintenance.medik8s.io.yaml` CRD definition, and at least one `*.log` file under the NMO controller pod's path; the collected CRD YAML contains `nodemaintenances.nodemaintenance.medik8s.io`; the collected node YAML parses as a Node carrying both the `medik8s.io/drain` and `node.kubernetes.io/unschedulable` taints with NoSchedule effect and `spec.unschedulable` true; the collected NodeMaintenance CR parses with `status.phase` Succeeded; the collected NMO controller `current.log` contains `all pods were evicted`; all four content checks are reported together rather than failing on the first; on teardown the NodeMaintenance CR is deleted and the node returns to Ready and uncordoned (best-effort, logged if incomplete), and the temporary output directory is removed
+
+### 15. Verify NMO Controller Pod Runs With the system-cluster-critical Priority Class ([OCP-48469](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-48469))
+
+Checks that the running NMO controller pod sets `spec.priorityClassName`
+to `system-cluster-critical`, so the scheduler and eviction logic treat
+the pod as cluster-critical.
+
+The Polarion plan only requires the field to be present in the pod yaml;
+the Python (followed here) pins the exact value.
+
+- **Operators**: NMO v0.17.0+
+- **Cluster**: Any topology
+- **Environment**: Connected or disconnected
+- **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="system-cluster-critical priority class" ./tests/nmo-operator/...`
+- **Pass criteria**: At least one running (container-ready) NMO controller pod owned by the NMO deployment is found in the operator namespace; every running controller pod has spec.priorityClassName equal to system-cluster-critical

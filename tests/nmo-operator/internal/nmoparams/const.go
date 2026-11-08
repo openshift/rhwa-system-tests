@@ -28,6 +28,11 @@ const (
 	// callers must also filter by OperatorDeploymentName.
 	OperatorControllerPodLabelSelector = ControllerPodLabelKey + "=" + OperatorControllerPodLabel
 
+	// ExpectedPriorityClassName is the priorityClassName that NMO controller pods must have.
+	// Matches the Python NMO_PRIORITY_CLASS_NAME and the value set by the upstream operator
+	// bundle (manager manifest and CSV).
+	ExpectedPriorityClassName = "system-cluster-critical"
+
 	// CSVNamePattern is the substring used to match the NMO operator ClusterServiceVersion by name.
 	CSVNamePattern = "node-maintenance-operator"
 
