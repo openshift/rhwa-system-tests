@@ -6,8 +6,7 @@ on:
       - published
   push:
     branches:
-      - main
-      - 'release-*'
+      - wao
 
 jobs:
   build:
@@ -35,7 +34,7 @@ jobs:
       id: set_image_tag
       shell: bash
       run: |
-        image_tag=latest
+        image_tag=wao
         if [ "${{ github.ref }}" != 'refs/heads/main' ]; then
           branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}
           version_digits=$(echo "${branch}" | tr -d -c 0-9)
