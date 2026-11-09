@@ -3,93 +3,126 @@
 Automated tests validating the Storage-Based Remediation (SBR) operator
 deployment, security posture, and high-availability configuration.
 
-## Operator upgrade through FBC (OpenShift 5.0)
-
-The `tier:upgrade-operator` scenario uses the same shared FBC upgrade runner as
-NHC. It installs GA SBR from `redhat-operators`, creates a safe no-storage config,
-switches the existing Subscription to the candidate FBC, and verifies the exact
-candidate version/image, preserved config UID/full spec, and a fresh validation
-response from the candidate controller. No ODF, StorageClass, PVC, or agent pods
-are needed by default. This proves upgrade/configuration compatibility, **not**
-functional node remediation. See [the shared FBC guide](../../docs/fbc-upgrades.md)
-for the complete contract and optional real-remediation mode.
-
-The namespace `openshift-workload-availability` must not already exist. Preflight
-also rejects existing SBR resources/installations and leftover OLM cluster objects
-associated with that namespace. A rejected preflight makes no changes. Cleanup
-uses run markers and UIDs to remove only owned resources; shared CRDs and the
-applied IDMS remain. For debugging, `SBR_FBC_SKIP_CLEANUP=true` preserves resources.
-
-```bash
-export KUBECONFIG=/absolute/path/to/ocp-5-kubeconfig
-export ECO_TEST_FEATURES=sbr-operator
-export ECO_TEST_LABELS='tier:upgrade-operator'
-export ECO_TEST_VERBOSE=true
-export WORKLOAD_IMAGE=unused-by-sbr-fbc-upgrade
-
-# Use actual, immutable pullspecs for the catalog and its SBR controller.
-export SBR_FBC_CATALOG_IMAGE='registry.example/rhwa-fbc@sha256:...'
-export SBR_FBC_CANDIDATE_VERSION=5.8.0
-export SBR_FBC_CANDIDATE_IMAGE='registry.example/sbr-controller@sha256:...'
-# Set only if the catalog depends on these registry mirrors:
-export SBR_FBC_IDMS_PATH=/absolute/path/to/idms.yaml
-export SBR_FBC_REMEDIATION=false
-
-export ECO_REPORTS_DUMP_DIR="$(mktemp -d)"
-make run-tests
-```
-
-Registry credentials must already let the cluster pull the catalog, bundles,
-controller, and any operands. Source-built and supplied downstream FBCs use
-the same test and inputs. Exactly one upgrade spec must pass. Its reports record
-the actual baseline/candidate CSVs, config before/after, and unique validation probe.
-
-To additionally require a real post-upgrade reboot and recovery, set
-`SBR_FBC_REMEDIATION=true` and `SBR_STORAGE_CLASS` to an existing RWX class.
-This is destructive and requires at least two healthy worker agents and a target
-worker without an SBR controller. The test does not deploy storage infrastructure.
-
-## Fresh install (`tier:fresh-install`)
-
-The separate fresh-install test remains an SDK bundle installation, not an FBC
-upgrade. It requires `operator-sdk` v1.42.2, a candidate bundle/controller image,
-and an existing RWX StorageClass (CephFS auto-discovery or `SBR_STORAGE_CLASS`).
-Its safe selector schedules zero agent pods, but storage initialization can create
-a PVC and a device-init Job. It uses `SBR_UPGRADE_*` inputs, including
-`SBR_UPGRADE_SKIP_CLEANUP` for debugging, independently of the FBC upgrade inputs.
-
-```bash
-export KUBECONFIG=/absolute/path/to/ocp-5-kubeconfig
-export ECO_TEST_FEATURES=sbr-operator
-export ECO_TEST_LABELS='tier:fresh-install'
-export WORKLOAD_IMAGE=unused-by-sbr-operator-upgrade
-
-export SBR_UPGRADE_CANDIDATE_SBR_VERSION=5.8.0
-export SBR_UPGRADE_CANDIDATE_SBR_IMAGE='the-candidate-controller-image-pullspec'
-export SBR_UPGRADE_CANDIDATE_SBR_BUNDLE='the-candidate-bundle-pullspec'
-export SBR_UPGRADE_OPERATOR_SDK="$(command -v operator-sdk)"
-export SBR_STORAGE_CLASS='the-cluster-RWX-capable-storage-class-name'
-
-export ECO_REPORTS_DUMP_DIR="$(mktemp -d)"
-make run-tests
-```
-
-Success means exactly one `tier:fresh-install` spec passes and its cleanup
-finishes. Run this in a separate invocation (new `ECO_REPORTS_DUMP_DIR`) from
-`tier:upgrade-operator`; both scenarios use the same fixed namespace and
-resource names, so preflight rejects one if the other's cleanup did not finish.
-
 ## Prerequisites
 
-- OpenShift cluster with SBR operator installed via OLM
-- `KUBECONFIG` set with cluster-admin access
-- SBR installed in `openshift-workload-availability` namespace
+- OpenShift with cluster-admin access through `KUBECONFIG` and the WAO
+  **storageBasedRemediation** operand enabled and Available in
+  `openshift-workload-availability`.
+- The WAO **nodeHealthCheck** operand enabled and Available for NHC integration,
+  node-hang, storage-loss fencing, and split-brain scenarios. SNR, FAR, MDR and
+  NMO are not dependencies of this suite.
+- **SNR agents stopped** for watchdog/fencing scenarios. Some isolated regression
+  specs require its DaemonSet to be absent. Disabling SNR's manager can leave
+  agents behind (`DisableIncomplete`); it does not by itself free the watchdog.
+- Two Ready, schedulable workers for most storage scenarios. Ceph RBD and
+  filesystem split-brain need at least three Ready, schedulable workers, with a
+  target that does not host an SBR controller. Healthy witnesses may host SBR
+  controllers.
+- An existing **RWX filesystem StorageClass**. Set `SBR_STORAGE_CLASS`, or let
+  the suite discover a CephFS provisioner. Total I/O loss and transient filesystem
+  partition scenarios specifically require CephFS.
+- An existing **Ceph RBD StorageClass supporting RWX raw Block volumes** for
+  block scenarios. Set `SBR_RBD_STORAGE_CLASS`, or let the suite discover an
+  `rbd.csi.ceph.com` provisioner. The SBRC CRD must expose
+  `sharedStorageVolumeMode`. The suite does not install ODF or a storage provider.
+  Ordinary AWS EBS storage does not satisfy these shared-storage paths.
+- Hardware watchdog devices or the softdog kernel module available on nodes.
+- Pullable `WORKLOAD_IMAGE` (shell/sleep/ls), `SBR_INJECTOR_IMAGE` (defaults to
+  `registry.access.redhat.com/ubi9/ubi:latest`, with `nsenter` and `iptables`),
+  and optionally `SBR_WATCHDOG_DEBUG_IMAGE`. Mirror these and the must-gather
+  image for disconnected clusters.
+
+No SSH key or bastion is required. The specs execute node commands through
+privileged host-namespace pods and the Kubernetes API. Destructive cases include
+storage/network faults, kernel panics and watchdog reboots.
+
+Use a disposable cluster and clear conflicting configurations from earlier runs.
+Several specs require an isolated SBRC or no existing NHC targeting SBR. Tests
+create their own SBRCs, remediation templates and NHC configurations. An SBRC
+provisions the shared PVC and agent DaemonSet; enabling WAO's SBR operand alone
+only starts its manager.
 
 ## Running
 
+Enable the operands before running the full suite:
+
 ```bash
-ginkgo --label-filter="sbr" ./tests/sbr-operator/...
+export KUBECONFIG=/path/to/kubeconfig
+oc patch workloadavailabilityconfig cluster --type=merge \
+  -p '{"spec":{"components":{"storageBasedRemediation":{"enabled":true},"nodeHealthCheck":{"enabled":true},"selfNodeRemediation":{"enabled":false}}}}'
+oc -n openshift-workload-availability rollout status deployment/sbr-operator-controller-manager --timeout=5m
+oc -n openshift-workload-availability rollout status deployment/node-healthcheck-controller-manager --timeout=5m
 ```
+
+If the cluster previously ran SNR tests, finish active remediations and disable
+SNR through WAO before removing its retained agents:
+
+```bash
+oc -n openshift-workload-availability delete daemonset self-node-remediation-ds --ignore-not-found
+oc -n openshift-workload-availability wait --for=delete pod \
+  -l app.kubernetes.io/name=self-node-remediation --timeout=5m
+```
+
+Set storage overrides if Ceph auto-discovery would select the wrong class, then
+run the suite package directly:
+
+```bash
+export WORKLOAD_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:latest
+# Optional when suitable Ceph classes can be auto-discovered:
+# export SBR_STORAGE_CLASS=your-cephfs-rwx-class
+# export SBR_RBD_STORAGE_CLASS=your-ceph-rbd-class
+
+set -o pipefail
+ginkgo --timeout=3h -v --fail-fast --label-filter='operator:sbr' \
+  ./tests/sbr-operator 2>&1 | tee /tmp/sbr-test.log
+```
+
+Use `--label-filter='operator:sbr && tier:smoke'` for smoke checks, or
+`--label-filter='operator:sbr && !disruption:destructive'` to exclude destructive
+specs. Nondestructive functional checks may still provision storage or restart
+agents. The standalone fresh-install and upgrade scenarios are removed, so no
+upgrade exclusion filter is needed. The path without `/...` selects the cluster
+suite directly instead of also running ordinary Go unit tests.
+
+Known-bug skips remain for Ceph RBD persistent fencing (RHWA-1987), transient RBD
+partitions (RHWA-1966), and detection-only coverage (RHWA-2033/RHWA-2036).
+Storage-specific specs skip if the required class is unavailable. Those skips
+are separate from the removed installation scenarios.
+
+Ceph stale-fence recovery discovers worker host addresses from
+`Node.status.addresses` (`InternalIP`, including IPv6) and the client identity
+from Rook's Ceph configuration. External clusters can therefore use their
+configured healthchecker identity instead of requiring `client.admin` to list
+fences. Range removal uses a matching CSI `NetworkFenceClass` and a temporary
+`NetworkFence` requesting `Unfenced`, so CSI uses its existing fencing credentials
+without the tests reading or copying keys. The request is removed afterward.
+Clusters without a matching class fall back to the configured Ceph CLI identity,
+which must then have permission to remove blocklist ranges. Authentication or
+permission failures are reported as recovery warnings.
+
+Recovery only removes a single-host range belonging to a completed fault target
+in the current test process, after confirming fault cleanup, node readiness,
+no active SBR remediation or SBR-based NHC, and the fence age/cooldown. It checks
+again after each fault spec and during later storage setup. Unrelated fences
+and individual CephFS client eviction entries remain intact. Fences left by a
+previous process require separate recovery because this suite cannot establish
+their ownership from a blocklist address alone.
+
+## Watching a run
+
+```bash
+watch -n 5 -d tools/watch/sbr-watch.sh
+# On macOS without watch:
+tools/watch/sbr-watch.sh --loop
+```
+
+The script reads WAO operand phases, nodes and boot IDs, SBRC conditions, SBR
+remediation conditions, NHC status, PVCs/init jobs, workloads, controller lease
+and pods. Record boot IDs before fencing. `SBRStorageUnhealthy=True` indicates
+storage health detection; fencing conditions and a later boot ID change establish
+subsequent stages. NHC may delete an SBR CR before the next snapshot. Pending
+PVCs or failed init Jobs explain why agents have not started. The SBR manager
+should remain Ready during agent-only faults.
 
 ## Tests
 
@@ -102,21 +135,8 @@ pod count matches the cluster topology (2 on multi-node, 1 on SNO).
 - **Cluster**: Any topology (MNO or SNO)
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="pod is running" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="pod is running" ./tests/sbr-operator`
 - **Pass criteria**: All pods Running, count matches expected replicas
-
-### 2. Verify SBR CSV Has Required Annotations ([OCP-89233](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89233))
-
-Validates that the active SBR ClusterServiceVersion (in Succeeded phase)
-has all required OLM feature annotations: disconnected support, FIPS
-compliance flag, suggested namespace, and feature flags.
-
-- **Operators**: SBR v0.3.0
-- **Cluster**: Any topology
-- **Storage**: None
-- **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="required annotations" ./tests/sbr-operator/...`
-- **Pass criteria**: Required annotations present with expected values
 
 ### 3. Verify SBR Controller Replicas and Node Distribution ([OCP-89234](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89234))
 
@@ -128,7 +148,7 @@ expected.
 - **Cluster**: Multi-node only (skips on SNO)
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="correct number of replicas" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="correct number of replicas" ./tests/sbr-operator`
 - **Pass criteria**: 2 ready replicas on 2 different nodes
 
 ### 4. Verify SBR Container Security Context ([OCP-89235](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-89235))
@@ -142,21 +162,21 @@ or pod level). Only checks the `manager` container, not sidecars.
 - **Cluster**: Any topology
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="non-root user" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="non-root user" ./tests/sbr-operator`
 - **Pass criteria**: All security context fields match restricted profile
 
-### 5. Verify SBR Uses Correct API and OLM Naming ([OCP-88822](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-88822))
+### 5. Verify SBR CRD API Group and Served Version ([OCP-88822](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-88822))
 
-Validates that the active SBR CSV display name uses "Storage-Based Remediation"
-(not the legacy "SBD" branding) and that all owned CRDs are registered under the
-correct API group `storage-based-remediation.medik8s.io`.
+Reads each installed SBR CRD directly and verifies its Kind, API group
+`storage-based-remediation.medik8s.io`, and served `v1alpha1` version. WAO owns
+these CRDs; there is no separate SBR CSV to inspect.
 
-- **Operators**: SBR v0.3.0
+- **Operators**: SBR enabled through WAO
 - **Cluster**: Any topology
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="correct API and OLM naming" ./tests/sbr-operator/...`
-- **Pass criteria**: CSV display name contains "Storage-Based Remediation", does not contain "SBD", all CRD API groups match expected value
+- **Standalone**: `ginkgo --label-filter="operator:sbr" --focus="CRDs use the expected API" ./tests/sbr-operator`
+- **Pass criteria**: All three CRDs exist with the expected Kind, group and served version
 
 ### 6. Verify StorageBasedRemediationConfig CRD Schema Rejects Invalid Values ([OCP-88881](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-88881))
 
@@ -173,7 +193,7 @@ a DaemonSet for it.
 - **Cluster**: Any topology
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="StorageBasedRemediationConfig" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="StorageBasedRemediationConfig" ./tests/sbr-operator`
 - **Pass criteria**: Out-of-range StorageBasedRemediationConfig fields rejected; invalid-StorageClass StorageBasedRemediationConfig admitted but no DaemonSet created
 
 ### 7. Verify StorageBasedRemediationConfig Controller Handles Invalid Inputs Without Scheduling Agent Pods ([OCP-88741](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-88741))
@@ -193,7 +213,7 @@ act on:
 - **Cluster**: Any topology
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="invalid watchdog path and non-matching nodeSelector" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="invalid watchdog path and non-matching nodeSelector" ./tests/sbr-operator`
 - **Pass criteria**: No agent pods scheduled for either invalid StorageBasedRemediationConfig input; StorageBasedRemediationConfig CRs remain present after controller reconciliation
 
 ### 8. Verify Watchdog Device Accessibility and Softdog Module Availability ([OCP-88878](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-88878))
@@ -209,7 +229,7 @@ independently using a short-lived privileged hostPID pod per node.
 - **Cluster**: Any topology (BM or VM nodes with watchdog hardware or softdog)
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="Verify watchdog device" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="Verify watchdog device" ./tests/sbr-operator`
 - **Pass criteria**: All hardware watchdog devices are character devices; nodes without hardware watchdog have softdog.ko present in the kernel module tree. A node that rebooted after the inventory retries the device check for 2 minutes; a softdog-backed device still missing afterwards is a post-reboot skip (a reboot clears the softdog module, and only a restarted SBR agent loads it again), not a failure. A hardware watchdog's device must survive reboots, so it keeps failing the check
 
 ### 9. Verify SBR Must-Gather Collects Diagnostic Data ([OCP-88733](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-88733))
@@ -225,7 +245,7 @@ MachineHealthCheck resources.
   `quay.io/medik8s/must-gather:latest` (matching the FAR suite), and its resolved
   digest is logged on every run. Disconnected clusters can set `MUST_GATHER_IMAGE`
   to an accessible mirrored image
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="must-gather" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="must-gather" ./tests/sbr-operator`
 - **Pass criteria**: SBR deployment is Ready; must-gather completes successfully; output contains node YAMLs for all cluster nodes, all 3 SBR CRD definition files, and MachineHealthCheck data. On HyperShift, the test skips with an explanatory message
 
 ### 10. Verify Controller Availability With One Worker (Controller Resilience)
@@ -242,7 +262,7 @@ uncordoning, verifies the deployment scales back to the expected replica count o
 - **Cluster**: 3+ schedulable worker-only nodes (standard AWS Prow cluster)
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="controller availability with one worker" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="controller availability with one worker" ./tests/sbr-operator`
 - **Pass criteria**: At least 1 controller pod remains Running on the uncordoned node; availability sustained for 30s (Consistently); deployment scales back to 2 replicas on different nodes after uncordoning
 
 ### 11. Verify Controller Leadership Handover
@@ -255,7 +275,7 @@ lifecycle test (OCP-70636).
 - **Cluster**: Any topology with at least 2 schedulable worker-only (non-control-plane) nodes
 - **Storage**: None
 - **Environment**: Connected or disconnected
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="controller leadership" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="controller leadership" ./tests/sbr-operator`
 - **Pass criteria**: Lease `holderIdentity` changes to a different Running controller pod; deployment returns to full ready replicas
 
 ### 12. Verify Fencing State Persists on Ceph RBD Block Storage Across Node Reboot ([RHWA-1916](https://redhat.atlassian.net/browse/RHWA-1916))
@@ -267,11 +287,11 @@ operator does not create a second remediation CR for it afterwards.
 
 Full specification: [`../../docs/TESTCASES/rhwa-1916.md`](../../docs/TESTCASES/rhwa-1916.md).
 
-- **Operators**: SBR CSV ≥ 5.8.0 (`sharedStorageVolumeMode`, [RHWA-1313](https://redhat.atlassian.net/browse/RHWA-1313)); older operators Skip with the reason
+- **Operators**: SBR ≥ 5.8.0 with `sharedStorageVolumeMode` in the served CRD schema ([RHWA-1313](https://redhat.atlassian.net/browse/RHWA-1313))
 - **Cluster**: At least one schedulable worker node that hosts no SBR controller pod and may be rebooted
 - **Storage**: Ceph RBD block StorageClass (provisioner containing `rbd.csi.ceph.com`), auto-discovered or set with `SBR_RBD_STORAGE_CLASS`
 - **Environment**: Connected or disconnected. **Destructive** — the target node is fenced and hard-rebooted
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="fencing state persists on Ceph RBD" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="fencing state persists on Ceph RBD" ./tests/sbr-operator`
 - **Pass criteria**: `FencingSucceeded=True` on the SBR CR; node boot-id changes and the node returns Ready; node becomes schedulable again after the CR is deleted; agent pod returns to Running/ContainersReady; no new `StorageBasedRemediation` CR exists for the node
 
 ### 13. Verify SBR Agents Write Concurrently to a Ceph RBD Block Device ([RHWA-1915](https://issues.redhat.com/browse/RHWA-1915))
@@ -292,7 +312,7 @@ Full test case: [docs/TESTCASES/rhwa-1915.md](../../docs/TESTCASES/rhwa-1915.md)
   cluster has none
 - **Environment**: Connected or disconnected. Self Node Remediation must not be running —
   SNR and SBR both claim `/dev/watchdog`, and the test fails early with scale-down instructions
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="write concurrently to Ceph RBD block device" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="write concurrently to Ceph RBD block device" ./tests/sbr-operator`
 - **Pass criteria**: One Ready agent pod per worker node on the same Block device; every written slot parses with a valid CRC32; heartbeats present from at least 2 distinct node IDs with advancing sequence numbers; slot counts agree across pods
 
 ### 14. Verify SBR Recovers From a Transient Ceph RBD Network Partition Without Fencing (RHWA-1924)
@@ -320,7 +340,7 @@ Full test case: [docs/TESTCASES/rhwa-1924.md](../../docs/TESTCASES/rhwa-1924.md)
 - **Environment**: Connected or disconnected; `SBR_INJECTOR_IMAGE` must be mirrored when
   disconnected. **Destructive** — Ceph traffic is blocked on one worker for 150s. Self Node
   Remediation must not be running
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="transient Ceph RBD network partition" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="transient Ceph RBD network partition" ./tests/sbr-operator`
 - **Pass criteria**: `SBRStorageUnhealthy=True` (reason `HeartbeatTimeout`) during the outage and
   `False` (reason `Recovered`) after it; exactly one heartbeat slot falls behind and then advances
   past the sequence it stalled at; for 90s after recovery the node keeps its boot-id, stays Ready and has no
@@ -351,7 +371,7 @@ Full test case: [docs/TESTCASES/rhwa-1925.md](../../docs/TESTCASES/rhwa-1925.md)
 - **Environment**: Connected or disconnected; `SBR_INJECTOR_IMAGE` must be mirrored when
   disconnected. Non-destructive, but every agent node runs at full CPU for up to five minutes, so
   it belongs in a job that tolerates that. Self Node Remediation must not be running
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="heartbeats remain stable on Ceph RBD under load" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="heartbeats remain stable on Ceph RBD under load" ./tests/sbr-operator`
 - **Pass criteria**: No node reports `SBRStorageUnhealthy=True` for the whole 3-minute window under
   load; every heartbeat slot advances past its pre-load sequence; no `StorageBasedRemediation` CR
   exists; every node keeps its boot-id; every agent's `sbr_self_fenced_total` and
@@ -381,7 +401,7 @@ Full test case: [docs/TESTCASES/rhwa-1926.md](../../docs/TESTCASES/rhwa-1926.md)
   cluster has none
 - **Environment**: Connected or disconnected. Non-destructive. Self Node Remediation must not be
   running
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="device inspection works on Ceph RBD" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="device inspection works on Ceph RBD" ./tests/sbr-operator`
 - **Pass criteria**: Superblock magic `SBRBLK`, version 1, matching CRC32 and clear quiesce flag;
   one node map entry per agent node with unique node IDs in 1-255 and both CRC32s valid; every
   mapped node's heartbeat at slot `nodeID - 1`, no more than two heartbeat intervals behind the
@@ -404,6 +424,13 @@ delete the CR, and the reconciler the taint, as soon as `SBRStorageUnhealthy` cy
 `FencingInProgress` is deliberately not asserted
 because the 60s fencing window and 60s staleness threshold make it flap.
 
+For DFBUGS-11731, post-reboot recovery waits for natural remediation deletion,
+pauses only this test's NHC, and removes an eligible stale ODF fence before the
+agent-readiness wait completes. It restarts only that node's RBD CSI nodeplugin
+after unfencing to discard cached failed connections. NHC resumes after the agent
+and storage condition recover, before the 90-second stability check. This storage
+workaround is recorded in the report and preserves all fencing and reboot assertions.
+
 Full test case: [docs/TESTCASES/rhwa-1931.md](../../docs/TESTCASES/rhwa-1931.md)
 
 - **Operators**: SBR v5.8.0, NHC (skips when the NodeHealthCheck CRD is absent)
@@ -415,7 +442,7 @@ Full test case: [docs/TESTCASES/rhwa-1931.md](../../docs/TESTCASES/rhwa-1931.md)
   disconnected. **Destructive** — one worker is kernel-panicked and rebooted. Self Node
   Remediation must not be running. Skips when another `NodeHealthCheck` already remediates through
   the SBR template
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="kernel panic on a Ceph RBD block-mode node" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="kernel panic on a Ceph RBD block-mode node" ./tests/sbr-operator`
 - **Pass criteria**: `SBRStorageUnhealthy=True` (reason `HeartbeatTimeout`) after the panic; NHC
   creates exactly one `StorageBasedRemediation` CR for the victim; it reaches `FencingSucceeded=True`
   and `Succeeded=True`; the node carries the `node.kubernetes.io/out-of-service` taint, then returns
@@ -432,9 +459,9 @@ storage, applies the `node.kubernetes.io/out-of-service` taint, and sets `Fencin
 `Succeeded=True`. The victim reboots, rejoins, and is uncordoned with the taint removed once NHC
 deletes the CR.
 
-Everything else is a witness assertion: for 60s no witness is flagged unhealthy or gets a CR, and
-after the fence every witness stays Ready, schedulable, on its original boot-id, with the same agent
-pod, restart count and `sbr_self_fenced_total`. The victim's heartbeat node ID is looked up in the
+Every poll during fencing, reboot and storage recovery checks that no witness is flagged unhealthy
+or gets a CR. Witnesses must be Ready and schedulable with their original boot IDs, agent pods,
+restart counts and `sbr_self_fenced_total`, including a recheck after recovery and stability. The victim's heartbeat node ID is looked up in the
 on-device node map through an observer agent on a witness, its slot is read at index nodeID-1, and the
 `FencingSucceeded` transition is asserted to be later than the victim's last recorded heartbeat —
 death cannot be proven before the node went silent.
@@ -444,11 +471,17 @@ own ID. The CR is looked up by node name on every poll because it can be recreat
 `SBRStorageUnhealthy` cycles to `Unknown`; `FencingInProgress` is deliberately not asserted because
 the 60s fencing window and 60s staleness threshold make it flap.
 
+Post-reboot storage recovery shares the guarded DFBUGS-11731 workaround with the block node-hang
+spec: wait for natural remediation deletion, pause only this test's NHC, recover the victim's
+stale Ceph fence and local RBD CSI plugin, then require agent readiness and healthy storage before
+resuming NHC. Witness checks continue throughout, and the final 90-second stability check runs
+with NHC Enabled. The agent-readiness budget is ten minutes.
+
 Full test case: [docs/TESTCASES/rhwa-1934.md](../../docs/TESTCASES/rhwa-1934.md)
 
 - **Operators**: SBR v5.8.0, NHC (skips when the NodeHealthCheck CRD is absent)
-- **Cluster**: Multi-node, at least 3 schedulable workers not hosting an SBR controller pod (one
-  victim and at least two witnesses); skips otherwise
+- **Cluster**: Multi-node, at least 3 Ready, schedulable workers. Only the victim must host no SBR
+  controller pod; controller-hosting workers may be witnesses
 - **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by
   provisioner (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the
   cluster has none
@@ -456,9 +489,9 @@ Full test case: [docs/TESTCASES/rhwa-1934.md](../../docs/TESTCASES/rhwa-1934.md)
   disconnected. **Destructive** — one worker is cut off from Ceph, fenced and rebooted. Self Node
   Remediation must not be running. Skips when another `NodeHealthCheck` already remediates through
   the SBR template
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="only the storage-isolated Ceph RBD node is fenced" ./tests/sbr-operator/...`
-- **Pass criteria**: victim reaches `SBRStorageUnhealthy=True` (reason `HeartbeatTimeout`); for 60s no
-  witness is flagged unhealthy or gets a CR; NHC creates exactly one `StorageBasedRemediation` CR for
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="only the storage-isolated Ceph RBD node is fenced" ./tests/sbr-operator`
+- **Pass criteria**: victim reaches `SBRStorageUnhealthy=True` (reason `HeartbeatTimeout`); no
+  witness is flagged unhealthy or gets a CR during the guarded waits; NHC creates a `StorageBasedRemediation` CR for
   the victim; it reaches `FencingSucceeded=True` / `Succeeded=True` with the transition later than the
   victim's last heartbeat, and the victim carries the `out-of-service` taint; every witness stays
   Ready, schedulable, same boot-id, unchanged `sbr_self_fenced_total`; the victim returns Ready with a
@@ -494,7 +527,7 @@ Full test case: [docs/TESTCASES/rhwa-1965.md](../../docs/TESTCASES/rhwa-1965.md)
   when the cluster has none. No agent pod is scheduled
 - **Environment**: Connected or disconnected. **Non-destructive** — no node, no running agent and no
   node label is touched
-- **Standalone**: `ginkgo --label-filter="sbr" --focus="no liveness or startup probe" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="sbr" --focus="no liveness or startup probe" ./tests/sbr-operator`
 - **Pass criteria**: `livenessProbe` and `startupProbe` are `nil` on the agent container in both
   remediation and detect-only mode; no probe command contains `/proc`, `grep` or `cmdline`; the
   readiness command is exactly `test -f /var/run/sbr-agent/preflight-ok && test -c /dev/watchdog`
@@ -535,7 +568,7 @@ Full test case: [docs/TESTCASES/rhwa-1933.md](../../docs/TESTCASES/rhwa-1933.md)
 - **Cluster**: Multi-node, at least two schedulable workers
 - **Storage**: RWX StorageClass (CephFS auto-discovered or set with `SBR_STORAGE_CLASS`); skips when absent
 - **Environment**: Connected or disconnected. Non-destructive
-- **Standalone**: `ginkgo -v --label-filter="operator:sbr && tier:acceptance" --focus="RHWA-1184 regression" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo -v --label-filter="operator:sbr && tier:acceptance" --focus="RHWA-1184 regression" ./tests/sbr-operator`
 - **Pass criteria**: All agent pods stay Ready with the same UIDs and restart counts for 90 seconds; every keepalive remains running; no worker reports `SBRStorageUnhealthy=True`
  
 ### 22. Verify SBR Manages the Agent DaemonSet NetworkPolicy ([RHWA-1970](https://issues.redhat.com/browse/RHWA-1970))
@@ -558,7 +591,7 @@ Full test case: [docs/TESTCASES/rhwa-1970.md](../../docs/TESTCASES/rhwa-1970.md)
   when the cluster has none. No agent pod is scheduled
 - **Environment**: Connected or disconnected. **Non-destructive** — no node, running agent, or node
   label is touched
-- **Standalone**: `ginkgo --label-filter="operator:sbr && tier:smoke" --focus="manages the agent DaemonSet NetworkPolicy" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="operator:sbr && tier:smoke" --focus="manages the agent DaemonSet NetworkPolicy" ./tests/sbr-operator`
 - **Pass criteria**: `NetworkPolicy` exists, owned by the SBRC, selecting only its agent pods;
   ingress allows only the two metrics ports from namespaces labeled `metrics: enabled`; egress is
   the single documented allow-all rule; a deleted `NetworkPolicy` is recreated and a manually
@@ -600,7 +633,7 @@ Full test case: [docs/TESTCASES/rhwa-2031.md](../../docs/TESTCASES/rhwa-2031.md)
 - **Environment**: Connected or disconnected. **Destructive** — one node is cordoned, fenced,
   tainted `out-of-service` and rebooted. Self Node Remediation must not be running. Skips when a
   `NodeHealthCheck` already remediates through the SBR template
-- **Standalone**: `ginkgo --label-filter="operator:sbr && component:remediation" --focus="the fence reaches the slot the victim reads" ./tests/sbr-operator/...`
+- **Standalone**: `ginkgo --label-filter="operator:sbr && component:remediation" --focus="the fence reaches the slot the victim reads" ./tests/sbr-operator`
 - **Pass criteria**: before the CR exists the victim's fence slot asks for nothing and the fence and
   heartbeat slots after it are zero-filled; a fence message targeting the victim's node ID appears in
   slot index nodeID-1 within 3m with the next slot still empty; the victim's heartbeat slot falls
@@ -688,3 +721,30 @@ make run-tests
 Live validation passed on 2026-10-22 against SBR v5.8.0 with CephFS, including
 same-volume recreation, zero agent restarts during the stability window, and
 complete test cleanup. A before/after comparison still requires a pre-fix build.
+
+### 25. Verify NHC Triggers SBR Fencing (OCP-88879)
+
+Partitions one worker from CephFS and requires NHC to create its SBR remediation.
+The target must reboot with a changed boot ID and return Ready. A successful
+fencing condition alone cannot satisfy the test.
+
+- **Operands**: SBR and NHC enabled through WAO; SNR agents stopped.
+- **Storage**: CephFS RWX, selected by `SBR_STORAGE_CLASS` or auto-discovery.
+- **Timing**: A 30-second SBR timeout leaves room for NHC's 30-second unhealthy
+  duration and the hardware watchdog reset before the condition becomes Unknown.
+- **Cleanup**: Removes injected host rules, recreating an evicted injector on
+  its recorded Ready node when necessary. Removes remediation resources before
+  the SBRC, and purges the injector image only after confirming a reboot.
+- **Standalone**: `ginkgo --timeout=40m -v --label-filter='operator:sbr && test_id:88879' ./tests/sbr-operator`
+
+### 26. Verify Filesystem Split-Brain Fences Only the Isolated Worker (OCP-88877)
+
+Partitions one worker from CephFS and verifies it reboots through NHC/SBR
+remediation while every healthy witness keeps its original boot ID and remains
+schedulable.
+
+- **Topology**: At least three Ready, schedulable workers. Only the target must
+  host no SBR controller pod; controller-hosting workers count as witnesses.
+- **Operands/storage**: SBR and NHC enabled, SNR agents stopped, and CephFS RWX
+  selected by `SBR_STORAGE_CLASS` or auto-discovery.
+- **Standalone**: `ginkgo --timeout=40m -v --label-filter='operator:sbr && test_id:88877' ./tests/sbr-operator`

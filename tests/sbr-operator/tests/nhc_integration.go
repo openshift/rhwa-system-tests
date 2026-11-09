@@ -60,6 +60,7 @@ var _ = Describe(
 			nhcCreatedByUs  bool
 			storageClass    string
 			injectorPodName string
+			preRebootBootID string
 		)
 
 		BeforeAll(func() {
@@ -113,13 +114,12 @@ var _ = Describe(
 			By(fmt.Sprintf("Creating StorageBasedRemediationConfig %q with sharedStorageClass=%q",
 				sbrparams.SBRCNHCTestName, storageClass))
 
-			// Minimum sbrTimeoutSeconds (heartbeat = timeout/2) so a peer marks the
-			// storage-isolated node SBRStorageUnhealthy=True after ~MaxConsecutiveFailures
-			// heartbeats well within StorageInjectionTimeout. The default (30s) leaves too
-			// thin a margin under the injection wait and makes the test flaky.
+			// The minimum 10s timeout leaves only about 15s between NHC starting
+			// remediation and SBR making the condition Unknown. A 30s hardware
+			// watchdog needs a longer remediation window to complete a reset.
 			testSBRC = buildSBRC(sbrparams.SBRCNHCTestName, map[string]interface{}{
 				"sharedStorageClass": storageClass,
-				"sbrTimeoutSeconds":  int64(sbrparams.SBRCTimeoutSecondsMin),
+				"sbrTimeoutSeconds":  int64(sbrparams.NHCIntegrationSBRTimeoutSeconds),
 			})
 			createErr := APIClient.Create(context.TODO(), testSBRC)
 			Expect(createErr).ToNot(HaveOccurred(),
@@ -213,16 +213,6 @@ var _ = Describe(
 			By("Clearing residual Ceph OSD blocklist entries left by the fencing")
 			clearCephOSDBlocklist()
 
-			By("AfterAll: deleting StorageBasedRemediationConfig")
-
-			if testSBRC != nil {
-				deleteErr := APIClient.Delete(context.TODO(), testSBRC)
-				if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
-					GinkgoT().Logf("Warning: cleanup delete StorageBasedRemediationConfig %s: %v",
-						sbrparams.SBRCNHCTestName, deleteErr)
-				}
-			}
-
 			By("AfterAll: removing NodeHealthCheck CR if created by this test")
 
 			if nhcCreatedByUs && nhcCR != nil {
@@ -239,6 +229,16 @@ var _ = Describe(
 				cleanupSBRCR(context.Background(), targetNodeName)
 			}
 
+			By("AfterAll: deleting StorageBasedRemediationConfig")
+
+			if testSBRC != nil {
+				deleteErr := APIClient.Delete(context.TODO(), testSBRC)
+				if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
+					GinkgoT().Logf("Warning: cleanup delete StorageBasedRemediationConfig %s: %v",
+						sbrparams.SBRCNHCTestName, deleteErr)
+				}
+			}
+
 			By("AfterAll: removing injector pod if still present")
 
 			if injectorPodName != "" {
@@ -249,7 +249,13 @@ var _ = Describe(
 				}
 			}
 
-			if targetNodeName != "" {
+			if targetNodeName != "" && preRebootBootID != "" {
+				bootID, err := getNodeBootID(targetNodeName)
+				if err != nil || bootID == preRebootBootID {
+					GinkgoWriter.Printf("Skipping injector image purge: no confirmed reboot of %s\n", targetNodeName)
+
+					return
+				}
 				By("AfterAll: removing the injector image from the rebooted target node")
 				purgeInjectorImageAfterReboot(context.Background(), targetNodeName)
 			}
@@ -265,9 +271,6 @@ var _ = Describe(
 				labels.PlatformAny,
 				labels.ComponentRemediation,
 			), func() {
-				// preRebootBootID captures the node's BootID before reboot; changes on every boot.
-				var preRebootBootID string
-
 				DeferCleanup(func() {
 					By("DeferCleanup: removing iptables REJECT rules on target node")
 

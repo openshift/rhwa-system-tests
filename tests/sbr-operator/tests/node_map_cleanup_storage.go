@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
@@ -100,20 +101,29 @@ func (test *nodeMapCleanupTest) expectOriginalClaim(ctx context.Context, asserti
 }
 
 func (test *nodeMapCleanupTest) deleteAndRetainClaim(ctx context.Context) {
+	selector := "app.kubernetes.io/component=sbr-cleanup,sbrconfig=" + test.config.GetName()
+	existingJobs, err := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(ctx,
+		metav1.ListOptions{LabelSelector: selector})
+	Expect(err).NotTo(HaveOccurred(),
+		"Cleanup Jobs for SBRC %s must be discoverable before deletion", test.config.GetName())
+	existingJobUIDs := make(map[types.UID]bool, len(existingJobs.Items))
+	for _, job := range existingJobs.Items {
+		existingJobUIDs[job.UID] = true
+	}
 	Expect(APIClient.Delete(ctx, test.config,
+		client.Preconditions{UID: ptr.To(test.config.GetUID())},
 		client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
-	deleting := test.config.DeepCopy()
-	Expect(APIClient.Get(ctx, client.ObjectKeyFromObject(deleting), deleting)).To(Succeed())
-	Expect(deleting.GetDeletionTimestamp()).NotTo(BeNil())
+	// The SBRC may already be gone when Delete returns. Identify this deletion's
+	// cleanup Job by excluding the Jobs observed before deletion.
 	var completed *batchv1.Job
 	Eventually(func(assertion Gomega) {
 		jobs, err := APIClient.K8sClient.BatchV1().Jobs(medik8sparams.OperatorNs).List(ctx, metav1.ListOptions{
-			LabelSelector: "app.kubernetes.io/component=sbr-cleanup,sbrconfig=" + test.config.GetName(),
+			LabelSelector: selector,
 		})
 		assertion.Expect(err).NotTo(HaveOccurred(), "Cleanup Jobs for SBRC %s must be discoverable", test.config.GetName())
 		for jobIdx := range jobs.Items {
 			job := &jobs.Items[jobIdx]
-			if job.CreationTimestamp.Before(deleting.GetDeletionTimestamp()) {
+			if existingJobUIDs[job.UID] {
 				continue
 			}
 			for _, condition := range job.Status.Conditions {

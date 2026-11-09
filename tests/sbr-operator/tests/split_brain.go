@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -78,44 +77,18 @@ var _ = Describe(
 				Skip("NodeHealthCheck CRD not found — NHC operator not installed; skipping split-brain test")
 			}
 
-			By("Listing schedulable worker nodes (need at least 3)")
+			By("Selecting a target and witnesses from at least 3 Ready, schedulable worker nodes")
 
-			controllerNodes := controllerPodNodes()
-			nodeList, err := APIClient.CoreV1Interface.Nodes().List(context.TODO(), metav1.ListOptions{
-				LabelSelector: "node-role.kubernetes.io/worker",
-			})
-			Expect(err).ToNot(HaveOccurred(), "Failed to list worker nodes")
+			// Only the node being fenced must avoid controller pods. Controllers on
+			// healthy witnesses remain available throughout the storage partition.
+			var pickErr error
 
-			var candidates []string
+			targetNodeName, healthyNodes, pickErr = splitBrainNodes()
+			Expect(pickErr).ToNot(HaveOccurred(), "Failed to list worker nodes")
 
-			for nodeIdx := range nodeList.Items {
-				node := &nodeList.Items[nodeIdx]
-				if !isNodeSchedulable(node) {
-					GinkgoWriter.Printf("Skipping unschedulable node %s\n", node.Name)
-
-					continue
-				}
-
-				if controllerNodes[node.Name] {
-					GinkgoWriter.Printf("Skipping node %s (SBR controller pod runs there)\n", node.Name)
-
-					continue
-				}
-
-				candidates = append(candidates, node.Name)
+			if targetNodeName == "" {
+				Skip("Need at least 3 Ready, schedulable worker nodes, one of them not hosting an SBR controller pod")
 			}
-
-			if len(candidates) < 3 {
-				Skip(fmt.Sprintf("Need at least 3 schedulable worker nodes (not hosting controller pods); "+
-					"found %d — skipping split-brain test", len(candidates)))
-			}
-
-			// Sort for deterministic target selection across runs and clusters.
-			sort.Strings(candidates)
-
-			// First candidate is the target; rest are healthy witnesses.
-			targetNodeName = candidates[0]
-			healthyNodes = candidates[1:]
 
 			injectorPodName = "sbr-split-brain-injector-" +
 				strings.Map(func(r rune) rune {

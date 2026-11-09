@@ -24,6 +24,7 @@ var _ = Describe(
 	Label(labels.OperatorSBR, labels.ComponentRemediation), func() {
 		var (
 			testSBRC       *unstructured.Unstructured
+			testNHC        *unstructured.Unstructured
 			victimNodeName string
 		)
 
@@ -84,8 +85,8 @@ var _ = Describe(
 			// maxUnhealthy: 1 (rather than the shared builder's minHealthy: "51%") so exactly one node
 			// may be unhealthy regardless of cluster size — "51%" can block remediation on a small
 			// cluster.
-			nhc := buildNHCWithMaxUnhealthy(sbrparams.NHCBlockNodeHangTestName, 1)
-			Expect(APIClient.Create(context.TODO(), nhc)).To(Succeed(),
+			testNHC = buildNHCWithMaxUnhealthy(sbrparams.NHCBlockNodeHangTestName, 1)
+			Expect(APIClient.Create(context.TODO(), testNHC)).To(Succeed(),
 				"NodeHealthCheck CR %q must be created", sbrparams.NHCBlockNodeHangTestName)
 
 			By("Selecting a victim worker node that hosts no SBR controller pod")
@@ -100,6 +101,9 @@ var _ = Describe(
 
 		AfterAll(func() {
 			By("Removing the NodeHealthCheck CR")
+			if err := resumeBlockStorageRecovery(victimNodeName); err != nil {
+				GinkgoWriter.Printf("Warning: release recovery pause before cleanup: %v\n", err)
+			}
 			cleanupNHCCR(context.Background(), sbrparams.NHCBlockNodeHangTestName)
 
 			if victimNodeName != "" {
@@ -186,6 +190,7 @@ var _ = Describe(
 
 				By(fmt.Sprintf("Triggering a kernel panic on node %q via /proc/sysrq-trigger", victimNodeName))
 				GinkgoWriter.Printf("Executing SysRq kernel panic on node %s\n", victimNodeName)
+				recordInjectionBootID(sbrparams.BlockNodeHangInjectorPodName, victimNodeName)
 				fireSysRqKernelPanic(injectorPod)
 
 				By(fmt.Sprintf("Waiting for SBRStorageUnhealthy=True (reason %s) on the victim node",
@@ -239,14 +244,36 @@ var _ = Describe(
 					"Boot-id of node %q must change after the reboot (stayed %q)", victimNodeName, preCrashBootID)
 				GinkgoWriter.Printf("Boot-id changed: %q -> %q\n", preCrashBootID, postCrashBootID)
 
+				By("Waiting for NHC to finish remediation before storage recovery")
+				Eventually(sbrCRRec.Gone(), sbrparams.SBRCRCleanupTimeout,
+					sbrparams.SBRCRCleanupPollInterval).Should(Succeed(),
+					"NHC must delete the completed remediation before any storage fence is removed")
+
+				By("Pausing this test's NHC during post-reboot storage recovery")
+				resumeNHC := pauseBlockStorageRecovery(testNHC, victimNodeName, postCrashBootID, nil)
+
 				By("Waiting for the victim node's agent pod to be Ready again")
 
 				Eventually(func() error {
+					if err := recoverRebootedODFFence(victimNodeName); err != nil {
+						return err
+					}
+
 					return agentPodReadyOnNode(sbrparams.SBRCBlockNodeHangTestName, victimNodeName)
 				}, sbrparams.BlockAgentReadyAfterRebootTimeout,
 					sbrparams.BlockFencingStateCheckInterval).Should(Succeed(),
 					"The SBRC %q agent pod on node %q must become Ready after it rebooted",
 					sbrparams.SBRCBlockNodeHangTestName, victimNodeName)
+
+				By("Waiting for the recovered node's storage health condition to clear")
+				Eventually(func() error {
+					return nodeConditionIs(victimNodeName, sbrparams.SBRStorageUnhealthyCondition, corev1.ConditionFalse, "")
+				}, sbrparams.StorageInjectionTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+					"Peers must report recovered storage before NHC resumes")
+
+				By("Resuming this test's NHC before the no-refencing stability check")
+				Expect(resumeNHC()).To(Succeed(), "Release only this test's recovery pause request")
+				waitForBlockNHCEnabled(testNHC, nil)
 
 				By(fmt.Sprintf("Consistently asserting for %s that the victim is not fenced again "+
 					"(stable boot-id and Ready)", sbrparams.BlockNoFencingCheckDuration))
