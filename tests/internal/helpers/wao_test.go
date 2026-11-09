@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 
@@ -179,6 +180,105 @@ func TestWAOComponentRetainedResources(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("operand %s retained = %v, want %v", component, got, want)
 		}
+	}
+}
+
+func TestWAOOperandsForLabelFilter(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		filter string
+		want   []string
+	}{
+		"single operator with tier": {"operator:far && tier:smoke", []string{medik8sparams.WAOComponentFAR}},
+		"two operators or": {
+			"operator:far || operator:nhc",
+			[]string{medik8sparams.WAOComponentFAR, medik8sparams.WAOComponentNHC},
+		},
+		"negated operator ignored": {"!operator:far && operator:nhc", []string{medik8sparams.WAOComponentNHC}},
+		"duplicate deduplicated":   {"operator:sbr && operator:sbr", []string{medik8sparams.WAOComponentSBR}},
+		"no operator term":         {"tier:smoke && frequency:nightly", nil},
+		"empty filter":             {"", nil},
+		"wao has no operand":       {"operator:wao", nil},
+		"interop has no operand":   {"operator:interop", nil},
+	} {
+		if got := WAOOperandsForLabelFilter(testCase.filter); !reflect.DeepEqual(got, testCase.want) {
+			t.Errorf("%s: WAOOperandsForLabelFilter(%q) = %v, want %v", name, testCase.filter, got, testCase.want)
+		}
+	}
+}
+
+func TestEnsureWAOOperandsEnabledNoOpWithoutOperatorLabel(t *testing.T) {
+	t.Setenv(ECOTestLabelsEnvVar, "tier:smoke")
+	k8sClient := waoClient(waoConfig(map[string]interface{}{
+		medik8sparams.WAOComponentFAR: map[string]interface{}{"enabled": false},
+	}))
+	operands, err := EnsureWAOOperandsEnabled(context.Background(), k8sClient, time.Second, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("EnsureWAOOperandsEnabled: %v", err)
+	}
+
+	if operands != nil {
+		t.Errorf("operands = %v, want nil", operands)
+	}
+
+	if waoEnabled(t, k8sClient, medik8sparams.WAOComponentFAR) {
+		t.Error("fenceAgentsRemediation was enabled despite no operator label in the filter")
+	}
+}
+
+func TestEnsureWAOOperandsEnabledNoOpOnPreWAOCluster(t *testing.T) {
+	t.Setenv(ECOTestLabelsEnvVar, "operator:far")
+	operands, err := EnsureWAOOperandsEnabled(
+		context.Background(), waoClient(), time.Second, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("EnsureWAOOperandsEnabled: %v", err)
+	}
+
+	if operands != nil {
+		t.Errorf("operands = %v, want nil on a pre-WAO cluster", operands)
+	}
+}
+
+func TestEnsureWAOOperandsEnabledIdempotentWhenAvailable(t *testing.T) {
+	t.Setenv(ECOTestLabelsEnvVar, "operator:far && tier:smoke")
+	config := waoConfig(map[string]interface{}{
+		medik8sparams.WAOComponentFAR: map[string]interface{}{"enabled": true},
+	})
+	config.Object["status"] = map[string]interface{}{"components": []interface{}{
+		map[string]interface{}{"name": medik8sparams.WAOComponentFAR, "phase": medik8sparams.WAOPhaseAvailable},
+	}}
+	operands, err := EnsureWAOOperandsEnabled(
+		context.Background(), waoClient(config), time.Second, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("EnsureWAOOperandsEnabled: %v", err)
+	}
+
+	if !reflect.DeepEqual(operands, []string{medik8sparams.WAOComponentFAR}) {
+		t.Errorf("operands = %v, want [%s]", operands, medik8sparams.WAOComponentFAR)
+	}
+}
+
+func TestEnsureWAOOperandsEnabledEnablesDisabledOperand(t *testing.T) {
+	t.Setenv(ECOTestLabelsEnvVar, "operator:far")
+	config := waoConfig(map[string]interface{}{
+		medik8sparams.WAOComponentFAR: map[string]interface{}{"enabled": false},
+	})
+	// WAO reports Available once the manager is up; the precondition enables the operand and then
+	// observes this phase. The fake client does not reconcile, so the phase is seeded here.
+	config.Object["status"] = map[string]interface{}{"components": []interface{}{
+		map[string]interface{}{"name": medik8sparams.WAOComponentFAR, "phase": medik8sparams.WAOPhaseAvailable},
+	}}
+	k8sClient := waoClient(config)
+	operands, err := EnsureWAOOperandsEnabled(context.Background(), k8sClient, time.Second, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("EnsureWAOOperandsEnabled: %v", err)
+	}
+
+	if !reflect.DeepEqual(operands, []string{medik8sparams.WAOComponentFAR}) {
+		t.Errorf("operands = %v, want [%s]", operands, medik8sparams.WAOComponentFAR)
+	}
+
+	if !waoEnabled(t, k8sClient, medik8sparams.WAOComponentFAR) {
+		t.Error("fenceAgentsRemediation was not enabled")
 	}
 }
 

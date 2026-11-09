@@ -4,15 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"regexp"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/medik8s/system-tests/tests/internal/labels"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -215,4 +220,175 @@ func sortedKeys(states map[string]bool) []string {
 	slices.Sort(keys)
 
 	return keys
+}
+
+// ECOTestLabelsEnvVar is the environment variable that carries the Ginkgo label-filter expression
+// (ginkgo --label-filter) for a run, for example "operator:far && tier:smoke". The WAO precondition
+// reads it to learn which operands the selected specs need.
+const ECOTestLabelsEnvVar = "ECO_TEST_LABELS"
+
+// operatorLabelToComponent maps each operator:<x> label to the WorkloadAvailabilityConfig operand
+// key it enables. operator:wao (WAO itself, always installed) and operator:interop (cross-operator,
+// no single operand) have no entry, so they enable nothing on their own.
+var operatorLabelToComponent = map[string]string{
+	labels.OperatorNHC: medik8sparams.WAOComponentNHC,
+	labels.OperatorSNR: medik8sparams.WAOComponentSNR,
+	labels.OperatorSBR: medik8sparams.WAOComponentSBR,
+	labels.OperatorNMO: medik8sparams.WAOComponentNMO,
+	labels.OperatorFAR: medik8sparams.WAOComponentFAR,
+	labels.OperatorMDR: medik8sparams.WAOComponentMDR,
+}
+
+// operatorLabelExpr matches an operator:<slug> label in a Ginkgo label-filter expression, capturing
+// a leading "!" so a negated term (!operator:far) can be told apart and skipped.
+var operatorLabelExpr = regexp.MustCompile(`(!\s*)?\b(operator:[a-z]+)\b`)
+
+// WAOOperandsForLabelFilter returns the WorkloadAvailabilityConfig operand keys named by positive
+// operator:<x> terms in a Ginkgo label-filter expression (the ECO_TEST_LABELS value). Negated terms
+// (!operator:x) and operator labels with no single operand (operator:wao, operator:interop) are
+// ignored. The result is sorted and deduplicated; a filter that names no mappable operator returns
+// nil, so a run selected only by tier or frequency enables nothing.
+func WAOOperandsForLabelFilter(labelFilter string) []string {
+	seen := make(map[string]bool)
+
+	for _, match := range operatorLabelExpr.FindAllStringSubmatch(labelFilter, -1) {
+		if match[1] != "" {
+			// Negated term such as !operator:far: the run excludes this operator.
+			continue
+		}
+
+		component, ok := operatorLabelToComponent[match[2]]
+		if !ok {
+			// operator:wao and operator:interop name no single operand.
+			continue
+		}
+
+		seen[component] = true
+	}
+
+	if len(seen) == 0 {
+		return nil
+	}
+
+	operands := make([]string, 0, len(seen))
+	for component := range seen {
+		operands = append(operands, component)
+	}
+	slices.Sort(operands)
+
+	return operands
+}
+
+// EnsureWAOOperandsEnabled is a suite precondition: it makes the operands named by the
+// ECO_TEST_LABELS label filter enabled and Available before the first spec runs, and returns the
+// operands it waited on. It implements the precondition contract in docs/TESTCASES/AGENTS.md:
+//
+//   - A filter that names no mappable operand enables nothing and returns nil.
+//   - On a pre-WAO cluster (the WorkloadAvailabilityConfig singleton is absent) it is a no-op, so a
+//     spec runs unchanged on either layout and falls back to its own operator check.
+//   - It is idempotent: an operand already enabled and Available is left untouched; only operands
+//     that are not yet Available are enabled, in a single patch.
+//   - It blocks until every requested operand reports phase Available, bounded by availableTimeout
+//     and pollInterval, and fails fast if one reports Degraded.
+//
+// Pass waoparams.OperandAvailableTimeout and waoparams.DefaultPollInterval for the bounds. The
+// caller keeps its own deployment.Pull/IsReady readiness check: Available is the operand's own
+// report, and the readiness check remains the externally observable assertion.
+func EnsureWAOOperandsEnabled(ctx context.Context, k8sClient client.Client,
+	availableTimeout, pollInterval time.Duration,
+) ([]string, error) {
+	operands := WAOOperandsForLabelFilter(os.Getenv(ECOTestLabelsEnvVar))
+	if len(operands) == 0 {
+		return nil, nil
+	}
+
+	config, err := GetWAOConfig(ctx, k8sClient)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			// Pre-WAO cluster: the singleton does not exist, so the operators are installed
+			// individually and there is no operand to enable.
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	var toEnable []string
+
+	for _, operand := range operands {
+		enabled, enabledErr := WAOComponentEnabled(config, operand)
+		if enabledErr != nil {
+			return nil, enabledErr
+		}
+
+		phase, phaseErr := WAOComponentPhase(config, operand)
+		if phaseErr != nil {
+			return nil, phaseErr
+		}
+
+		if !enabled || phase != medik8sparams.WAOPhaseAvailable {
+			toEnable = append(toEnable, operand)
+		}
+	}
+
+	if len(toEnable) > 0 {
+		if enableErr := EnableWAOComponents(ctx, k8sClient, toEnable...); enableErr != nil {
+			return nil, enableErr
+		}
+	}
+
+	if waitErr := waitForWAOOperandsAvailable(
+		ctx, k8sClient, operands, availableTimeout, pollInterval); waitErr != nil {
+		return nil, waitErr
+	}
+
+	return operands, nil
+}
+
+// waitForWAOOperandsAvailable blocks until every named operand reports phase Available. It returns
+// an error if any operand reports Degraded or if the timeout elapses first.
+func waitForWAOOperandsAvailable(ctx context.Context, k8sClient client.Client, operands []string,
+	timeout, pollInterval time.Duration,
+) error {
+	var pending string
+
+	waitErr := wait.PollUntilContextTimeout(ctx, pollInterval, timeout, true,
+		func(ctx context.Context) (bool, error) {
+			config, err := GetWAOConfig(ctx, k8sClient)
+			if err != nil {
+				return false, err
+			}
+
+			pending = ""
+
+			for _, operand := range operands {
+				phase, phaseErr := WAOComponentPhase(config, operand)
+				if phaseErr != nil {
+					return false, phaseErr
+				}
+
+				if phase == medik8sparams.WAOPhaseDegraded {
+					return false, fmt.Errorf("operand %q reported phase %s", operand, medik8sparams.WAOPhaseDegraded)
+				}
+
+				if phase != medik8sparams.WAOPhaseAvailable {
+					pending = operand
+
+					return false, nil
+				}
+			}
+
+			return true, nil
+		})
+	if waitErr != nil {
+		if pending != "" {
+			return fmt.Errorf("operand %q did not reach phase %s within %s: %w",
+				pending, medik8sparams.WAOPhaseAvailable, timeout, waitErr)
+		}
+
+		return fmt.Errorf("waiting for WAO operands to reach phase %s: %w",
+			medik8sparams.WAOPhaseAvailable, waitErr)
+	}
+
+	return nil
 }
