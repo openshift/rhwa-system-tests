@@ -6,8 +6,10 @@ on:
       - published
   push:
     branches:
-      - main
-      - 'release-*'
+      - wao
+  pull_request:
+    branches:
+      - wao
 
 jobs:
   build:
@@ -16,9 +18,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v4
 
     - name: Login to Quay.io
+      if: github.event_name != 'pull_request'
       uses: docker/login-action@v4
       with:
         registry: quay.io
@@ -35,7 +38,7 @@ jobs:
       id: set_image_tag
       shell: bash
       run: |
-        image_tag=latest
+        image_tag=wao
         if [ "${{ github.ref }}" != 'refs/heads/main' ]; then
           branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}
           version_digits=$(echo "${branch}" | tr -d -c 0-9)
@@ -48,6 +51,6 @@ jobs:
       with:
         context: .
         file: ./Dockerfile
-        push: true
+        push: ${{ github.event_name != 'pull_request' }}
         platforms: linux/amd64,linux/arm64
         tags: quay.io/medik8s/system-tests:${{ steps.set_image_tag.outputs.IMAGE_TAG }}
