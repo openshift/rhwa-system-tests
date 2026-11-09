@@ -227,4 +227,37 @@ const (
 	FeedbackPodLabelValue = "nmo-drain-feedback"
 	// FeedbackPodLabelSelector is the label selector string for the drain feedback workload.
 	FeedbackPodLabelSelector = FeedbackPodLabelKey + "=" + FeedbackPodLabelValue
+
+	// SNRConflictReason is the spec.reason set on the NodeMaintenance CR created by the
+	// NMO+SNR conflict test (OCP-69928).
+	SNRConflictReason = "system-tests SNR conflict validation (RHWA-1252)"
+
+	// SNRCRDName is the full CRD name for SelfNodeRemediationConfig. The conflict test
+	// uses it to detect that SNR is installed: the spec requires both NMO and SNR, so it
+	// skips on clusters where the CRD is absent rather than failing. Mirrors
+	// snrparams.SNRCRDName (suites do not import each other's params packages).
+	SNRCRDName = "selfnoderemediationconfigs.self-node-remediation.medik8s.io"
+
+	// SNRAgentDaemonSetName is the name of the SNR agent DaemonSet the conflict test
+	// expects to be deployed once SNR is installed.
+	SNRAgentDaemonSetName = "self-node-remediation-ds"
+	// SNRAgentPodLabelSelector selects SNR agent DaemonSet pods by label, never by name
+	// prefix. It matches the labels on the self-node-remediation-ds pod template and
+	// mirrors snrparams.DaemonSetPodLabelSelector.
+	SNRAgentPodLabelSelector = "app.kubernetes.io/name=self-node-remediation,app.kubernetes.io/component=agent"
+
+	// ExcludeRemediationLabel is applied by NMO to a node while it is under maintenance.
+	// SNR's agent DaemonSet excludes labelled nodes through a required node affinity, so
+	// the agent pod leaves the node and SNR will not remediate it.
+	ExcludeRemediationLabel = "remediation.medik8s.io/exclude-from-remediation"
+
+	// SNRAgentPodEvictionTimeout is the maximum wait for the SNR agent pod to disappear
+	// from a node that entered NMO maintenance (the Python suite allowed 60s per pod).
+	SNRAgentPodEvictionTimeout = 2 * time.Minute
+	// SNRAgentPodAbsenceWindow is how long the SNR agent pod must stay off a node that
+	// is under maintenance.
+	SNRAgentPodAbsenceWindow = 1 * time.Minute
+	// SNRAgentPodTimeout is the maximum wait for a ready SNR agent pod to appear on a
+	// node: before maintenance starts (baseline) and after maintenance ends (return).
+	SNRAgentPodTimeout = 5 * time.Minute
 )
