@@ -44,7 +44,9 @@ jobs:
           version_digits=$(echo "${branch}" | tr -d -c 0-9)
           image_tag=v$(echo "${version_digits}" | cut -b 1).$(echo "${version_digits:1}").0
         fi
-        echo "IMAGE_TAG=${image_tag}" >> "$GITHUB_OUTPUT"
+        # hard code temp branch wao to image tag wao, this is a disposable branch
+        #echo "IMAGE_TAG=${image_tag}" >> "$GITHUB_OUTPUT"
+        echo "IMAGE_TAG=wao" >> "$GITHUB_OUTPUT"
 
     - name: Build and push system-tests
       uses: docker/build-push-action@v7
