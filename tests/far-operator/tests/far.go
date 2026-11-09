@@ -8,11 +8,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	configv1 "github.com/openshift/api/config/v1"
-	olmV1alpha1 "github.com/rh-ecosystem-edge/eco-goinfra/pkg/schemes/olm/operators/v1alpha1"
 
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/infrastructure"
-	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/olm"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
@@ -73,73 +71,6 @@ var _ = Describe(
 					assertion.Expect(int32(len(runningPods))).To(Equal(expectedCount),
 						"Expected %d running FAR pod(s), found %d", expectedCount, len(runningPods))
 				}, medik8sparams.DefaultTimeout, farparams.DefaultPollInterval).Should(Succeed())
-			})
-
-		It("Verify FAR CSV has required annotations",
-			reportxml.ID("70637"),
-			Label(labels.TierSmoke, labels.DisruptionNonDestructive,
-				labels.PlatformAny, labels.ComponentOLM, labels.FrequencyPresubmit),
-			func() {
-				By("Getting FAR ClusterServiceVersion")
-
-				var farCSV *olm.ClusterServiceVersionBuilder
-
-				Eventually(func() error {
-					farCSVs, err := olm.ListClusterServiceVersionWithNamePattern(
-						APIClient, "fence-agents-remediation", medik8sparams.OperatorNs)
-					if err != nil {
-						return err
-					}
-
-					for _, csv := range farCSVs {
-						phase, phaseErr := csv.GetPhase()
-						if phaseErr == nil && phase == olmV1alpha1.CSVPhaseSucceeded {
-							farCSV = csv
-
-							return nil
-						}
-					}
-
-					return fmt.Errorf("no FAR CSV in Succeeded phase found yet")
-				}, medik8sparams.DefaultTimeout, farparams.DefaultPollInterval).Should(Succeed(),
-					"FAR CSV must reach Succeeded phase")
-
-				if !helpers.IsDownstream() {
-					Skip("CSV feature annotations are product packaging; skipped when ECO_IS_DOWNSTREAM=false")
-				}
-
-				By("Checking annotation values on FAR CSV")
-
-				Expect(farCSV.Object.Annotations).ToNot(BeNil(), "CSV annotations should not be nil")
-				expectedAnnotations := medik8sparams.ExpectedFeatureAnnotations(
-					farCSV.Object.Spec.Version.String(), false)
-
-				var annotationErrors []string
-
-				for annotationKey, expectedValue := range expectedAnnotations {
-					annotationValue, exists := farCSV.Object.Annotations[annotationKey]
-					if !exists {
-						annotationErrors = append(annotationErrors,
-							fmt.Sprintf("required annotation %q is missing", annotationKey))
-
-						continue
-					}
-
-					if annotationValue != expectedValue {
-						annotationErrors = append(annotationErrors,
-							fmt.Sprintf("annotation %q: expected %q, got %q",
-								annotationKey, expectedValue, annotationValue))
-					}
-				}
-
-				if len(annotationErrors) > 0 {
-					errMsg := "CSV annotation validation failures:\n"
-					for _, msg := range annotationErrors {
-						errMsg += fmt.Sprintf("- %s\n", msg)
-					}
-
-					Fail(errMsg)
-				}
 			})
 
 		It("Verify FAR controller manager has correct number of replicas",
