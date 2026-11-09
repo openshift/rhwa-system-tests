@@ -235,3 +235,17 @@ cadence) are not ported; the Python asserts none of them.
 - **Environment**: Connected, or disconnected with WORKLOAD_IMAGE set to a mirrored image
 - **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="Report pending pods while the drain is running" ./tests/nmo-operator/...`
 - **Pass criteria**: The workload Deployment's pod runs container-ready on the target node before maintenance starts (exactly one such pod); the PodDisruptionBudget is enforced (status synced, DisruptionsAllowed=0) before maintenance starts; while the PDB blocks eviction the NodeMaintenance phase is Running and status.pendingPods contains the workload pod; after the PDB is deleted the NodeMaintenance reaches Succeeded phase with DrainProgress=100 and an empty PendingPods list; teardown best-effort deletes the PDB, the Deployment and the NodeMaintenance CR and waits for the node to return to Ready, uncordoned and free of the medik8s.io/drain taint
+### 17. Evict the NMO Pod When Its Node Enters Maintenance ([OCP-29600](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-29600))
+
+Puts the node hosting the NMO controller pod into maintenance and verifies the
+controller pod is evicted and comes back running on a different node. The controller
+tolerates the control-plane taints and prefers control-plane nodes when no infra nodes
+exist, so the maintenance target is often a control-plane node; the spec then guards
+the etcd quorum budget on both sides of the maintenance so the control-plane quorum
+spec is not affected by spec ordering.
+
+- **Operators**: NMO v0.17.0+
+- **Cluster**: MNO (on a single-node cluster the quorum webhook rejects maintaining the controller's node)
+- **Environment**: Connected or disconnected
+- **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="evicts the NMO pod" ./tests/nmo-operator/...`
+- **Pass criteria**: The NMO deployment is Ready; a Running NMO controller pod with all containers ready, owned by the NMO deployment, is found and its node recorded; stale NodeMaintenance CRs targeting that node are deleted; when the target is a control-plane node the etcd quorum PDB reports DisruptionsAllowed>=1 before the create; the NodeMaintenance CR is created and reaches Succeeded phase; the node is cordoned (Unschedulable=true) with both the medik8s.io/drain and node.kubernetes.io/unschedulable NoSchedule taints; DrainProgress=100 and PendingPods empty; every remaining pod on the node that is neither finished (Succeeded or Failed), nor terminating, nor one of the ownerless control-plane guard pods is owned by a DaemonSet or the Node; at least one Running NMO controller pod with all containers ready exists and none of the running controller pods is on the original node; on teardown the NMO deployment is Ready first, the NodeMaintenance CR is deleted, the node returns to Ready, uncordoned and free of the medik8s.io/drain taint, and the etcd quorum PDB allows a disruption again (best-effort, logged if incomplete; control-plane targets get the longer control-plane budgets)
