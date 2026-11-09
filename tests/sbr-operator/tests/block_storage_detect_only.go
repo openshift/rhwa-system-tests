@@ -85,13 +85,15 @@ var _ = Describe(
 
 			By("Asserting the SBRC reports concurrent-writeable shared storage")
 
-			// Without this the reconciler withholds fencing, no fence message is ever written, and
-			// the first half of the test would pass without having tested anything.
+			// The storage write gate is what a peer would have to pass to fence anyone, so proving
+			// it is open first is what makes the later "nobody was fenced" mean detect-only mode
+			// and not an SBRC that could never have fenced anything in the first place.
 			Eventually(func() (bool, error) {
 				return sbrcConcurrentWriteable(sbrparams.SBRCBlockDetectOnlyTestName)
 			}, sbrparams.StorageInjectionTimeout, sbrparams.DefaultPollInterval).Should(BeTrue(),
-				"SBRC %q must report status.storageValidation.concurrentWriteable=true before a peer "+
-					"will write a fence message", sbrparams.SBRCBlockDetectOnlyTestName)
+				"SBRC %q must report status.storageValidation.concurrentWriteable=true, so fencing is "+
+					"withheld by detect-only mode rather than blocked by storage",
+				sbrparams.SBRCBlockDetectOnlyTestName)
 
 			By("Selecting an observer agent pod on a node other than the victim")
 
@@ -155,8 +157,8 @@ var _ = Describe(
 			}
 		})
 
-		It("Detection-only mode: a Ceph RBD block-mode node is reported unhealthy and fenced on "+
-			"storage, but never rebooted",
+		It("Detection-only mode: a Ceph RBD block-mode node is reported unhealthy but never "+
+			"cordoned, fenced or rebooted",
 			reportxml.ID("1961"),
 			Label(
 				labels.OperatorSBR,
@@ -166,11 +168,11 @@ var _ = Describe(
 				labels.PlatformAny,
 				labels.FrequencyNightly,
 			), func() {
-				// SBR reboots a node by exactly two routes, and both only open once a
-				// StorageBasedRemediation CR exists: a peer writes a fence message the victim reads
-				// off its own fence slot, or the victim sees a CR for itself and stops petting its
-				// watchdog. Detect-only mode is only proven by walking into both and coming out with
-				// the node still up, so the test drives each one in turn.
+				// Detect-only mode has to hold at both ends of a remediation, and the two are
+				// enforced by different components, so the test drives each in turn. The peer
+				// reconciler must refuse to cordon or fence a node a StorageBasedRemediation CR
+				// names (api/v1alpha1: "the controller does not write fence messages"), and the
+				// victim's own agent must keep petting its watchdog when it sees a CR for itself.
 				By("Step 7: Recording the victim's boot-id before any remediation")
 
 				preFenceBootID, bootErr := getNodeBootID(victimNodeName)
@@ -181,66 +183,98 @@ var _ = Describe(
 
 				By("Step 8: Creating a StorageBasedRemediation CR for the victim node")
 
-				// Created by hand rather than through NHC: this half needs the fence message to be
-				// written while the victim can still read its own fence slot, so its storage must
-				// stay healthy and nothing will mark it SBRStorageUnhealthy.
+				// Created by hand rather than through NHC: this half is about what a peer does with
+				// a remediation request on its own, so the victim's storage stays healthy and
+				// nothing marks it SBRStorageUnhealthy.
 				sbrCR := buildSBR(victimNodeName)
 				Expect(APIClient.Create(context.TODO(), sbrCR)).To(Succeed(),
 					"StorageBasedRemediation CR for node %q must be created", victimNodeName)
 
-				By("Step 9: Waiting for a peer to write the fence message into the victim's own fence slot")
+				By(fmt.Sprintf("Step 9: Waiting for a peer to report an %s Warning withholding "+
+					"remediation for the victim node", sbrparams.DetectOnlyWithholdReason))
 
-				// Read off the device through the observer, not inferred from the CR's conditions:
-				// the point is that the fence really is sitting in the slot the victim polls, so
-				// "the victim did not reboot" means it ignored a fence it could see, not that there
-				// was never one to act on.
-				var victimFenceSlot FenceSlot
+				// The positive proof, not just the absence of a fence: the reconciler returns on
+				// detect-only before it adds its finalizer, so this event is the only trace that a
+				// peer picked the CR up at all. Without it a withheld remediation would be
+				// indistinguishable from one no peer ever saw.
+				//
+				// The victim's own agent also emits against this CR ("Skipping remediation for own
+				// node"), so the reason narrows it to the peers; the UID narrows it to this CR
+				// rather than a same-named one from an earlier run.
+				withholdErr := helpers.WaitForEvents(context.TODO(), EventsClient,
+					helpers.InvolvedObjectRef{
+						Kind:      sbrparams.SBRRemediationKind,
+						Name:      victimNodeName,
+						Namespace: medik8sparams.OperatorNs,
+						UID:       string(sbrCR.GetUID()),
+					},
+					[]helpers.EventExpectation{{
+						Reason:        sbrparams.DetectOnlyWithholdReason,
+						Type:          corev1.EventTypeWarning,
+						MessageSubstr: fmt.Sprintf("for node '%s'", victimNodeName),
+					}},
+					sbrparams.BlockDetectOnlyWithholdTimeout, sbrparams.DefaultPollInterval)
+				Expect(withholdErr).ToNot(HaveOccurred(),
+					"A peer must emit an %s Warning withholding cordon/fence/taint for node %q "+
+						"instead of remediating it", sbrparams.DetectOnlyWithholdReason, victimNodeName)
 
-				Eventually(func() error {
-					var fenceErr error
-					victimFenceSlot, fenceErr = liveFenceMessageFor(observerPodName, victimNodeName)
+				By(fmt.Sprintf("Step 10: Consistently asserting for %s that no peer cordons, fences or "+
+					"taints the victim", sbrparams.DetectOnlySuppressionCheckDuration))
 
-					return fenceErr
-				}, sbrparams.BlockFenceMessageTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"A peer agent must write a fence message into the fence slot of node %q",
-					victimNodeName)
-
-				GinkgoWriter.Printf("Fence message for node %q in slot %d: written by node ID %d, "+
-					"target node ID %d, reason %#x\n", victimNodeName, victimFenceSlot.SlotIndex,
-					victimFenceSlot.WriterNodeID, victimFenceSlot.TargetNodeID, victimFenceSlot.Reason)
-
-				By(fmt.Sprintf("Step 10: Consistently asserting for %s that the victim ignores the fence "+
-					"it can read", sbrparams.DetectOnlySuppressionCheckDuration))
-
-				// The victim's heartbeat stays fresh throughout, so its death is never proven: the
-				// reconciler rewrites the fence every 60s and emits FencingFailed. That is the
-				// expected behaviour of a fence nobody acts on, not a test failure.
+				// Every clause is one of the three things the withheld path names, checked where it
+				// would actually land: the fence in the slot the victim polls, read off the device
+				// through the observer rather than inferred from the CR's conditions, and the cordon
+				// and taint on the Node itself.
 				//
 				// Ready is asserted alongside the boot-id because the boot-id only moves once
 				// kubelet reports in after a reboot has finished — a reboot starting inside this
 				// window would show as NotReady first and could otherwise slip through.
 				Consistently(func() error {
+					if fenceErr := noLiveFenceMessageFor(observerPodName, victimNodeName); fenceErr != nil {
+						return fmt.Errorf("a peer fenced node %s on storage while detectOnlyMode is "+
+							"Enabled: %w", victimNodeName, fenceErr)
+					}
+
+					node, getErr := APIClient.CoreV1Interface.Nodes().Get(
+						context.TODO(), victimNodeName, metav1.GetOptions{})
+					if getErr != nil {
+						return fmt.Errorf("get node %s: %w", victimNodeName, getErr)
+					}
+
+					if node.Spec.Unschedulable {
+						return fmt.Errorf("node %s was cordoned while detectOnlyMode is Enabled",
+							victimNodeName)
+					}
+
+					if hasOutOfServiceTaint(node) {
+						return fmt.Errorf("node %s was given the %s taint while detectOnlyMode is "+
+							"Enabled", victimNodeName, sbrparams.OutOfServiceTaintKey)
+					}
+
 					bootID, bootIDErr := getNodeBootID(victimNodeName)
 					if bootIDErr != nil {
 						return bootIDErr
 					}
 
 					if bootID != preFenceBootID {
-						return fmt.Errorf("node %s rebooted on a fence message while detectOnlyMode is "+
-							"Enabled: boot-id %s -> %s", victimNodeName, preFenceBootID, bootID)
+						return fmt.Errorf("node %s rebooted on a remediation request while "+
+							"detectOnlyMode is Enabled: boot-id %s -> %s",
+							victimNodeName, preFenceBootID, bootID)
 					}
 
 					return nodeConditionIs(victimNodeName, string(corev1.NodeReady), corev1.ConditionTrue, "")
 				}, sbrparams.DetectOnlySuppressionCheckDuration,
 					sbrparams.DetectOnlySuppressionCheckInterval).Should(Succeed(),
-					"Node %q must stay up and Ready with a live fence message in its own slot: in "+
-						"detect-only mode the agent must not self-fence", victimNodeName)
+					"Node %q must stay up, Ready, uncordoned, untainted and unfenced while a "+
+						"StorageBasedRemediation CR names it: detect-only mode remediates nothing",
+					victimNodeName)
 
-				By("Step 11: Deleting the StorageBasedRemediation CR and waiting for the victim to be " +
-					"schedulable again")
+				By("Step 11: Deleting the StorageBasedRemediation CR and confirming the victim is " +
+					"still schedulable")
 
-				// The peer reconciler cordons the victim before it writes the fence and uncordons it
-				// only while draining its finalizer, so the node is still cordoned here.
+				// The withheld path returns before the finalizer is added, so the CR goes away at
+				// once and there is nothing for a peer to undo. The wait is kept as the guard on
+				// entering the NHC half: it must start from a node that is genuinely untouched.
 				Expect(APIClient.Delete(context.TODO(), sbrCR)).To(Succeed(),
 					"StorageBasedRemediation CR for node %q must be deletable", victimNodeName)
 
@@ -422,24 +456,25 @@ var _ = Describe(
 					"Node %q must still be on boot-id %q when the test ends: nothing may reboot a node "+
 						"while detectOnlyMode is Enabled", victimNodeName, preIsolationBootID)
 
-				// Recorded, not asserted. The embedded remediation reconciler does not read
-				// detectOnlyMode (RHWA-1877): once the victim's heartbeat goes stale, peers prove its
-				// death from storage and taint a node that is still alive. Whether that is a bug to
-				// fail on is a product decision, so the observation is reported and the spec passes
-				// on what it set out to measure — that nothing rebooted.
+				// Recorded, not asserted. The reconciler withholds the taint along with the cordon
+				// and the fence once detectOnlyMode is Enabled, so on a fixed build this never
+				// fires; it stays in as a regression tripwire for RHWA-1877, where peers proved a
+				// live node's death from storage and tainted it. Left as a report entry rather than
+				// an expectation so the spec keeps passing on what it set out to measure — that
+				// nothing rebooted — and the taint is visible if it ever comes back.
 				victimNode, victimGetErr := APIClient.CoreV1Interface.Nodes().Get(
 					context.TODO(), victimNodeName, metav1.GetOptions{})
 				if victimGetErr == nil && hasOutOfServiceTaint(victimNode) {
 					AddReportEntry("sbr-block-detect-only-oos-taint", fmt.Sprintf(
-						"Node %s carries the %s taint while detectOnlyMode is Enabled: peer agents "+
-							"fenced a live node because the remediation reconciler ignores "+
+						"Node %s carries the %s taint while detectOnlyMode is Enabled: a peer fenced "+
+							"a live node, so the remediation reconciler is not honouring "+
 							"detectOnlyMode", victimNodeName, sbrparams.OutOfServiceTaintKey))
 					GinkgoWriter.Printf("Note: node %q was tainted %s although it was never rebooted\n",
 						victimNodeName, sbrparams.OutOfServiceTaintKey)
 				}
 
-				GinkgoWriter.Printf("Block-mode detection-only complete: node %q was fenced from "+
-					"storage and flagged unhealthy, and stayed on boot-id %q throughout\n",
+				GinkgoWriter.Printf("Block-mode detection-only complete: node %q was flagged "+
+					"unhealthy, never remediated, and stayed on boot-id %q throughout\n",
 					victimNodeName, preIsolationBootID)
 			})
 	})

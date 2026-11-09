@@ -663,44 +663,36 @@ func blockNodeIDOf(observerPodName, nodeName string) (uint16, error) {
 	return entry.NodeID, nil
 }
 
-// liveFenceMessageFor returns the fence message standing in nodeName's own fence slot, read through
-// an agent pod on another node. It is an error when the slot is empty, when it holds a retracted
-// fence (reason NONE, which is what the agent writes to disarm a stale one), or when the message
-// targets another node — any of those means nobody has asked for this node to be fenced.
+// noLiveFenceMessageFor returns nil for as long as nobody is asking for nodeName to be fenced, and
+// an error the moment a live fence stands in that node's own slot. A slot that is empty, holds a
+// retracted fence (reason NONE, which is what the agent writes to disarm a stale one) or names
+// another node all mean the same thing: nothing has asked for this node to be fenced.
 //
 // The slot is located by position: in Block mode node N owns fence slot index N-1, the geometry the
-// agent and the reconciler share. Intended as an Eventually body.
-func liveFenceMessageFor(observerPodName, nodeName string) (FenceSlot, error) {
+// agent and the reconciler share.
+//
+// A failed device read is reported as an error rather than as "no fence", so a Consistently built
+// on this fails on a broken observer instead of mistaking silence for proof. Intended as a
+// Consistently body.
+func noLiveFenceMessageFor(observerPodName, nodeName string) error {
 	nodeID, idErr := blockNodeIDOf(observerPodName, nodeName)
 	if idErr != nil {
-		return FenceSlot{}, idErr
+		return idErr
 	}
 
 	fenceSlots, readErr := readFenceSlotsFromPod(observerPodName)
 	if readErr != nil {
-		return FenceSlot{}, fmt.Errorf("read the fence region through observer pod %s: %w",
+		return fmt.Errorf("read the fence region through observer pod %s: %w",
 			observerPodName, readErr)
 	}
 
 	slot, written := fenceSlots[int(nodeID)-1]
-	if !written {
-		return FenceSlot{}, fmt.Errorf("fence slot %d (node %s, node ID %d) holds no fence message yet",
-			int(nodeID)-1, nodeName, nodeID)
+	if !written || slot.Reason == fenceReasonNone || slot.TargetNodeID != nodeID {
+		return nil
 	}
 
-	if slot.Reason == fenceReasonNone {
-		return FenceSlot{}, fmt.Errorf(
-			"fence slot %d (node %s, node ID %d) holds a reason-NONE message: nothing is asking for "+
-				"this node to be fenced", slot.SlotIndex, nodeName, nodeID)
-	}
-
-	if slot.TargetNodeID != nodeID {
-		return FenceSlot{}, fmt.Errorf(
-			"fence slot %d (node %s) holds a fence for node ID %d, not %d: the fence was written to "+
-				"the wrong slot", slot.SlotIndex, nodeName, slot.TargetNodeID, nodeID)
-	}
-
-	return slot, nil
+	return fmt.Errorf("fence slot %d (node %s, node ID %d) holds a live fence message written by "+
+		"node ID %d, reason %#x", slot.SlotIndex, nodeName, nodeID, slot.WriterNodeID, slot.Reason)
 }
 
 // victimHeartbeatSlotState looks the victim's heartbeat node ID up in the on-device node map, read through the

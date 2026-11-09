@@ -542,10 +542,20 @@ const (
 	// watchdog, when its own SBR storage is unhealthy while detectOnlyMode is Enabled.
 	SBRUnhealthyDetectOnlyReason = "SBRUnhealthyDetectOnly"
 
-	// BlockFenceMessageTimeout is how long to wait for a peer agent to write the fence message into
-	// the victim's own fence slot once a StorageBasedRemediation CR exists. The peer has to cordon
-	// the node and pass the storage write gate first, so it is sized well above one reconcile.
-	BlockFenceMessageTimeout = 3 * time.Minute
+	// DetectOnlyWithholdReason is the Warning a peer's remediation reconciler emits, against the
+	// StorageBasedRemediation CR, when it refuses to cordon or fence the node that CR names because
+	// detectOnlyMode is Enabled. It is the positive proof that the peer reached the decision point
+	// and withheld, rather than never having seen the CR at all.
+	DetectOnlyWithholdReason = "DetectOnlyMode"
+
+	// SBRRemediationKind is the kind of the StorageBasedRemediation CR, as it appears on the Event
+	// objects the remediation reconciler emits about it.
+	SBRRemediationKind = "StorageBasedRemediation"
+
+	// BlockDetectOnlyWithholdTimeout is how long to wait for a peer to report that it withheld
+	// remediation for a node whose StorageBasedRemediation CR exists while detectOnlyMode is
+	// Enabled. The peers reconcile the CR within seconds of its creation, so this is generous.
+	BlockDetectOnlyWithholdTimeout = 3 * time.Minute
 
 	// BlockDetectOnlyWatchdogFireAllowance is the time a disarmed watchdog would have needed to
 	// fire: the agent's own grace before it stops petting plus the device's timeout. SBR does not
