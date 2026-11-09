@@ -836,30 +836,6 @@ func parseFenceSlots(data []byte) map[int]FenceSlot {
 	return slots
 }
 
-// highestNodeIDEntry returns the node name and node ID of the node map entry holding the highest
-// node ID. Block mode fills slot index nodeID-1, so that node owns the last slot in use in every
-// region and the slots after it are still zero-filled. That is what makes a write aimed one slot
-// too far visible: it lands on a slot nobody owns, rather than on another node's live data.
-func highestNodeIDEntry(nodeMap *blockNodeMap) (string, uint16, error) {
-	var (
-		highestName string
-		highestID   uint16
-	)
-
-	for nodeName, entry := range nodeMap.Entries {
-		if entry.NodeID > highestID {
-			highestName, highestID = nodeName, entry.NodeID
-		}
-	}
-
-	// Node IDs start at 1, so a zero here means no entry carried an assignment at all.
-	if highestID == 0 {
-		return "", 0, fmt.Errorf("the node map assigns no node ID (%d entries)", len(nodeMap.Entries))
-	}
-
-	return highestName, highestID, nil
-}
-
 // heartbeatSlotUnwritten returns nil when the heartbeat slot at slotIdx is zero-filled: a slot no
 // agent has ever written. Only that one 4 KB slot is read, not the whole region.
 //

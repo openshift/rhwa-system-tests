@@ -13,6 +13,7 @@ import (
 	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
+	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrutils"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,7 +41,7 @@ var _ = Describe(
 			By("Clearing residual Ceph OSD blocklist entries from prior tests")
 			clearCephOSDBlocklist()
 			testSBRC = setupFenceGeometrySBRC()
-			victimNodeName, victimNodeID, observerPodName = selectHighestNodeIDVictim()
+			victimNodeName, victimNodeID, observerPodName = selectFenceGeometryVictim()
 		})
 
 		AfterAll(func() {
@@ -128,14 +129,11 @@ func setupFenceGeometrySBRC() *unstructured.Unstructured {
 	return sbrc
 }
 
-// selectHighestNodeIDVictim picks the victim node and the agent pod the device is read through.
-// The victim is the node holding the highest node ID in the on-device node map, so every slot after
-// its own is still zero-filled: that is what turns a write aimed one slot too far into something
-// the spec can see, and it is also the case the defect was dangerous in, because a completion check
-// reading the zeroed neighbour slot reports a live node dead. Node IDs are hash-based, so the
-// victim cannot be chosen; the spec skips when the node that owns the highest one hosts an SBR
-// controller pod, since fencing reboots it. The observer is an agent on any other node.
-func selectHighestNodeIDVictim() (string, uint16, string) {
+// selectFenceGeometryVictim picks a non-controller agent node whose following slot
+// is unassigned. A gap after a lower node ID preserves the same regression check
+// as the highest ID: an off-by-one write lands where no agent writes or reads.
+// The baseline assertions still verify those neighbouring slots are zero-filled.
+func selectFenceGeometryVictim() (string, uint16, string) {
 	By("Listing the SBRC's agent pods")
 
 	agentPods, listErr := sbrcAgentPods(sbrparams.SBRCBlockFenceGeometryTestName)
@@ -152,21 +150,27 @@ func selectHighestNodeIDVictim() (string, uint16, string) {
 	nodeMap, jsonPayload, mapErr := readNodeMapFromPod(agentPods[0].Object.Name)
 	Expect(mapErr).ToNot(HaveOccurred(), "Must read the node map through agent pod %q (payload: %s)",
 		agentPods[0].Object.Name, jsonPayload)
+	Expect(nodeMap.Entries).ToNot(BeEmpty(), "The on-device node map must assign nodes (payload: %s)", jsonPayload)
 
-	By("Picking the node that owns the highest node ID as the victim")
+	By("Selecting a victim without an SBR controller whose following node ID is unassigned")
 
-	victimNodeName, victimNodeID, pickErr := highestNodeIDEntry(nodeMap)
-	Expect(pickErr).ToNot(HaveOccurred(),
-		"The node map must assign a node ID to at least one node (payload: %s)", jsonPayload)
+	controllerNodes := controllerPodNodes()
+	eligible := make(map[string]bool, len(agentPods))
+	for _, agentPod := range agentPods {
+		nodeName := agentPod.Object.Spec.NodeName
+		eligible[nodeName] = !controllerNodes[nodeName]
+	}
+	nodeIDs := make(map[string]uint16, len(nodeMap.Entries))
+	for nodeName, entry := range nodeMap.Entries {
+		nodeIDs[nodeName] = entry.NodeID
+	}
+	victimNodeName, victimNodeID := sbrutils.FenceGeometryVictim(nodeIDs, eligible)
+	if victimNodeName == "" {
+		Skip("Need an SBR agent node without a controller whose following node ID is unassigned " +
+			"to verify fence-slot geometry without rebooting a controller")
+	}
 	GinkgoWriter.Printf("Victim node %q owns node ID %d, so it reads its own fence at slot index %d; "+
 		"node map: %s\n", victimNodeName, victimNodeID, victimNodeID-1, jsonPayload)
-
-	By("Skipping if the victim hosts an SBR controller pod")
-
-	if controllerPodNodes()[victimNodeName] {
-		Skip(fmt.Sprintf("Node %q owns the highest node ID but hosts an SBR controller pod, and "+
-			"this spec reboots the victim", victimNodeName))
-	}
 
 	By("Selecting an observer agent pod on a node other than the victim")
 

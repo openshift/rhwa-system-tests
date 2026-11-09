@@ -607,9 +607,10 @@ Block mode the agent reads its own fence slot at `(nodeID - 1) * 4096` while the
 the completion check read the neighbour's zero-filled heartbeat slot — an unparseable slot counts as
 "stopped", so fencing was reported as succeeded while the victim was still alive.
 
-The test injects no fault. It creates a `StorageBasedRemediation` CR directly for the node holding
-the highest node ID in the on-device node map — the node whose neighbouring slots are still
-zero-filled, which is the case the defect was dangerous in — and lets the fencing run for real. Read
+The test injects no fault. It creates a `StorageBasedRemediation` CR directly for an agent node
+without an SBR controller whose following node ID is unassigned. It prefers the highest eligible
+ID, but a lower ID with a gap preserves the same empty-neighbour regression check. The baseline
+assertions verify the neighbouring slots are zero-filled before fencing runs for real. Read
 through an observer agent on another node, the fence message must appear in fence slot index
 nodeID-1 and target the victim's node ID, while the slot after it stays empty on every poll; a fence
 found there fails the spec immediately rather than waiting out the timeout. The victim must then act
@@ -626,8 +627,8 @@ agent cannot attach the shared device.
 Full test case: [docs/TESTCASES/rhwa-2031.md](../../docs/TESTCASES/rhwa-2031.md)
 
 - **Operators**: SBR v5.8.0 (no NHC — the spec creates the remediation CR itself)
-- **Cluster**: Multi-node, agents on at least 2 nodes; skips when the node holding the highest node
-  ID hosts an SBR controller pod, since that node is rebooted
+- **Cluster**: Multi-node, agents on at least 2 nodes; a victim without an SBR controller must have
+  an unassigned following node ID (or own the last slot). Skips only when no such agent node exists
 - **Storage**: ODF Ceph RBD StorageClass, RWX, `volumeMode: Block`. Auto-discovered by provisioner
   (`rbd.csi.ceph.com`); `SBR_RBD_STORAGE_CLASS` overrides it. Skips when the cluster has none
 - **Environment**: Connected or disconnected. **Destructive** — one node is cordoned, fenced,
