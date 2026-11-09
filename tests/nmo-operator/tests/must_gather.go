@@ -84,7 +84,7 @@ var _ = Describe("NMO Must-Gather Tests",
 			By("Selecting a worker node that does not host the NMO controller")
 
 			targetNodeName = selectSchedulableWorkerExcluding(ctx, nmoPodNode)
-			nmCRName = nmoparams.MustGatherNMNamePrefix + targetNodeName
+			nmCRName = nmoparams.NMNamePrefix + targetNodeName
 			GinkgoWriter.Printf("Target node for must-gather test: %s\n", targetNodeName)
 
 			DeferCleanup(func() {
