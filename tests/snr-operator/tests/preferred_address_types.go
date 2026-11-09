@@ -185,11 +185,7 @@ var _ = Describe(
 				labels.OperatorSNR,
 				labels.TierAcceptance,
 				labels.ComponentDaemonSet,
-				// Destructive in practice on current builds: rolling the agent
-				// DaemonSet has driven control plane nodes into watchdog
-				// self-remediation on two unrelated clusters (RHWA-1942).
-				// Revert to DisruptionNonDestructive once that is fixed.
-				labels.DisruptionDestructive,
+				labels.DisruptionNonDestructive,
 				labels.PlatformAny,
 				labels.TopologyControlPlane,
 				labels.FrequencyNightly,
