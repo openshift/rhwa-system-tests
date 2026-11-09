@@ -27,6 +27,7 @@ var _ = Describe(
 	Label(labels.OperatorSBR, labels.ComponentRemediation), func() {
 		var (
 			testSBRC        *unstructured.Unstructured
+			testNHC         *unstructured.Unstructured
 			victimNodeName  string
 			witnessNodes    []string
 			observerPodName string
@@ -128,14 +129,15 @@ var _ = Describe(
 			ensureSBRTemplate()
 			// maxUnhealthy: 1 (rather than the shared builder's minHealthy: "51%") so exactly one node
 			// may be unhealthy regardless of cluster size — "51%" can block remediation on a small cluster.
-			nhc := buildNHCWithMaxUnhealthy(sbrparams.NHCBlockSplitBrainTestName, 1)
-			Expect(APIClient.Create(context.TODO(), nhc)).To(Succeed(),
+			testNHC = buildNHCWithMaxUnhealthy(sbrparams.NHCBlockSplitBrainTestName, 1)
+			Expect(APIClient.Create(context.TODO(), testNHC)).To(Succeed(),
 				"NodeHealthCheck CR %q must be created", sbrparams.NHCBlockSplitBrainTestName)
 		})
 
 		AfterAll(func() {
-			By("Removing the NodeHealthCheck CR")
-			cleanupNHCCR(context.Background(), sbrparams.NHCBlockSplitBrainTestName)
+			if err := resumeBlockStorageRecovery(victimNodeName); err != nil {
+				GinkgoWriter.Printf("Warning: release recovery pause before cleanup: %v\n", err)
+			}
 
 			By("Removing the split-brain injector pod if still present")
 			deleteHostCommandPod(sbrparams.BlockSplitBrainInjectorPodName)
@@ -143,7 +145,12 @@ var _ = Describe(
 			if victimNodeName != "" {
 				By("Flushing any leftover Ceph REJECT rule on the victim node")
 				flushCephRBDRules(victimNodeName)
+			}
 
+			By("Removing the NodeHealthCheck CR")
+			cleanupNHCCR(context.Background(), sbrparams.NHCBlockSplitBrainTestName)
+
+			if victimNodeName != "" {
 				By("Clearing residual Ceph OSD blocklist entries left by the fencing")
 				clearCephOSDBlocklist()
 
@@ -208,6 +215,7 @@ var _ = Describe(
 					flushCephRBDRules(victimNodeName)
 				})
 
+				recordInjectionBootID(sbrparams.BlockSplitBrainInjectorPodName, victimNodeName)
 				injectOut, injectErr := injectCephRBDRules(injectorPod)
 				Expect(injectErr).ToNot(HaveOccurred(),
 					"Ceph REJECT rules must be inserted on victim node %q (output: %s)",
@@ -247,6 +255,23 @@ var _ = Describe(
 					}
 
 					return nil
+				}
+
+				remediationGone := func() error {
+					if witnessErr := witnessGuard(); witnessErr != nil {
+						return witnessErr
+					}
+
+					_, pullErr := pullSBRCR(victimNodeName)
+					if k8serrors.IsNotFound(pullErr) {
+						return nil
+					}
+
+					if pullErr != nil {
+						return pullErr
+					}
+
+					return fmt.Errorf("StorageBasedRemediation/%s still exists; waiting for NHC cleanup", victimNodeName)
 				}
 
 				By("Waiting for NHC to create a StorageBasedRemediation CR for the victim node, while no " +
@@ -367,14 +392,46 @@ var _ = Describe(
 					"Only the victim node %q may be fenced; witness nodes %v must be untouched",
 					victimNodeName, witnessNodes)
 
+				By("Waiting for NHC to finish remediation before storage recovery")
+				Eventually(remediationGone, sbrparams.SBRCRCleanupTimeout,
+					sbrparams.SBRCRCleanupPollInterval).Should(Succeed(),
+					"NHC must delete the completed remediation before any storage fence is removed")
+
+				By("Pausing this test's NHC during post-reboot storage recovery")
+				resumeNHC := pauseBlockStorageRecovery(testNHC, victimNodeName, newVictimBootID, witnessGuard)
+
 				By("Waiting for the victim node's agent pod to be Ready again")
 
 				Eventually(func() error {
+					if err := witnessGuard(); err != nil {
+						return err
+					}
+					if err := recoverRebootedODFFence(victimNodeName); err != nil {
+						return err
+					}
+					if err := witnessGuard(); err != nil {
+						return err
+					}
+
 					return agentPodReadyOnNode(sbrparams.SBRCBlockSplitBrainTestName, victimNodeName)
-				}, sbrparams.BlockFencingStateCheckTimeout,
+				}, sbrparams.BlockAgentReadyAfterRebootTimeout,
 					sbrparams.BlockFencingStateCheckInterval).Should(Succeed(),
 					"The SBRC %q agent pod on node %q must become Ready after it rebooted",
 					sbrparams.SBRCBlockSplitBrainTestName, victimNodeName)
+
+				By("Waiting for the recovered node's storage health condition to clear")
+				Eventually(func() error {
+					if err := witnessGuard(); err != nil {
+						return err
+					}
+
+					return nodeConditionIs(victimNodeName, sbrparams.SBRStorageUnhealthyCondition, corev1.ConditionFalse, "")
+				}, sbrparams.StorageInjectionTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+					"Peers must report recovered storage before NHC resumes")
+
+				By("Resuming this test's NHC before the no-refencing stability check")
+				Expect(resumeNHC()).To(Succeed(), "Release only this test's recovery pause request")
+				waitForBlockNHCEnabled(testNHC, witnessGuard)
 
 				By(fmt.Sprintf("Consistently asserting for %s that the victim is not fenced again "+
 					"(stable boot-id and Ready)", sbrparams.BlockNoFencingCheckDuration))
@@ -402,24 +459,13 @@ var _ = Describe(
 					"Node %q must not be fenced again after recovery (boot-id must stay %q and it must stay Ready)",
 					victimNodeName, newVictimBootID)
 
+				By("Rechecking every witness after storage recovery and the stability check")
+				Expect(witnessesUntouched(witnessNodes, baseline)).To(Succeed(),
+					"Witness nodes must remain untouched throughout recovery and resumed NHC monitoring")
+
 				By("Waiting for NHC to delete the StorageBasedRemediation CR")
 
-				Eventually(func() error {
-					if witnessErr := witnessGuard(); witnessErr != nil {
-						return witnessErr
-					}
-
-					_, pullErr := pullSBRCR(victimNodeName)
-					if k8serrors.IsNotFound(pullErr) {
-						return nil
-					}
-
-					if pullErr != nil {
-						return pullErr
-					}
-
-					return fmt.Errorf("StorageBasedRemediation/%s still exists; waiting for NHC cleanup", victimNodeName)
-				}, sbrparams.SBRCRCleanupTimeout, sbrparams.SBRCRCleanupPollInterval).Should(Succeed(),
+				Eventually(remediationGone, sbrparams.SBRCRCleanupTimeout, sbrparams.SBRCRCleanupPollInterval).Should(Succeed(),
 					"NHC must delete the StorageBasedRemediation CR for node %q after recovery", victimNodeName)
 
 				By("Asserting the victim node is schedulable again and the out-of-service taint is gone")

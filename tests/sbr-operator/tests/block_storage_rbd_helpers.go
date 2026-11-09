@@ -496,8 +496,8 @@ func failIfSNRRunning() {
 		Fail(fmt.Sprintf("CANNOT RUN SBR BLOCK STORAGE TEST: Self Node Remediation (SNR) is running with %d pods.\n"+
 			"SNR and SBR cannot both use the watchdog device simultaneously (resource conflict).\n"+
 			"SBR requires detectOnlyMode: disabled (default) which needs exclusive watchdog access.\n\n"+
-			"To run this test, you must scale down SNR:\n"+
-			"  oc scale daemonset self-node-remediation-ds -n openshift-workload-availability --replicas=0\n\n"+
+			"Disable the SNR operand through WAO, then remove its retained self-node-remediation-ds\n"+
+			"DaemonSet and wait for all SNR agent pods to terminate. See tests/sbr-operator/README.md.\n\n"+
 			"Alternatively, configure SBR with detectOnlyMode: enabled (but this changes test behavior).",
 			snrPodCount))
 	}

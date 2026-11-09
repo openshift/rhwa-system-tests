@@ -10,11 +10,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	configv1 "github.com/openshift/api/config/v1"
-	oplmV1alpha1 "github.com/rh-ecosystem-edge/eco-goinfra/pkg/schemes/olm/operators/v1alpha1"
 
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/infrastructure"
-	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/olm"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
@@ -25,6 +23,7 @@ import (
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -227,32 +226,6 @@ func isNodeSchedulable(node *corev1.Node) bool {
 	return false
 }
 
-func fetchActiveCSV() *olm.ClusterServiceVersionBuilder {
-	var sbrCSV *olm.ClusterServiceVersionBuilder
-
-	Eventually(func() error {
-		sbrCSVs, err := olm.ListClusterServiceVersionWithNamePattern(
-			APIClient, sbrparams.CSVNamePattern, medik8sparams.OperatorNs)
-		if err != nil {
-			return fmt.Errorf("failed to list SBR ClusterServiceVersions: %w", err)
-		}
-
-		if len(sbrCSVs) == 0 {
-			return fmt.Errorf("no SBR ClusterServiceVersion found in namespace %s", medik8sparams.OperatorNs)
-		}
-
-		sbrCSV = helpers.FindActiveCSV(sbrCSVs)
-		if sbrCSV == nil {
-			return fmt.Errorf("no SBR CSV in Succeeded phase found yet")
-		}
-
-		return nil
-	}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-		"SBR CSV must reach Succeeded phase")
-
-	return sbrCSV
-}
-
 var _ = Describe(
 	"SBR Post Deployment tests",
 	Ordered,
@@ -321,62 +294,6 @@ var _ = Describe(
 					return nil
 				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
 					"SBR pods did not reach expected running count of %d", expectedCount)
-			})
-
-		It("Verify SBR CSV has required annotations",
-			reportxml.ID("89233"),
-			Label(
-				labels.DisruptionNonDestructive,
-				labels.TierSmoke,
-				labels.PlatformAny,
-				labels.ComponentOLM,
-				labels.FrequencyPresubmit,
-			), func() {
-				By("Getting SBR ClusterServiceVersion")
-
-				By("Finding the active (Succeeded) CSV")
-
-				sbrCSV := fetchActiveCSV()
-
-				if !helpers.IsDownstream() {
-					Skip("CSV feature annotations are product packaging; skipped when ECO_IS_DOWNSTREAM=false")
-				}
-
-				By("Checking annotation values on SBR CSV")
-
-				Expect(sbrCSV.Object.Annotations).ToNot(BeNil(), "CSV annotations should not be nil")
-
-				// isSBR=true: pre-GA SBR shipped fips-compliant="false" (unlike the
-				// other operators); tls-profiles and fips are resolved by version.
-				expectedAnnotations := medik8sparams.ExpectedFeatureAnnotations(
-					sbrCSV.Object.Spec.Version.String(), true)
-
-				var annotationErrors []string
-
-				for annotationKey, expectedValue := range expectedAnnotations {
-					annotationValue, exists := sbrCSV.Object.Annotations[annotationKey]
-					if !exists {
-						annotationErrors = append(annotationErrors,
-							fmt.Sprintf("required annotation %q is missing", annotationKey))
-
-						continue
-					}
-
-					if annotationValue != expectedValue {
-						annotationErrors = append(annotationErrors,
-							fmt.Sprintf("annotation %q: expected %q, got %q",
-								annotationKey, expectedValue, annotationValue))
-					}
-				}
-
-				if len(annotationErrors) > 0 {
-					errMsg := "SBR CSV annotation validation failures:\n"
-					for _, msg := range annotationErrors {
-						errMsg += fmt.Sprintf("- %s\n", msg)
-					}
-
-					Fail(errMsg)
-				}
 			})
 
 		It("Verify SBR controller manager has correct number of replicas",
@@ -496,52 +413,29 @@ var _ = Describe(
 				}
 			})
 
-		It("Verify SBR uses correct API and OLM naming",
+		It("Verify SBR CRDs use the expected API group and version",
 			reportxml.ID("88822"),
 			Label(
 				labels.OperatorSBR,
 				labels.DisruptionNonDestructive,
 				labels.TierSmoke,
 				labels.PlatformAny,
-				labels.ComponentOLM,
+				labels.ComponentController,
 				labels.FrequencyPresubmit,
 			), func() {
-				By("Getting active SBR ClusterServiceVersion")
-
-				sbrCSV := fetchActiveCSV()
-
-				By("Verifying CSV display name uses Storage-Based Remediation naming (not SBD)")
-				Expect(sbrCSV.Object.Spec.DisplayName).To(ContainSubstring("Storage-Based Remediation"),
-					"CSV display name should contain 'Storage-Based Remediation' (not 'SBD'), got: %q",
-					sbrCSV.Object.Spec.DisplayName)
-				Expect(sbrCSV.Object.Spec.DisplayName).ToNot(ContainSubstring("SBD"),
-					"CSV display name should not use 'SBD' naming, got: %q",
-					sbrCSV.Object.Spec.DisplayName)
-
-				By(fmt.Sprintf("Verifying all owned CRDs use API group %s", sbrparams.CRDGroup))
-
-				ownedCRDs := sbrCSV.Object.Spec.CustomResourceDefinitions.Owned
-				Expect(ownedCRDs).ToNot(BeEmpty(), "CSV should declare at least one owned CRD")
-
 				for _, expectedKind := range sbrparams.ExpectedCRDKinds {
-					By(fmt.Sprintf("Checking owned CRD for kind %s", expectedKind))
+					By(fmt.Sprintf("Verifying the %s CRD API group and served version", expectedKind))
 
-					var matchedCRD *oplmV1alpha1.CRDDescription
-
-					for i := range ownedCRDs {
-						if ownedCRDs[i].Kind == expectedKind {
-							matchedCRD = &ownedCRDs[i]
-
-							break
-						}
-					}
-
-					Expect(matchedCRD).ToNot(BeNil(),
-						"CSV should own a CRD with kind %s", expectedKind)
-					Expect(matchedCRD.Name).To(ContainSubstring(sbrparams.CRDGroup),
-						"CRD %s name %q should include API group %s", expectedKind, matchedCRD.Name, sbrparams.CRDGroup)
-					Expect(matchedCRD.Version).To(Equal(sbrparams.CRDVersion),
-						"CRD %s should be at version %s", expectedKind, sbrparams.CRDVersion)
+					crdName := strings.ToLower(expectedKind) + "s." + sbrparams.CRDGroup
+					crd := &apiextensionsv1.CustomResourceDefinition{}
+					Expect(APIClient.Get(context.TODO(), types.NamespacedName{Name: crdName}, crd)).
+						To(Succeed(), "CRD %s must be installed by WAO", crdName)
+					Expect(crd.Spec.Names.Kind).To(Equal(expectedKind))
+					Expect(crd.Spec.Group).To(Equal(sbrparams.CRDGroup))
+					Expect(crd.Spec.Versions).To(ContainElement(And(
+						HaveField("Name", Equal(sbrparams.CRDVersion)),
+						HaveField("Served", BeTrue()),
+					)), "CRD %s must serve %s", crdName, sbrparams.CRDVersion)
 				}
 			})
 	})

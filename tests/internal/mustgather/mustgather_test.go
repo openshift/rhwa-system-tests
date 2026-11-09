@@ -28,6 +28,59 @@ func fakeOC(t *testing.T, script string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func TestCreateDestDirCreatesMissingParent(t *testing.T) {
+	for _, useArtifactDir := range []bool{true, false} {
+		t.Run(fmt.Sprintf("artifactDir=%t", useArtifactDir), func(t *testing.T) {
+			base := filepath.Join(t.TempDir(), "missing", "artifacts")
+			fallback := base
+			t.Setenv("ARTIFACT_DIR", "")
+			if useArtifactDir {
+				t.Setenv("ARTIFACT_DIR", base)
+				fallback = t.TempDir()
+			}
+			first, err := CreateDestDir("sbr-must-gather-", fallback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := CreateDestDir("sbr-must-gather-", fallback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first == second || filepath.Dir(first) != base || filepath.Dir(second) != base {
+				t.Fatalf("expected unique directories under %s; got %s and %s", base, first, second)
+			}
+			info, err := os.Stat(first)
+			if err != nil || !info.IsDir() {
+				t.Fatalf("output directory was not created: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateDestDirRejectsFileParent(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "artifact-file")
+	if err := os.WriteFile(base, nil, commandLogPermissions); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARTIFACT_DIR", base)
+	if dest, err := CreateDestDir("sbr-must-gather-", t.TempDir()); err == nil || dest != "" {
+		t.Fatalf("expected invalid artifact parent to fail, got destination %q and error %v", dest, err)
+	}
+}
+
+func TestCreateDestDirUsesDefaultTempDir(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("TMPDIR", base)
+	t.Setenv("ARTIFACT_DIR", "")
+	dest, err := CreateDestDir("sbr-must-gather-", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(dest) != base {
+		t.Fatalf("expected default temporary directory %s, got %s", base, dest)
+	}
+}
+
 func TestRun(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprintf("commandFailure=%t", fail), func(t *testing.T) {

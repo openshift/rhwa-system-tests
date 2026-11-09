@@ -113,9 +113,6 @@ const (
 	OperatorControllerPodLabelSelector = "app.kubernetes.io/name=" + OperatorControllerPodLabel +
 		",control-plane=controller-manager"
 
-	// CSVNamePattern is the substring used to match the SBR operator ClusterServiceVersion by name.
-	CSVNamePattern = "storage-based-remediation"
-
 	// SBRRemediationFinalizer is the finalizer the controller adds to every StorageBasedRemediation CR.
 	// Sourced from internal/controller/storagebasedremediation_controller.go.
 	SBRRemediationFinalizer = "medik8s.io/sbr-remediation-finalizer"
@@ -160,18 +157,18 @@ const (
 	ODFNamespace = "openshift-storage"
 
 	// RookOperatorPodLabelSelector selects the Rook operator pod, which has the ceph CLI
-	// and the admin config used to clear stale ODF fences (DFBUGS-11731).
+	// and the client config used to clear stale ODF fences (DFBUGS-11731).
 	RookOperatorPodLabelSelector = "app=rook-ceph-operator"
 
 	// RookOperatorContainer is the container that runs ceph commands in the Rook operator pod.
 	RookOperatorContainer = "rook-ceph-operator"
 
-	// RookCephConfig is the admin config Rook writes for the openshift-storage cluster.
+	// RookCephConfig is the client config Rook writes for the openshift-storage cluster.
 	RookCephConfig = "/var/lib/rook/openshift-storage/openshift-storage.config"
 
 	// ODFAutoFenceExpiry is ceph-csi's AutoBlocklistTime: the expiry of the range blocklist
 	// entry it adds for a node with the out-of-service taint. The expiry is a heuristic;
-	// recovery also requires a completed test target and confirmed fault cleanup.
+	// recovery also requires a verified test target and confirmed fault cleanup.
 	ODFAutoFenceExpiry = 94670856 * time.Second
 
 	// ODFAutoFenceCooldown matches ceph-csi's minimum age before automatic unfencing.
@@ -222,13 +219,6 @@ const (
 	// raw block device shared storage (RHWA-1313, RWX Block volume support).
 	SBRCBlockVolumeModeField = "sharedStorageVolumeMode"
 
-	// FirstSBRCsvWithBlockVolumeMode is the first SBR operator CSV version whose CRD ships
-	// the sharedStorageVolumeMode field (RHWA-1313, upstream
-	// medik8s/storage-based-remediation commit 8e9f551c32, released in 5.8.0). Operators at
-	// or above this version must have the field; older operators predate it and skip the
-	// Ceph RBD block persistent fencing spec instead of failing it.
-	FirstSBRCsvWithBlockVolumeMode = "5.8.0"
-
 	// NHCAPIGroup is the API group for NodeHealthCheck CRs.
 	NHCAPIGroup = "remediation.medik8s.io"
 
@@ -243,6 +233,10 @@ const (
 
 	// NHCUnhealthyDuration is how long a node must hold SBRStorageUnhealthy=True before NHC acts.
 	NHCUnhealthyDuration = "30s"
+
+	// NHCIntegrationSBRTimeoutSeconds leaves time for NHC's unhealthy duration and
+	// a hardware watchdog reset before SBR downgrades the condition to Unknown.
+	NHCIntegrationSBRTimeoutSeconds = 30
 
 	// NHCSplitBrainTestName is the NodeHealthCheck CR name used for the split-brain test.
 	NHCSplitBrainTestName = "test-nhc-sbr-split-brain"

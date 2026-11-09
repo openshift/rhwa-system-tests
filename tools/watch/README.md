@@ -18,6 +18,7 @@ for the person running the test, not for the test itself.
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
 | [`wao-watch.sh`](wao-watch.sh) | Per-operand `desiredState`/`phase`/`admissionReady`/retained count from the `WorkloadAvailabilityConfig`, WAO's own conditions, and the Deployments, DaemonSets and pods in the operator namespace | [`rhwa-2040`](../../docs/TESTCASES/rhwa-2040.md) — suits any spec that enables or disables a WAO operand |
+| [`sbr-watch.sh`](sbr-watch.sh) | SBR/NHC/SNR operand phases, node Ready and storage health conditions, boot IDs, SBRC/SBR conditions, NHC status, PVCs, init Jobs, workloads, controller lease and pods | any SBR spec — storage setup, agent health, NHC integration and fencing |
 
 ## `snr-watch.sh`
 
@@ -94,6 +95,40 @@ failure:
 What must *not* change is `workload-availability-operator-controller-manager`, which stays
 `1/1` throughout. If WAO's own manager restarts mid-run, the operand phases are reporting a WAO
 recovery rather than operand health.
+
+## `sbr-watch.sh`
+
+```bash
+watch -n 5 -d tools/watch/sbr-watch.sh
+tools/watch/sbr-watch.sh --loop          # macOS without watch, or Linux
+tools/watch/sbr-watch.sh                 # one snapshot
+```
+
+Set `KUBECONFIG` to the cluster under test. `SBR_WATCH_NS` overrides
+`openshift-workload-availability`; `SBR_WATCH_LEASE` overrides
+`sbr-operator-leader-election`. Each API request has a ten-second timeout. The
+script uses Bash 3.2-compatible syntax, `oc`, and POSIX `awk`; it performs only reads.
+
+| Block | Shows |
+| ----- | ----- |
+| `WAO operands` | SBR, NHC and SNR desired states and observed phases |
+| `nodes` | Ready, `SBRStorageUnhealthy`, cordon, boot ID prefix and taints |
+| `StorageBasedRemediationConfig` | StorageClass, volume mode, detect-only mode, watchdog path and conditions |
+| `StorageBasedRemediation` | Target node and all fencing/processing/success conditions with reasons |
+| `NodeHealthCheck` | Phase, healthy/observed node counts and reason |
+| `storage` | PVC binding state and volume mode, init/cleanup Job active/succeeded/failed counts |
+| `workloads` | Desired/Ready controller and agent counts, leader lease holder, and pod placement |
+
+Record boot IDs before a fencing run. Storage detection first sets
+`SBRStorageUnhealthy=True`; NHC may then create an SBR CR. Fencing conditions
+and a changed boot ID establish later stages. NHC can delete the CR before the
+next snapshot, so its absence alone does not establish success or failure.
+
+Enabling SBR through WAO starts its manager. An SBRC creates shared storage and
+the agent DaemonSet; a Pending PVC or failed init Job can block those agents.
+During agent-only storage faults, expect the manager to remain Ready. SNR agents
+must be absent for watchdog fencing tests: disabling SNR's WAO manager may leave
+its agent DaemonSet behind, visible in the workload block.
 
 ## Adding one
 

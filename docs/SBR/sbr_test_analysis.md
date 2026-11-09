@@ -15,7 +15,6 @@
   - [7. Integration Tests](#7-integration-tests)
   - [8. Observability Tests](#8-observability-tests)
   - [9. Controller Resilience](#9-controller-resilience-controller_resiliencego)
-  - [10. Upgrade Tests](#10-upgrade-tests-upgrade_operator_fbcgo)
 - [Test Labels and Categorization](#test-labels-and-categorization)
 - [Platform Support](#platform-support)
 - [Storage Class Configuration](#storage-class-configuration)
@@ -68,8 +67,6 @@ The SBR test suite is organized in the `/tests/sbr-operator/tests/` directory wi
 12. **metrics.go** - Prometheus metrics tests
 13. **must_gather.go** - Must-gather diagnostic collection tests
 14. **controller_resilience.go** - Controller resilience and HA tests
-15. **fresh_install.go** - Fresh installation tests
-16. **upgrade_operator_fbc.go** - Operator upgrade via FBC tests
 
 ## Test Cases by Category
 
@@ -93,15 +90,6 @@ The SBR test suite is organized in the `/tests/sbr-operator/tests/` directory wi
 **Expected**: Operator pods reach Running state and match expected count
 **Storage Class**: None (validates controller pods only)
 
-#### Test ID: 89233 - CSV Required Annotations
-**Purpose**: Verify SBR CSV has required annotations
-**Description**:
-- Validates ClusterServiceVersion annotations for downstream packaging
-- Checks feature annotations specific to product
-**Expected**: All required annotations present with correct values
-**Status**: Skipped when ECO_IS_DOWNSTREAM=false
-**Storage Class**: None (validates CSV metadata only)
-
 #### Test ID: 89234 - Correct Replica Count
 **Purpose**: Verify SBR controller manager has correct number of replicas
 **Description**:
@@ -119,14 +107,14 @@ The SBR test suite is organized in the `/tests/sbr-operator/tests/` directory wi
 **Expected**: All containers run with non-root user
 **Storage Class**: None (validates security context only)
 
-#### Test ID: 88822 - API and OLM Naming
-**Purpose**: Verify SBR uses correct API and OLM naming
+#### Test ID: 88822 - CRD API Group and Served Version
+**Purpose**: Verify the SBR operand's installed CRDs directly
 **Description**:
-- Validates CSV display name uses "Storage-Based Remediation" (not "SBD")
-- Verifies CRD API group correctness
-- Checks CRD version alignment
-**Expected**: Proper naming conventions followed
-**Storage Class**: None (validates API/OLM metadata only)
+- Reads each of the three CRDs installed by WAO
+- Verifies the expected Kind and API group
+- Requires the v1alpha1 version to be served
+**Expected**: All CRDs expose the expected API without a standalone SBR CSV
+**Storage Class**: None
 
 ### 2. Negative Tests (sbr.go)
 
@@ -253,6 +241,7 @@ assertions. The slot-1 ghost-heartbeat issue, RHWA-1058, remains out of scope.
 #### Test ID: 88877 - Split-Brain Prevention (split_brain.go)
 **Purpose**: Split-brain: only the storage-isolated node is fenced; healthy witnesses are untouched
 **Description**:
+- Requires at least three Ready, schedulable workers: one target without SBR controller pods and at least two healthy witnesses, which may host controllers
 - Simulates network partition creating split-brain scenario
 - Verifies only storage-isolated node is fenced
 - Ensures healthy nodes remain operational
@@ -283,8 +272,11 @@ assertions. The slot-1 ghost-heartbeat issue, RHWA-1058, remains out of scope.
 **Description**:
 - Tests integration with Node Health Check operator
 - Verifies remediation triggered by NHC
-- Validates coordination between operators
-**Expected**: NHC correctly triggers SBR remediation
+- Uses a 30-second SBR timeout so the unhealthy-condition window covers NHC detection and the hardware watchdog reset
+- Requires an actual node boot ID change and Ready recovery; a fencing condition alone does not prove reboot
+- Recreates an evicted injector on its recorded Ready node to remove host rules when fencing did not reboot the node
+- Removes the injected fault and remediation resources before deleting the agent configuration
+**Expected**: NHC triggers SBR remediation, the target reboots, and test-owned faults and resources are removed
 **Storage Class**: 
 - **Auto-discovered RWX**: CephFS-based (searches for provisioner containing "cephfs")
 - **Override**: Set `SBR_STORAGE_CLASS` env var
@@ -362,20 +354,6 @@ assertions. The slot-1 ghost-heartbeat issue, RHWA-1058, remains out of scope.
 **Expected**: Successful leadership transfer
 **Storage Class**: None (tests leader election only)
 
-### 10. Upgrade Tests (upgrade_operator_fbc.go)
-
-**Purpose**: Validate operator upgrades via File-Based Catalog
-**Description**:
-- Tests upgrade path from previous versions
-- Validates CRD schema compatibility
-- Ensures existing resources continue functioning
-**Expected**: Clean upgrade with no resource disruption
-**Storage Class**: 
-- **Auto-discovered RWX**: CephFS-based (searches for provisioner containing "cephfs")
-- **Override**: Set `SBR_STORAGE_CLASS` env var
-- **Requirement**: ReadWriteMany (RWX) access mode
-- **Note**: Required to test SBRC upgrade compatibility
-
 ## Test Labels and Categorization
 
 ### Disruption Levels
@@ -391,7 +369,6 @@ assertions. The slot-1 ghost-heartbeat issue, RHWA-1058, remains out of scope.
 - **ComponentPostDeploy**: Post-installation validation
 - **ComponentController**: Controller functionality
 - **ComponentRemediation**: Remediation logic
-- **ComponentOLM**: OLM integration
 - **ComponentAgent**: Agent functionality
 
 ### Frequency
@@ -439,10 +416,9 @@ func discoverRWXStorageClass() string {
 |---------------|-----------|-------------|------------------|-------------------|-----------------|
 | Post-deployment validation | Watchdog Inventory Discovery | 90163 | ❌ No | N/A | N/A |
 | Post-deployment validation | Operator Pod Running | 89232 | ❌ No | N/A | N/A |
-| Post-deployment validation | CSV Required Annotations | 89233 | ❌ No | N/A | N/A |
 | Post-deployment validation | Correct Replica Count | 89234 | ❌ No | N/A | N/A |
 | Post-deployment validation | Non-Root Security Context | 89235 | ❌ No | N/A | N/A |
-| Post-deployment validation | API and OLM Naming | 88822 | ❌ No | N/A | N/A |
+| Post-deployment validation | CRD API Group and Served Version | 88822 | ❌ No | N/A | N/A |
 | Negative validation tests | CR Validation | 88881 | ⚠️ Partial | Mock/Invalid for negative cases | No |
 | Negative validation tests | Invalid Watchdog and NodeSelector | 88741 | ❌ No | N/A | N/A |
 | CR Lifecycle tests | Verify StorageBasedRemediation CR lifecycle: admission, finalizer, and deletion cleanup | 88737 | ✅ Yes | RWX (CephFS auto-discovered) | No |
@@ -459,8 +435,6 @@ func discoverRWXStorageClass() string {
 | Metrics tests | Verify SBR controller metrics exposure | 88743 | ✅ Yes | RWX (CephFS auto-discovered) | No |
 | Must-gather tests | Verify must-gather collects SBR resources | 88782 | ❌ No | N/A | N/A |
 | Controller resilience | Verify controller resilience after pod restart | 88787 | ❌ No | N/A | N/A |
-| Fresh install tests | Verify SBR fresh install from catalog source | 89228 | ❌ No | N/A | N/A |
-| Upgrade tests | Verify SBR operator upgrade via FBC | 89309 | ✅ Yes | RWX (CephFS auto-discovered) | No |
 
 ### CephFS-Specific Tests
 Some tests specifically require CephFS storage because they use storage disruption techniques that are CephFS-specific:
@@ -594,7 +568,6 @@ DeferCleanup(func() {
 1. **Pre-flight Checks**:
    - Watchdog inventory discovery
    - Operator pod validation
-   - CSV annotation validation
 
 2. **Basic Functionality**:
    - SBRC lifecycle tests

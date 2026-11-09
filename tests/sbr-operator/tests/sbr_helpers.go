@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
+	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrutils"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -25,8 +27,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // getNodeBootID returns the bootID of the named node.
@@ -220,6 +223,11 @@ func removeInjectedRejectRules(injectorPodName string, remove func(*pod.Builder)
 
 			return false
 		}
+		if k8serrors.IsNotFound(getErr) && recoverMissingInjector(injectorPodName, remove) {
+			delete(injectionBootIDs, injectorPodName)
+
+			return true
+		}
 
 		if k8serrors.IsNotFound(getErr) {
 			GinkgoWriter.Printf("Injector pod %s is absent; rule removal could not be confirmed\n", injectorPodName)
@@ -241,6 +249,45 @@ func removeInjectedRejectRules(injectorPodName string, remove func(*pod.Builder)
 	}
 
 	return removed
+}
+
+// An out-of-service taint can evict the injector without rebooting the node.
+// A replacement on the recorded Ready target removes that test's host rules.
+func recoverMissingInjector(injectorPodName string, remove func(*pod.Builder) bool) bool {
+	nodeName := injectionTargetNode(injectorPodName)
+	if nodeName == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sbrparams.InjectorRuleCleanupTimeout)
+	defer cancel()
+	node, err := APIClient.CoreV1Interface.Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil || !isNodeReady(node) {
+		return false
+	}
+	GinkgoWriter.Printf("Recreating evicted injector %s on Ready node %s to remove its Ceph rules\n",
+		injectorPodName, nodeName)
+	replacement, err := pod.NewBuilder(APIClient, injectorPodName, medik8sparams.OperatorNs, sbrparams.InjectorImage).
+		DefineOnNode(nodeName).
+		WithHostPid(true).
+		WithPrivilegedFlag().
+		WithCommand([]string{"sleep", "infinity"}).
+		WithRestartPolicy(corev1.RestartPolicyNever).
+		WithToleration(corev1.Toleration{
+			Key: corev1.TaintNodeOutOfService, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute,
+		}).
+		CreateAndWaitUntilRunning(sbrparams.InjectorRuleCleanupTimeout)
+	if err != nil {
+		GinkgoWriter.Printf("Warning: create recovery injector on %s: %v\n", nodeName, err)
+
+		return false
+	}
+	defer func() {
+		if _, err := replacement.DeleteAndWait(sbrparams.InjectorRuleCleanupTimeout); err != nil {
+			GinkgoWriter.Printf("Warning: delete recovery injector %s: %v\n", injectorPodName, err)
+		}
+	}()
+
+	return remove(replacement)
 }
 
 // injectCephFSRejectOutput inserts iptables OUTPUT-only REJECT rules for all CephFS ports.
@@ -321,102 +368,17 @@ func sbrcCRDHasSpecField(crd *apiextensionsv1.CustomResourceDefinition, field st
 	return false
 }
 
-// installedSBRCsvVersion returns the SBR operator CSV version recorded in the CRD's
-// operatorframework.io/installed-alongside annotation, for example "0.3.1" for
-// "openshift-workload-availability/storage-based-remediation.v0.3.1". It returns an
-// empty string when OLM did not record the installing CSV. Annotations whose CSV
-// name does not match CSVNamePattern are ignored, so an unrelated CSV recorded on
-// the same CRD cannot be selected instead; OLM writes one annotation per installed
-// CSV and map iteration order is not deterministic.
-func installedSBRCsvVersion(crd *apiextensionsv1.CustomResourceDefinition) string {
-	for key, value := range crd.Annotations {
-		if !strings.HasPrefix(key, "operatorframework.io/installed-alongside-") {
-			continue
-		}
-
-		csvName := value[strings.LastIndex(value, "/")+1:]
-		if !strings.HasPrefix(csvName, sbrparams.CSVNamePattern+".v") {
-			continue
-		}
-		versionIdx := strings.LastIndex(csvName, ".v")
-		if versionIdx < 0 {
-			continue
-		}
-
-		return csvName[versionIdx+len(".v"):]
-	}
-
-	return ""
-}
-
-// requireSBRCBlockVolumeModeSupport verifies that the installed SBR operator can honor
-// sharedStorageVolumeMode (RHWA-1313, RWX Block volume support).
-//
-// Operators at or above FirstSBRCsvWithBlockVolumeMode must ship the field: a missing
-// field there is an operator regression and fails the suite. Older operators predate
-// the feature, so the calling spec skips instead of provisioning RWX Filesystem PVCs
-// on Ceph RBD, which ceph-csi rejects. An unknown CSV version also fails, so a missing
-// field can never silently skip a capable operator.
+// requireSBRCBlockVolumeModeSupport checks the installed operand API directly.
+// WAO owns the CRD and CSV; block tests require the served schema to expose this field.
 func requireSBRCBlockVolumeModeSupport() {
+	GinkgoHelper()
 	crd := &apiextensionsv1.CustomResourceDefinition{}
-	err := APIClient.Get(context.TODO(),
-		types.NamespacedName{Name: sbrparams.SBRCRDName}, crd)
-	if err != nil {
-		Fail(fmt.Sprintf("requireSBRCBlockVolumeModeSupport: cannot read CRD %s: %v",
-			sbrparams.SBRCRDName, err))
-
-		return
-	}
-
-	if sbrcCRDHasSpecField(crd, sbrparams.SBRCBlockVolumeModeField) {
-		GinkgoWriter.Printf("SBRC CRD %s includes the %s field (installed CSV v%s)\n",
-			sbrparams.SBRCRDName, sbrparams.SBRCBlockVolumeModeField, installedSBRCsvVersion(crd))
-
-		return
-	}
-
-	csvVersion := installedSBRCsvVersion(crd)
-	if csvVersion == "" {
-		Fail(fmt.Sprintf(
-			"SBR operator CRD %s lacks the %s field and no installed CSV version was recorded; "+
-				"refusing to skip block volume mode tests",
-			sbrparams.SBRCRDName, sbrparams.SBRCBlockVolumeModeField))
-
-		return
-	}
-
-	installedCsv, parseErr := version.ParseGeneric(csvVersion)
-	if parseErr != nil {
-		Fail(fmt.Sprintf(
-			"requireSBRCBlockVolumeModeSupport: cannot parse installed SBR CSV version %q: %v",
-			csvVersion, parseErr))
-
-		return
-	}
-
-	firstCsvWithField, parseErr := version.ParseGeneric(sbrparams.FirstSBRCsvWithBlockVolumeMode)
-	if parseErr != nil {
-		Fail(fmt.Sprintf(
-			"requireSBRCBlockVolumeModeSupport: cannot parse %q: %v",
-			sbrparams.FirstSBRCsvWithBlockVolumeMode, parseErr))
-
-		return
-	}
-
-	if installedCsv.AtLeast(firstCsvWithField) {
-		Fail(fmt.Sprintf(
-			"SBR operator CSV v%s must support %s (RHWA-1313, first shipped in v%s) "+
-				"but the installed CRD %s lacks the field",
-			csvVersion, sbrparams.SBRCBlockVolumeModeField,
-			sbrparams.FirstSBRCsvWithBlockVolumeMode, sbrparams.SBRCRDName))
-
-		return
-	}
-
-	Skip(fmt.Sprintf(
-		"installed SBR operator CSV v%s predates %s (RHWA-1313, first shipped in v%s); "+
-			"skipping Ceph RBD block persistent fencing",
-		csvVersion, sbrparams.SBRCBlockVolumeModeField, sbrparams.FirstSBRCsvWithBlockVolumeMode))
+	Expect(APIClient.Get(context.TODO(),
+		types.NamespacedName{Name: sbrparams.SBRCRDName}, crd)).To(Succeed(),
+		"The installed StorageBasedRemediationConfig CRD must be readable")
+	Expect(sbrcCRDHasSpecField(crd, sbrparams.SBRCBlockVolumeModeField)).To(BeTrue(),
+		"CRD %s must expose %s in its served schema for block storage tests",
+		sbrparams.SBRCRDName, sbrparams.SBRCBlockVolumeModeField)
 }
 
 // nhcsUsingSBRTemplate returns the names of NodeHealthChecks that use SBR as a remediator,
@@ -912,8 +874,17 @@ type odfBlocklistEntry struct {
 	Until string `json:"until"`
 }
 
-// Recovery is limited to this process's completed fault specs, never arbitrary workers.
+// Recovery is limited to this process's fault targets. Mid-spec recovery additionally
+// requires a verified reboot and an acknowledged pause on the test-owned NHC.
+type odfRebootRecovery struct {
+	nextCheck  time.Time
+	bootID     string
+	nhc        *unstructured.Unstructured
+	pauseToken string
+}
+
 type odfFenceTarget struct {
+	recovery   *odfRebootRecovery
 	spec       string
 	started    time.Time
 	completed  bool
@@ -926,17 +897,22 @@ var (
 )
 
 var _ = ReportAfterEach(func(report SpecReport) {
+	completedTarget := false
 	for _, target := range odfFenceTargets {
 		if target.spec == report.FullText() {
 			target.completed = true
+			completedTarget = true
 		}
+	}
+	if completedTarget {
+		clearStaleODFFences()
 	}
 })
 
 func recordODFFenceTarget(nodeName string) *odfFenceTarget {
 	report := CurrentSpecReport()
 	target := odfFenceTargets[nodeName]
-	if target == nil {
+	if target == nil || target.spec != report.FullText() {
 		target = &odfFenceTarget{started: report.StartTime, injections: map[string]string{}}
 		odfFenceTargets[nodeName] = target
 	}
@@ -956,8 +932,8 @@ func confirmODFFaultCleared(injectorPodName string) {
 const odfBlocklistTimeLayout = "2006-01-02T15:04:05.999999-0700"
 
 // clearStaleODFFences works around DFBUGS-11731 during later specs' storage setup.
-// Only a completed spec's recovered target is eligible. A still-active injected
-// fault or remediation must not be unfenced. Polling is throttled independently
+// Only a completed spec's recovered target, or an explicitly paused post-reboot
+// recovery target, is eligible. An active fault or remediation must not be unfenced. Polling is throttled independently
 // of readiness polling, so cooldown and transient cleanup delays can resolve.
 // Remove this workaround once DFBUGS-11731 is fixed in the tested ODF version.
 func clearStaleODFFences() {
@@ -968,35 +944,15 @@ func clearStaleODFFences() {
 	ctx, cancel := context.WithTimeout(context.Background(), sbrparams.StaleODFFenceTimeout)
 	defer cancel()
 
-	rookPods, err := pod.List(APIClient, sbrparams.ODFNamespace,
-		metav1.ListOptions{LabelSelector: sbrparams.RookOperatorPodLabelSelector})
-	var rookPod *pod.Builder
-
-	for _, candidate := range rookPods {
-		if candidate.Object.Status.Phase == corev1.PodRunning && candidate.Object.DeletionTimestamp == nil {
-			rookPod = candidate
-
-			break
-		}
-	}
-
-	if err != nil || rookPod == nil {
-		GinkgoWriter.Printf("Stale ODF fence check skipped: no running Rook operator pod in %s (err: %v)\n",
-			sbrparams.ODFNamespace, err)
-
-		return
-	}
-	cephCmd := func(args ...string) (string, error) {
-		cmd := append([]string{"ceph", "--conf", sbrparams.RookCephConfig, "--connect-timeout", "30"}, args...)
-		out, execErr := rookPod.ExecCommandWithTimeout(cmd, sbrparams.StaleODFFenceTimeout,
-			sbrparams.RookOperatorContainer)
-
-		return out.String(), execErr
-	}
-
 	fencedAddrs := staleFenceCandidates(ctx)
 	GinkgoWriter.Printf("ODF fence recovery (DFBUGS-11731): eligible workers=%v\n", fencedAddrs)
 	if len(fencedAddrs) == 0 {
+		return
+	}
+	cephCmd, err := rookCephCommand()
+	if err != nil {
+		GinkgoWriter.Printf("Warning: stale ODF fence check: %v\n", err)
+
 		return
 	}
 
@@ -1020,14 +976,22 @@ func clearStaleODFFences() {
 		if entry.Range == "" {
 			continue
 		}
-		nodeName, ok := fencedAddrs[entry.Range]
+		cidr, err := sbrutils.FenceRangeCIDR(entry.Range)
+		if err != nil {
+			GinkgoWriter.Printf("ODF fence recovery: keeping range %s: %v\n", entry.Range, err)
+
+			continue
+		}
+		nodeName, ok := fencedAddrs[cidr]
 		if !ok {
 			GinkgoWriter.Printf("ODF fence recovery: keeping range %s until %s (not an eligible test target)\n",
 				entry.Range, entry.Until)
 
 			continue
 		}
-		recoverODFFence(ctx, cephCmd, nodeName, entry)
+		if err := recoverODFFence(ctx, cephCmd, nodeName, entry, cidr); err != nil {
+			GinkgoWriter.Printf("ODF fence recovery: keeping range %s for %s: %v\n", entry.Range, nodeName, err)
+		}
 	}
 }
 
@@ -1051,24 +1015,20 @@ func recoverODFFence(
 	cephCmd func(...string) (string, error),
 	nodeName string,
 	entry odfBlocklistEntry,
-) {
+	cidr string,
+) error {
 	age, ageErr := odfFenceAge(entry.Until, odfFenceTargets[nodeName].started)
 	if ageErr != nil {
-		GinkgoWriter.Printf("ODF fence recovery: keeping range %s for %s: %v\n", entry.Range, nodeName, ageErr)
-
-		return
+		return ageErr
 	}
 	if recoverErr := odfFenceNodeRecovered(ctx, nodeName); recoverErr != nil {
-		GinkgoWriter.Printf("ODF fence recovery: keeping range %s for %s: %v\n", entry.Range, nodeName, recoverErr)
-
-		return
+		return recoverErr
 	}
 
-	cidr := strings.Replace(entry.Range, ":0/", "/", 1)
 	GinkgoWriter.Printf("ODF fence recovery: removing range %s for %s (until=%s, age=%s)\n",
 		cidr, nodeName, entry.Until, age)
-	rmOut, rmErr := cephCmd("osd", "blocklist", "range", "rm", cidr)
-	GinkgoWriter.Printf("ODF fence recovery: removal result for %s: error=%v output=%.8192s\n", cidr, rmErr, rmOut)
+	rmErr := unfenceODFRange(ctx, cephCmd, cidr)
+	GinkgoWriter.Printf("ODF fence recovery: removal result for %s: error=%v\n", cidr, rmErr)
 	if rmErr == nil {
 		var remaining string
 		remaining, rmErr = cephCmd("osd", "blocklist", "ls", "--format", "json")
@@ -1081,13 +1041,15 @@ func recoverODFFence(
 		AddReportEntry("odf-stale-fence-removal-failed (DFBUGS-11731)",
 			fmt.Sprintf("node %s fence %s: %v", nodeName, cidr, rmErr))
 
-		return
+		return rmErr
 	}
 
 	GinkgoWriter.Printf("Removed stale ODF fence %s (until %s) for node %s (DFBUGS-11731)\n",
 		cidr, entry.Until, nodeName)
 	AddReportEntry("odf-stale-fence-removed (DFBUGS-11731)",
 		fmt.Sprintf("node %s fence %s until %s", nodeName, cidr, entry.Until))
+
+	return nil
 }
 
 func verifyODFFenceRemoved(out, fenceRange string) error {
@@ -1104,82 +1066,90 @@ func verifyODFFenceRemoved(out, fenceRange string) error {
 	return nil
 }
 
-// clearCephOSDBlocklist removes all Ceph OSD blocklist entries left by destructive fencing
-// tests. Residual blocklist entries from prior test suites can cause heartbeat regression in
-// subsequent tests (e.g. heartbeat sequence drops from ~13 to ~7 under CPU stress). Call
-// this in AfterAll teardown to ensure a clean slate. Failures are logged as warnings; cleanup
-// is best-effort so it never masks the test result.
+// clearCephOSDBlocklist uses the same guarded recovery during setup and teardown.
+// Targets normally become eligible in ReportAfterEach after cleanup completes;
+// block-storage specs can also enter an explicit paused post-reboot recovery phase.
+// Unrelated fences and individual CephFS client eviction entries are left intact.
 func clearCephOSDBlocklist() {
+	clearStaleODFFences()
+}
+
+func rookCephCommand() (func(...string) (string, error), error) {
 	rookPods, err := pod.List(APIClient, sbrparams.ODFNamespace,
 		metav1.ListOptions{LabelSelector: sbrparams.RookOperatorPodLabelSelector})
-
-	var rookPod *pod.Builder
-
-	for _, candidate := range rookPods {
-		if candidate.Object.Status.Phase == corev1.PodRunning && candidate.Object.DeletionTimestamp == nil {
-			rookPod = candidate
-
-			break
+	if err != nil {
+		return nil, fmt.Errorf("list Rook operator pods: %w", err)
+	}
+	for _, rookPod := range rookPods {
+		if rookPod.Object.Status.Phase != corev1.PodRunning || rookPod.Object.DeletionTimestamp != nil {
+			continue
 		}
+
+		return sbrutils.CephCommand(func(command []string) (string, error) {
+			out, execErr := rookPod.ExecCommandWithTimeout(command, sbrparams.StaleODFFenceTimeout,
+				sbrparams.RookOperatorContainer)
+
+			return out.String(), execErr
+		}, sbrparams.RookCephConfig)
 	}
 
-	if err != nil || rookPod == nil {
-		GinkgoWriter.Printf("Warning: Ceph OSD blocklist clear skipped: "+
-			"no running Rook operator pod in %s (err: %v)\n",
-			sbrparams.ODFNamespace, err)
+	return nil, fmt.Errorf("no running Rook operator pod in %s", sbrparams.ODFNamespace)
+}
 
-		return
+func unfenceODFRange(ctx context.Context, cephCmd func(...string) (string, error), cidr string) error {
+	classes := medik8sparams.NewUnstructuredList("csiaddons.openshift.io", "v1alpha1", "NetworkFenceClassList")
+	err := APIClient.List(ctx, classes)
+	if err != nil && !meta.IsNoMatchError(err) && !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("discover CSI unfencing classes: %w", err)
 	}
+	request, err := sbrutils.NetworkUnfenceRequest(classes, sbrparams.ODFNamespace, cidr)
+	if errors.Is(err, sbrutils.ErrNoNetworkFenceClass) {
+		_, err := cephCmd("osd", "blocklist", "range", "rm", cidr)
 
-	cephCmd := func(args ...string) (string, error) {
-		cmd := append([]string{"ceph", "--conf", sbrparams.RookCephConfig, "--connect-timeout", "30"}, args...)
-		out, execErr := rookPod.ExecCommandWithTimeout(cmd, sbrparams.StaleODFFenceTimeout,
-			sbrparams.RookOperatorContainer)
-
-		return out.String(), execErr
+		return err
 	}
-
-	out, lsErr := cephCmd("osd", "blocklist", "ls", "--format", "json")
-	if lsErr != nil {
-		GinkgoWriter.Printf("Warning: ceph osd blocklist ls failed during teardown: %v: %s\n", lsErr, out)
-
-		return
+	if err != nil {
+		return err
 	}
-
-	entries, parsed := parseODFBlocklist(out)
-	if !parsed {
-		GinkgoWriter.Printf("Warning: cannot parse Ceph OSD blocklist output during teardown: %q\n", out)
-
-		return
+	if err := APIClient.Create(ctx, request); err != nil {
+		return fmt.Errorf("create CSI unfencing request: %w", err)
 	}
+	defer cleanupODFUnfenceRequest(request)
 
-	if len(entries) == 0 {
-		GinkgoWriter.Printf("Ceph OSD blocklist is empty; no teardown cleanup needed\n")
-
-		return
-	}
-
-	GinkgoWriter.Printf("Clearing %d Ceph OSD blocklist entries left by fencing test\n", len(entries))
-
-	for _, entry := range entries {
-		if entry.Range != "" {
-			cidr := strings.Replace(entry.Range, ":0/", "/", 1)
-			rmOut, rmErr := cephCmd("osd", "blocklist", "range", "rm", cidr)
-			if rmErr != nil {
-				GinkgoWriter.Printf("Warning: ceph osd blocklist range rm %s: %v: %s\n", cidr, rmErr, rmOut)
-			} else {
-				GinkgoWriter.Printf("Removed Ceph OSD blocklist range %s (until %s)\n", cidr, entry.Until)
-			}
-		} else if entry.Addr != "" {
-			rmOut, rmErr := cephCmd("osd", "blocklist", "rm", entry.Addr)
-			if rmErr != nil {
-				GinkgoWriter.Printf("Warning: ceph osd blocklist rm %s: %v: %s\n",
-					entry.Addr, rmErr, rmOut)
-			} else {
-				GinkgoWriter.Printf("Removed Ceph OSD blocklist entry %s (until %s)\n",
-					entry.Addr, entry.Until)
-			}
+	return wait.PollUntilContextCancel(ctx, sbrparams.DefaultPollInterval, true, func(ctx context.Context) (bool, error) {
+		if err := APIClient.Get(ctx, client.ObjectKeyFromObject(request), request); err != nil {
+			return false, err
 		}
+		result, _, _ := unstructured.NestedString(request.Object, "status", "result")
+		if result == "Failed" {
+			message, _, _ := unstructured.NestedString(request.Object, "status", "message")
+
+			return false, fmt.Errorf("CSI unfencing request %s failed: %s", request.GetName(), message)
+		}
+
+		return result == "Succeeded", nil
+	})
+}
+
+func cleanupODFUnfenceRequest(request *unstructured.Unstructured) {
+	ctx, cancel := context.WithTimeout(context.Background(), sbrparams.StaleODFFenceTimeout)
+	defer cancel()
+	if err := client.IgnoreNotFound(APIClient.Delete(ctx, request,
+		client.Preconditions{UID: ptr.To(request.GetUID())})); err != nil {
+		GinkgoWriter.Printf("Warning: delete CSI unfencing request %s: %v\n", request.GetName(), err)
+
+		return
+	}
+	err := wait.PollUntilContextCancel(ctx, sbrparams.DefaultPollInterval, true, func(ctx context.Context) (bool, error) {
+		err := APIClient.Get(ctx, client.ObjectKeyFromObject(request), request.DeepCopy())
+		if k8serrors.IsNotFound(err) {
+			return true, nil
+		}
+
+		return false, err
+	})
+	if err != nil {
+		GinkgoWriter.Printf("Warning: CSI unfencing request %s is not fully removed: %v\n", request.GetName(), err)
 	}
 }
 
@@ -1252,8 +1222,20 @@ func odfFenceNodeRecovered(ctx context.Context, nodeName string) error {
 		return fmt.Errorf("recheck node: %w", err)
 	}
 	target := odfFenceTargets[nodeName]
-	if target == nil || !target.completed {
+	if target == nil || (!target.completed && target.recovery == nil) {
 		return fmt.Errorf("fault spec has not completed")
+	}
+	if recovery := target.recovery; recovery != nil {
+		if recovery.bootID == "" || node.Status.NodeInfo.BootID != recovery.bootID {
+			return fmt.Errorf("node boot ID changed again during storage recovery")
+		}
+		current := recovery.nhc.DeepCopy()
+		if err := APIClient.Get(ctx, client.ObjectKeyFromObject(current), current); err != nil {
+			return err
+		}
+		if err := sbrutils.RecoveryPaused(current, recovery.nhc.GetUID(), recovery.pauseToken); err != nil {
+			return err
+		}
 	}
 	for injector, bootID := range target.injections {
 		if bootID == "" || node.Status.NodeInfo.BootID == "" || bootID == node.Status.NodeInfo.BootID {
@@ -1280,8 +1262,11 @@ func odfFenceNodeRecovered(ctx context.Context, nodeName string) error {
 	if err != nil {
 		return err
 	}
-	if len(nhcs) != 0 {
-		return fmt.Errorf("NodeHealthChecks can still start SBR remediation: %v", nhcs)
+	for _, name := range nhcs {
+		recovery := target.recovery
+		if recovery == nil || name != recovery.nhc.GetName() {
+			return fmt.Errorf("NodeHealthChecks can still start SBR remediation: %v", nhcs)
+		}
 	}
 
 	return nil
@@ -1347,7 +1332,7 @@ func parseODFBlocklist(out string) ([]odfBlocklistEntry, bool) {
 	return entries, parsed
 }
 
-// staleFenceCandidates maps only completed fault specs' recovered worker addresses.
+// staleFenceCandidates maps only verified fault targets' recovered worker addresses.
 func staleFenceCandidates(ctx context.Context) map[string]string {
 	nodes, err := APIClient.CoreV1Interface.Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: "node-role.kubernetes.io/worker",
@@ -1365,10 +1350,9 @@ func staleFenceCandidates(ctx context.Context) map[string]string {
 		if odfFenceTargets[node.Name] == nil {
 			continue
 		}
-		nodeID, parseErr := strconv.Atoi(node.Annotations["k8s.ovn.org/node-id"])
-		if parseErr != nil || nodeID < 1 || nodeID > 254 {
-			GinkgoWriter.Printf("ODF fence recovery: skipping %s (unsupported OVN node ID %q)\n",
-				node.Name, node.Annotations["k8s.ovn.org/node-id"])
+		cidrs, addressErr := sbrutils.NodeFenceCIDRs(node)
+		if addressErr != nil {
+			GinkgoWriter.Printf("ODF fence recovery: skipping %s: %v\n", node.Name, addressErr)
 
 			continue
 		}
@@ -1378,7 +1362,9 @@ func staleFenceCandidates(ctx context.Context) map[string]string {
 			continue
 		}
 
-		candidates[fmt.Sprintf("100.64.0.%d:0/32", nodeID)] = node.Name
+		for _, cidr := range cidrs {
+			candidates[cidr] = node.Name
+		}
 	}
 
 	return candidates

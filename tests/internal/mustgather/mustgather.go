@@ -145,11 +145,17 @@ func ResolveImage(envVar, defaultImage string, logf func(format string, args ...
 // CreateDestDir creates a unique output directory for must-gather artifacts.
 // It roots the directory at ARTIFACT_DIR when set (so CI collects the output),
 // falling back to fallbackBase otherwise. prefix names the per-operator temp
-// directory. It returns the created directory and any error from MkdirTemp.
+// directory. A nonempty parent is created if needed. It returns the created
+// directory and any error from creating the parent or temporary directory.
 func CreateDestDir(prefix, fallbackBase string) (string, error) {
 	base := os.Getenv("ARTIFACT_DIR")
 	if base == "" {
 		base = fallbackBase
+	}
+	if base != "" {
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			return "", fmt.Errorf("create must-gather artifact parent %q: %w", base, err)
+		}
 	}
 
 	return os.MkdirTemp(base, prefix)
