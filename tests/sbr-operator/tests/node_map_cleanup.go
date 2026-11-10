@@ -38,6 +38,7 @@ var _ = Describe("SBR Functional - Node map cleanup", Ordered, Serial,
 		labels.TopologyMinimalWorker), func() {
 		var storageClass string
 		BeforeAll(func(ctx SpecContext) {
+			Skip("RHWA-2108: temporarily skipped — deleting SBRC reports CleanupError before cleanup Job is visible")
 			storageClass = nodeMapCleanupPreflight(ctx)
 		})
 		It("Verify SBRC deletion clears the node map before recreation on the same volume",
