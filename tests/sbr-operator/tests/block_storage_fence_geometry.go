@@ -83,6 +83,11 @@ var _ = Describe(
 				// The taint evicts the Ceph RBD CSI node plugin, so until it is gone the victim's
 				// agent cannot attach the shared device and never becomes Ready.
 				deleteVictimRemediation(sbrCR, victimNodeName)
+				// ODF blocklists the victim's IP range in Ceph while the taint is on, and does not
+				// always lift it once the taint is gone (DFBUGS-11731). Until it is lifted, the
+				// victim's RBD map fails with ret=-108 and its agent never becomes Ready.
+				By("Clearing the Ceph OSD blocklist left on the victim by the fencing")
+				clearCephOSDBlocklist()
 				awaitVictimAgentReady(victimNodeName)
 			})
 	})

@@ -294,6 +294,12 @@ var _ = Describe(
 					"Node %q must be schedulable with no %s taint after the CR is deleted",
 					victimNodeName, sbrparams.OutOfServiceTaintKey)
 
+				// ODF blocklists the victim's IP range in Ceph while the taint is on, and does not
+				// always lift it once the taint is gone (DFBUGS-11731). Until it is lifted, the
+				// victim's RBD map fails with ret=-108 and its agent never becomes Ready.
+				By("Clearing the Ceph OSD blocklist left on the victim by the fencing")
+				clearCephOSDBlocklist()
+
 				By("Waiting for the victim node's agent pod to be Ready again")
 
 				Eventually(func() error {
