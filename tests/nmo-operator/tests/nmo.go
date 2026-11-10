@@ -243,4 +243,46 @@ var _ = Describe(
 						strings.Join(errorMessages, "\n- "))
 				}
 			})
+
+		It("Verify NMO controller pod runs with the system-cluster-critical priority class",
+			reportxml.ID("48469"),
+			Label(
+				labels.OperatorNMO,
+				labels.DisruptionNonDestructive,
+				labels.TierSmoke,
+				labels.PlatformAny,
+				labels.ComponentController,
+				labels.FrequencyPresubmit,
+			), func() {
+				By("Getting running NMO controller pods")
+
+				listOptions := metav1.ListOptions{LabelSelector: nmoparams.OperatorControllerPodLabelSelector}
+
+				var runningPods []*pod.Builder
+
+				Eventually(func() error {
+					allPods, listErr := pod.List(APIClient, medik8sparams.OperatorNs, listOptions)
+					if listErr != nil {
+						return listErr
+					}
+
+					running := helpers.FilterRunningPods(
+						helpers.FilterPodsByDeployment(allPods, nmoparams.OperatorDeploymentName))
+					if len(running) == 0 {
+						return fmt.Errorf("no running NMO controller pods found")
+					}
+
+					runningPods = running
+
+					return nil
+				}, medik8sparams.DefaultTimeout, nmoparams.DefaultPollInterval).Should(Succeed(),
+					"At least one running NMO controller pod should be found")
+
+				for _, nmoPod := range runningPods {
+					By(fmt.Sprintf("Verifying priorityClassName on pod %s", nmoPod.Object.Name))
+					Expect(nmoPod.Object.Spec.PriorityClassName).To(Equal(nmoparams.ExpectedPriorityClassName),
+						"Pod %s has priorityClassName %q, expected %q",
+						nmoPod.Object.Name, nmoPod.Object.Spec.PriorityClassName, nmoparams.ExpectedPriorityClassName)
+				}
+			})
 	})
