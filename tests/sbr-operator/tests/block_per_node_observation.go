@@ -39,7 +39,7 @@ func bpnStartRecorder[T runtime.Object](config helpers.RecorderConfig[T]) *helpe
 	return recorder
 }
 
-func (test *bpnCase) startObservation() {
+func (test *bpnFixture) startObservation() {
 	deadline := time.Now().Add(sbrparams.BPNObserverStart)
 	for _, node := range test.nodes {
 		nodeAPI := APIClient.CoreV1Interface.Nodes()
@@ -111,7 +111,7 @@ func (test *bpnCase) startObservation() {
 	Expect(time.Now()).To(BeTemporally("<=", deadline), "All initial watches must start within OBSERVER_START")
 }
 
-func (test *bpnCase) startBootSampling() {
+func (test *bpnFixture) startBootSampling() {
 	ctx, cancel := context.WithCancel(test.ctx)
 	test.samplingCancel = cancel
 	test.samplingDone = make(chan struct{})
@@ -145,7 +145,7 @@ func (test *bpnCase) startBootSampling() {
 	}()
 }
 
-func (test *bpnCase) requireHealth(status corev1.ConditionStatus, indices ...int) {
+func (test *bpnFixture) requireHealth(status corev1.ConditionStatus, indices ...int) {
 	if len(indices) == 0 {
 		indices = []int{0, 1, 2}
 	}
@@ -169,7 +169,7 @@ func (test *bpnCase) requireHealth(status corev1.ConditionStatus, indices ...int
 	})
 }
 
-func (test *bpnCase) requireUnhealthy(indices ...int) {
+func (test *bpnFixture) requireUnhealthy(indices ...int) {
 	GinkgoHelper()
 	if len(indices) == 0 {
 		indices = []int{0, 1, 2}
@@ -187,7 +187,7 @@ func (test *bpnCase) requireUnhealthy(indices ...int) {
 	}
 }
 
-func (test *bpnCase) waitUnhealthy(index int) (time.Time, error) {
+func (test *bpnFixture) waitUnhealthy(index int) (time.Time, error) {
 	node := test.nodes[index]
 	fault := test.healthFaults[index]
 	ctx, cancel := context.WithDeadline(test.ctx, fault.ActiveAt.Add(sbrparams.BPNHealthChange))
@@ -255,7 +255,7 @@ func bpnHealth(node *corev1.Node) corev1.ConditionStatus {
 	return ""
 }
 
-func (test *bpnCase) checkNodeIdentities() error {
+func (test *bpnFixture) checkNodeIdentities() error {
 	for _, node := range test.nodes {
 		if node.recorder == nil {
 			continue
@@ -272,7 +272,7 @@ func (test *bpnCase) checkNodeIdentities() error {
 	return nil
 }
 
-func (test *bpnCase) checkBoots(from time.Time, indices ...int) error {
+func (test *bpnFixture) checkBoots(from time.Time, indices ...int) error {
 	if err := test.checkNodeIdentities(); err != nil {
 		return err
 	}
@@ -294,7 +294,7 @@ func (test *bpnCase) checkBoots(from time.Time, indices ...int) error {
 	return nil
 }
 
-func (test *bpnCase) finalBoots(indices ...int) {
+func (test *bpnFixture) finalBoots(indices ...int) {
 	GinkgoHelper()
 	Expect(test.checkNodeIdentities()).To(Succeed(), "Selected Node identities must remain unchanged")
 	if len(indices) == 0 {
@@ -313,7 +313,7 @@ func (test *bpnCase) finalBoots(indices ...int) {
 	}
 }
 
-func (test *bpnCase) noRestrictions(from time.Time) error {
+func (test *bpnFixture) noRestrictions(from time.Time) error {
 	if err := test.checkNodeIdentities(); err != nil {
 		return err
 	}
@@ -358,7 +358,7 @@ func bpnOutOfService(node *corev1.Node) string {
 	return ""
 }
 
-func (test *bpnCase) coverage(from, through time.Time, includePods bool) {
+func (test *bpnFixture) coverage(from, through time.Time, includePods bool) {
 	GinkgoHelper()
 	reason := "INCONCLUSIVE: API observations must cover the complete negative interval"
 	test.eventually(sbrparams.BPNObserverStart, reason, func(_ context.Context) error {
@@ -379,40 +379,7 @@ func (test *bpnCase) coverage(from, through time.Time, includePods bool) {
 	Expect(test.checkNodeIdentities()).To(Succeed(), "Selected Node identities must remain unchanged after replay")
 }
 
-func (test *bpnCase) observe(duration time.Duration, healthy, noRequest bool) {
-	GinkgoHelper()
-	from := time.Now()
-	negativeFrom := from
-	if noRequest && !test.quietSince.IsZero() {
-		negativeFrom = test.quietSince
-	}
-	check := func() error { return test.checkObservation(from, negativeFrom, healthy, noRequest) }
-	Consistently(check, duration, sbrparams.BPNPoll).Should(Succeed())
-	through := time.Now()
-	test.finalBoots()
-	if noRequest || healthy {
-		test.coverage(negativeFrom, through, false)
-	}
-	Expect(check()).To(Succeed(), "Replayed observations must satisfy the complete negative interval")
-}
-
-func (test *bpnCase) checkObservation(from, negativeFrom time.Time, healthy, noRequest bool) error {
-	if err := test.checkBoots(from); err != nil {
-		return err
-	}
-	if noRequest {
-		if err := test.noRestrictions(negativeFrom); err != nil {
-			return err
-		}
-	}
-	if healthy {
-		return test.healthHistory(corev1.ConditionFalse, from, time.Now(), 0, 1, 2)
-	}
-
-	return nil
-}
-
-func (test *bpnCase) waitReboot(from time.Time) string {
+func (test *bpnFixture) waitReboot(from time.Time) (string, time.Time) {
 	GinkgoHelper()
 	node := test.nodes[0]
 	Expect(test.api(func(ctx context.Context) error {
@@ -432,8 +399,8 @@ func (test *bpnCase) waitReboot(from time.Time) string {
 		if current == "" || current == node.boot {
 			return fmt.Errorf("node %s retains boot ID %s", node.initial.Name, current)
 		}
-		test.lastReboot = time.Now()
-		if test.lastReboot.After(from.Add(sbrparams.BPNReboot)) {
+		node.rebootObservedAt = time.Now()
+		if node.rebootObservedAt.After(from.Add(sbrparams.BPNReboot)) {
 			return fmt.Errorf("changed host boot ID was observed after REBOOT")
 		}
 
@@ -448,10 +415,10 @@ func (test *bpnCase) waitReboot(from time.Time) string {
 	test.finalBoots(1, 2)
 	AddReportEntry("bpn-reboot", map[string]interface{}{
 		"node": node.initial.Name, "nodeUID": node.initial.UID,
-		"before": node.boot, "after": current, "observedAt": test.lastReboot,
+		"before": node.boot, "after": current, "observedAt": node.rebootObservedAt,
 	})
 
-	return current
+	return current, node.rebootObservedAt
 }
 
 type bpnOwner struct {
@@ -482,7 +449,7 @@ func bpnReadOwner(node *corev1.Node) (bpnOwner, error) {
 	return owner, nil
 }
 
-func (test *bpnCase) autonomousPreparation() {
+func (test *bpnFixture) autonomousPreparation(recoveryPeriod time.Duration) {
 	GinkgoHelper()
 	var owner bpnOwner
 	Expect(test.api(func(ctx context.Context) error {
@@ -501,23 +468,24 @@ func (test *bpnCase) autonomousPreparation() {
 		}
 	}
 	Expect(owner.Budget.Phase).To(Equal("Known"), "The feature must initialize known autonomous history")
-	test.observe(test.profile+sbrparams.BPNRearmSettle, true, true)
+	test.observeHealthyWithoutRequests(recoveryPeriod + sbrparams.BPNRearmSettle)
 }
 
-func (test *bpnCase) request() *unstructured.Unstructured {
+func (test *bpnFixture) request() (*unstructured.Unstructured, time.Time) {
 	GinkgoHelper()
 	object := buildSBRUnstructured("StorageBasedRemediation", test.nodes[0].initial.Name, map[string]interface{}{})
 	currentBoot, err := test.nodes[0].host.BootID(test.ctx, sbrparams.BPNHostCall)
 	Expect(err).NotTo(HaveOccurred(), "The target must expose its actual boot ID before request creation")
 	Expect(currentBoot).To(Equal(test.nodes[0].boot), "The target must not reboot before its request is created")
-	Expect(test.createRequest(object)).To(Succeed(), "A valid external request must be accepted")
+	dispatchedAt, createErr := test.createRequest(object)
+	Expect(createErr).To(Succeed(), "A valid external request must be accepted")
 
-	return object
+	return object, dispatchedAt
 }
 
 const bpnRequestIntentAnnotation = "tests.medik8s.io/block-per-node-request"
 
-func (test *bpnCase) createRequest(object *unstructured.Unstructured) error {
+func (test *bpnFixture) createRequest(object *unstructured.Unstructured) (time.Time, error) {
 	annotations := object.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
@@ -527,7 +495,7 @@ func (test *bpnCase) createRequest(object *unstructured.Unstructured) error {
 	intent := object.DeepCopy()
 	test.requests = append(test.requests, intent)
 	dispatched, rejected := false, false
-	test.trigger = time.Now()
+	dispatchedAt := time.Now()
 	err := test.api(func(ctx context.Context) error {
 		dispatched = true
 		createErr := APIClient.Create(ctx, object)
@@ -545,7 +513,7 @@ func (test *bpnCase) createRequest(object *unstructured.Unstructured) error {
 		test.requests = test.requests[:len(test.requests)-1]
 	}
 
-	return err
+	return dispatchedAt, err
 }
 
 func bpnCreationRejected(err error) bool {
@@ -553,7 +521,7 @@ func bpnCreationRejected(err error) bool {
 		apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsMethodNotSupported(err)
 }
 
-func (test *bpnCase) requestCurrent(
+func (test *bpnFixture) requestCurrent(
 	ctx context.Context, expected *unstructured.Unstructured,
 ) (*unstructured.Unstructured, error) {
 	current, err := bpnResource("storagebasedremediations").Get(ctx, expected.GetName(), metav1.GetOptions{})
@@ -687,7 +655,7 @@ func bpnStoredCleanupTime(object *unstructured.Unstructured, field string, expec
 
 func bpnCleanupHistory(
 	samples []helpers.RecorderObservation[*unstructured.Unstructured], request *unstructured.Unstructured,
-	node *corev1.Node, evidence bpnCleanupEvidence, retained bool,
+	node *corev1.Node, evidence bpnCleanupEvidence,
 ) error {
 	var startAssigned, deadlineAssigned bool
 	for _, sample := range samples {
@@ -706,11 +674,6 @@ func bpnCleanupHistory(
 		if err := bpnStoredCleanupTime(sample.Object, "deadline", evidence.deadline, &deadlineAssigned); err != nil {
 			return err
 		}
-		if retained {
-			if err := bpnRetainedCleanupResult(sample.Object, sample.At, evidence.deadline); err != nil {
-				return err
-			}
-		}
 	}
 
 	return nil
@@ -728,7 +691,7 @@ func bpnRetainedCleanupResult(object *unstructured.Unstructured, observedAt, dea
 	return nil
 }
 
-func (test *bpnCase) requestEvidence(request *unstructured.Unstructured, publishedBy time.Time,
+func (test *bpnFixture) requestEvidence(request *unstructured.Unstructured, publishedBy time.Time,
 	live *[]helpers.RecorderObservation[*unstructured.Unstructured], ctx context.Context,
 ) (bpnCleanupEvidence, error) {
 	if _, err := test.getNode(ctx, 0); err != nil {
@@ -756,13 +719,11 @@ func bpnReplayWait(deadline time.Time) time.Duration {
 	return remaining + sbrparams.BPNObserverStart
 }
 
-func (test *bpnCase) requestedResult(request *unstructured.Unstructured, from time.Time) {
+func (test *bpnFixture) requireRequestedResult(request *unstructured.Unstructured,
+	from, rebootObservedAt time.Time,
+) bpnCleanupEvidence {
 	GinkgoHelper()
-	currentBoot := test.waitReboot(from)
-	publishedBy := test.lastReboot.Add(sbrparams.BPNRelease)
-	if test.plan.id == "RHWA-1839-17A" || test.plan.id == "RHWA-1839-17B" {
-		test.requireAgentRunning(true)
-	}
+	publishedBy := rebootObservedAt.Add(sbrparams.BPNRelease)
 	var evidence bpnCleanupEvidence
 	var live []helpers.RecorderObservation[*unstructured.Unstructured]
 	reason := "The request must publish its fixed cleanup times within RELEASE"
@@ -791,15 +752,13 @@ func (test *bpnCase) requestedResult(request *unstructured.Unstructured, from ti
 	test.eventually(sbrparams.BPNObserverStart, reason, func(_ context.Context) error {
 		return test.crRecorder.Coverage(from, through)
 	})
-	retained := test.plan.id == "RHWA-1839-15A" || test.plan.id == "RHWA-1839-15B"
 	Expect(bpnCleanupHistory(test.crRecorder.Snapshot().Observations,
-		request, test.nodes[0].initial, evidence, retained)).To(Succeed())
-	Expect(test.checkBoots(test.baseline, 1, 2)).To(Succeed(), "Peer Nodes must retain boot IDs throughout the case")
-	test.finalBoots(1, 2)
-	test.nodes[0].boot = currentBoot
+		request, test.nodes[0].initial, evidence)).To(Succeed())
+
+	return evidence
 }
 
-func (test *bpnCase) requireOutOfService(from, deadline time.Time) {
+func (test *bpnFixture) requireOutOfService(from, deadline time.Time) {
 	GinkgoHelper()
 	reason := "The target must expose exact OutOfService before its cleanup deadline"
 	test.eventually(bpnReplayWait(deadline), reason, func(ctx context.Context) error {
@@ -821,15 +780,15 @@ func (test *bpnCase) requireOutOfService(from, deadline time.Time) {
 	})
 }
 
-func (test *bpnCase) acceptance(request *unstructured.Unstructured) time.Time {
+func (test *bpnFixture) acceptance(request *unstructured.Unstructured, dispatchedAt time.Time) time.Time {
 	GinkgoHelper()
 	var accepted time.Time
-	remaining := time.Until(test.trigger.Add(sbrparams.BPNReboot))
+	remaining := time.Until(dispatchedAt.Add(sbrparams.BPNReboot))
 	Expect(remaining).To(BeNumerically(">", 0))
 	reason := "The matching public Accepted record must appear before REBOOT"
 	test.eventually(remaining, reason, func(_ context.Context) error {
 		for _, sample := range test.nodes[0].recorder.Snapshot().Observations {
-			if sample.At.Before(test.trigger) || sample.UID != test.nodes[0].initial.UID {
+			if sample.At.Before(dispatchedAt) || sample.UID != test.nodes[0].initial.UID {
 				continue
 			}
 			owner, err := bpnReadOwner(sample.Object)
@@ -842,13 +801,13 @@ func (test *bpnCase) acceptance(request *unstructured.Unstructured) time.Time {
 
 		return fmt.Errorf("matching Accepted record not observed")
 	})
-	Expect(test.nodes[0].recorder.Coverage(test.trigger, accepted)).To(Succeed(),
+	Expect(test.nodes[0].recorder.Coverage(dispatchedAt, accepted)).To(Succeed(),
 		"Row 12 requires complete acceptance evidence")
 
 	return accepted
 }
 
-func (test *bpnCase) retainedRequest() types.UID {
+func (test *bpnFixture) retainedRequest() types.UID {
 	var uid types.UID
 	Expect(test.api(func(ctx context.Context) error {
 		node, err := test.getNode(ctx, 0)
@@ -869,10 +828,94 @@ func bpnSelectedPod(pod *corev1.Pod, configName, nodeName string) bool {
 		pod.Spec.NodeName == nodeName && pod.Labels["sbrconfig"] == configName
 }
 
-func (test *bpnCase) runHost(command string) string {
+func (test *bpnFixture) runHost(command string) string {
 	GinkgoHelper()
 	output, err := test.nodes[0].host.Run(test.ctx, sbrparams.BPNHostCall, command)
 	Expect(err).NotTo(HaveOccurred(), "Host command on Node %s must complete: %s", test.nodes[0].initial.Name, command)
 
 	return strings.TrimSpace(output)
+}
+
+func (test *bpnFixture) observeBoots(duration time.Duration) {
+	from := time.Now()
+	test.observeInterval(duration, time.Time{}, func() error { return test.checkBoots(from) })
+}
+
+func (test *bpnFixture) observeHealthyBoots(duration time.Duration) {
+	from := time.Now()
+	test.observeInterval(duration, from, func() error { return test.checkHealthyBoots(from) })
+}
+
+func (test *bpnFixture) observeNoRebootWithoutRequests() {
+	from := time.Now()
+	negativeFrom := test.negativeObservationStart(from)
+	test.observeInterval(sbrparams.BPNNoReboot, negativeFrom, func() error {
+		return test.checkBootsWithoutRequests(from, negativeFrom)
+	})
+}
+
+func (test *bpnFixture) observeHealthyWithoutRequests(duration time.Duration) {
+	from := time.Now()
+	negativeFrom := test.negativeObservationStart(from)
+	test.observeInterval(duration, negativeFrom, func() error {
+		if err := test.checkBootsWithoutRequests(from, negativeFrom); err != nil {
+			return err
+		}
+
+		return test.healthHistory(corev1.ConditionFalse, from, time.Now(), 0, 1, 2)
+	})
+}
+
+func (test *bpnFixture) negativeObservationStart(from time.Time) time.Time {
+	if !test.quietSince.IsZero() {
+		return test.quietSince
+	}
+
+	return from
+}
+
+func (test *bpnFixture) checkHealthyBoots(from time.Time) error {
+	if err := test.checkBoots(from); err != nil {
+		return err
+	}
+
+	return test.healthHistory(corev1.ConditionFalse, from, time.Now(), 0, 1, 2)
+}
+
+func (test *bpnFixture) checkBootsWithoutRequests(from, negativeFrom time.Time) error {
+	if err := test.checkBoots(from); err != nil {
+		return err
+	}
+
+	return test.noRestrictions(negativeFrom)
+}
+
+func (test *bpnFixture) observeInterval(duration time.Duration, replayFrom time.Time, check func() error) {
+	GinkgoHelper()
+	Consistently(check, duration, sbrparams.BPNPoll).Should(Succeed())
+	through := time.Now()
+	test.finalBoots()
+	if !replayFrom.IsZero() {
+		test.coverage(replayFrom, through, false)
+	}
+	Expect(check()).To(Succeed(), "Replayed observations must satisfy the complete negative interval")
+}
+
+func bpnRetainedCleanupHistory(samples []helpers.RecorderObservation[*unstructured.Unstructured],
+	request *unstructured.Unstructured, deadline time.Time,
+) error {
+	for _, sample := range samples {
+		if sample.UID == request.GetUID() {
+			if err := bpnRetainedCleanupResult(sample.Object, sample.At, deadline); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (test *bpnFixture) requirePeerBoots() {
+	Expect(test.checkBoots(test.baseline, 1, 2)).To(Succeed(), "Peer Nodes must retain boot IDs throughout the case")
+	test.finalBoots(1, 2)
 }

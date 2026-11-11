@@ -16,7 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func bpnHealthTestCase(t *testing.T, currentStatus corev1.ConditionStatus) (*bpnCase, time.Time, *fake.Clientset) {
+func bpnHealthTestCase(t *testing.T, currentStatus corev1.ConditionStatus) (*bpnFixture, time.Time, *fake.Clientset) {
 	t.Helper()
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-a", UID: "worker-original"},
@@ -39,7 +39,7 @@ func bpnHealthTestCase(t *testing.T, currentStatus corev1.ConditionStatus) (*bpn
 	api := fake.NewSimpleClientset(current)
 	medik8sinittools.APIClient = &clients.Settings{CoreV1Interface: api.CoreV1()}
 	t.Cleanup(func() { medik8sinittools.APIClient = previousAPI })
-	caseRun := &bpnCase{
+	caseRun := &bpnFixture{
 		ctx: context.Background(), nodes: []*bpnNode{{initial: node, recorder: recorder}},
 		healthFaults: map[int]sbrutils.BlockFaultEvidence{},
 	}

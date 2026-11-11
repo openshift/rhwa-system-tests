@@ -694,6 +694,7 @@ complete test cleanup. A before/after comparison still requires a pre-fix build.
 The 28 draft cases use stable identifiers from `RHWA-1839-01` through `RHWA-1839-17E`.
 They check public storage conditions, requested and autonomous reboots, retained request identities, and normal resource deletion.
 The full case document is [rhwa-1839.md](../../docs/TESTCASES/rhwa-1839.md).
+The explicit specs are in [block_per_node_specs.go](tests/block_per_node_specs.go).
 Jira Task mapping remains deferred under the user instruction.
 
 - **Operators**: SBR and NHC builds with the proposed BlockPerNode API. Record the installed image identities before execution.

@@ -103,7 +103,7 @@ func TestBPNCleanupHistoryRejectsTemporaryTimestampChanges(t *testing.T) {
 					bpnResultSample(request.DeepCopy(), start.Add(2*time.Second)),
 				}
 				evidence := bpnCleanupEvidence{startedAt: start, deadline: start.Add(sbrparams.BPNCleanupPeriod)}
-				if err := bpnCleanupHistory(samples, request, node, evidence, false); err == nil {
+				if err := bpnCleanupHistory(samples, request, node, evidence); err == nil {
 					t.Fatal("temporary timestamp change must fail even after restoration")
 				}
 			})
@@ -152,7 +152,7 @@ func TestBPNRetainedCleanupRejectsEarlySuccess(t *testing.T) {
 func TestBPNObservationRejectsUnhealthyBaselineWithoutLaterEvents(t *testing.T) {
 	for _, unhealthy := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unhealthy=%t", unhealthy), func(t *testing.T) {
-			caseRun := &bpnCase{}
+			caseRun := &bpnFixture{}
 			for nodeIndex := range 3 {
 				status := corev1.ConditionFalse
 				if unhealthy && nodeIndex == 0 {
@@ -177,7 +177,7 @@ func TestBPNObservationRejectsUnhealthyBaselineWithoutLaterEvents(t *testing.T) 
 				caseRun.nodes = append(caseRun.nodes, &bpnNode{initial: node, recorder: recorder})
 			}
 			from := time.Now()
-			err := caseRun.checkObservation(from, from, true, false)
+			err := caseRun.checkHealthyBoots(from)
 			if (err != nil) != unhealthy {
 				t.Fatalf("initial health error = %v, want error %t", err, unhealthy)
 			}

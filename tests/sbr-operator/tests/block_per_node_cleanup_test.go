@@ -82,9 +82,9 @@ func TestBPNJournalCleanupKeepsWritesBlockedWhenCancellationFails(t *testing.T) 
 	request.SetName("worker-a")
 	request.SetNamespace("operator")
 	request.SetUID("pending-request")
-	fixture := &bpnCase{
-		plan: bpnPlan{id: "RHWA-1839-16A"}, requests: []*unstructured.Unstructured{request},
-		journalFaults: []*sbrutils.BlockJournalFault{fault},
+	fixture := &bpnFixture{
+		requests:      []*unstructured.Unstructured{request},
+		journalFaults: []*bpnOwnedJournalFault{{BlockJournalFault: fault, releaseRequestsBeforeRestore: true}},
 	}
 	var failures []error
 	fixture.restoreCleanupFaults(func(_ string, operation func() error) {
@@ -171,7 +171,7 @@ func TestBPNRequestReleaseSharesOneDeadline(t *testing.T) {
 	originalClient := APIClient
 	APIClient = &clients.Settings{Client: requestClient, CoreV1Interface: bpnCleanupCore{nodes: nodes}}
 	t.Cleanup(func() { APIClient = originalClient })
-	fixture := &bpnCase{nodes: []*bpnNode{{initial: &corev1.Node{}}}}
+	fixture := &bpnFixture{nodes: []*bpnNode{{initial: &corev1.Node{}}}}
 	if err := fixture.releaseRequestWithin(ctx, bpnCleanupRequest()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("release error = %v, want the shared deadline", err)
 	}
@@ -214,9 +214,10 @@ func TestBPNJournalCleanupRestoresWritesAfterRelease(t *testing.T) {
 	if err = fault.Activate(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &bpnCase{
-		plan: bpnPlan{id: "RHWA-1839-16A"}, nodes: []*bpnNode{{initial: node}},
-		requests: []*unstructured.Unstructured{bpnCleanupRequest()}, journalFaults: []*sbrutils.BlockJournalFault{fault},
+	fixture := &bpnFixture{
+		nodes:         []*bpnNode{{initial: node}},
+		requests:      []*unstructured.Unstructured{bpnCleanupRequest()},
+		journalFaults: []*bpnOwnedJournalFault{{BlockJournalFault: fault, releaseRequestsBeforeRestore: true}},
 	}
 	if !fixture.restoreCleanupFaults(func(_ string, operation func() error) {
 		if err := operation(); err != nil {
@@ -230,12 +231,13 @@ func TestBPNJournalCleanupRestoresWritesAfterRelease(t *testing.T) {
 func TestBPNRestorationRejectsEarlierPeerReboot(t *testing.T) {
 	baseline := time.Now().Add(-time.Minute)
 	for _, sampleOffset := range []time.Duration{time.Second, 59 * time.Second} {
-		fixture := &bpnCase{baseline: baseline, lastReboot: baseline.Add(30 * time.Second)}
+		fixture := &bpnFixture{baseline: baseline}
 		for index := range 3 {
 			fixture.nodes = append(fixture.nodes, &bpnNode{
 				initial: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("worker-%d", index)}}, boot: "expected",
 			})
 		}
+		fixture.nodes[0].rebootObservedAt = baseline.Add(30 * time.Second)
 		fixture.samples = []bpnBootSample{{At: baseline.Add(sampleOffset), Node: "worker-1", ID: "unexpected"}}
 		if err := fixture.finalRestoredObservation(); err == nil || !strings.Contains(err.Error(), "worker-1 rebooted") {
 			t.Fatalf("peer reboot before final observation must fail: %v", err)
@@ -250,22 +252,23 @@ func TestBPNRestorationRejectsEarlierPeerReboot(t *testing.T) {
 
 func TestBPNRestorationAllowsOnlyConfirmedTargetReboot(t *testing.T) {
 	baseline := time.Now().Add(-time.Minute)
-	fixture := &bpnCase{baseline: baseline, lastReboot: baseline.Add(30 * time.Second)}
+	fixture := &bpnFixture{baseline: baseline}
 	for index := range 3 {
 		fixture.nodes = append(fixture.nodes, &bpnNode{
 			initial: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("worker-%d", index)}}, boot: "expected",
 		})
 	}
 	fixture.nodes[0].boot = "confirmed"
+	fixture.nodes[0].rebootObservedAt = baseline.Add(30 * time.Second)
 	fixture.samples = []bpnBootSample{
 		{At: baseline, Node: "worker-0", ID: "original"},
-		{At: fixture.lastReboot, Node: "worker-0", ID: "confirmed"},
+		{At: fixture.nodes[0].rebootObservedAt, Node: "worker-0", ID: "confirmed"},
 	}
 	if err := fixture.checkRestorationBoots(); err != nil {
 		t.Fatal(err)
 	}
 	fixture.samples = append(fixture.samples, bpnBootSample{
-		At: fixture.lastReboot.Add(time.Second), Node: "worker-0", ID: "another-reboot",
+		At: fixture.nodes[0].rebootObservedAt.Add(time.Second), Node: "worker-0", ID: "another-reboot",
 	})
 	if err := fixture.checkRestorationBoots(); err == nil {
 		t.Fatal("a second target reboot must fail restoration")

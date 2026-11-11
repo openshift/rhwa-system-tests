@@ -14,6 +14,7 @@ import (
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
+	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrutils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -27,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (test *bpnCase) createWorkload() {
+func (test *bpnFixture) createWorkload() {
 	GinkgoHelper()
 	image, err := test.workloadImage()
 	test.prerequisite(err, "the existing workload image digest must resolve before Pod creation")
@@ -54,13 +55,9 @@ func (test *bpnCase) createWorkload() {
 		Expect(toleration.Key).NotTo(Equal("node.kubernetes.io/out-of-service"))
 	}
 	AddReportEntry("bpn-workload", map[string]interface{}{"name": name, "uid": test.workload.UID, "image": image})
-	if strings.HasPrefix(test.plan.id, "RHWA-1839-15") {
-		test.workload.Finalizers = append(test.workload.Finalizers, "tests.medik8s.io/hold-workload")
-		Expect(test.api(func(ctx context.Context) error { return APIClient.Update(ctx, test.workload) })).To(Succeed())
-	}
 }
 
-func (test *bpnCase) workloadImage() (string, error) {
+func (test *bpnFixture) workloadImage() (string, error) {
 	image := medik8sparams.WorkloadImage
 	if at := strings.LastIndex(image, "@"); at >= 0 {
 		if !bpnValidImageDigest(image[at+1:]) {
@@ -108,7 +105,7 @@ func bpnValidImageDigest(value string) bool {
 	return err == nil
 }
 
-func (test *bpnCase) releaseRequest(request *unstructured.Unstructured) {
+func (test *bpnFixture) releaseRequest(request *unstructured.Unstructured) {
 	GinkgoHelper()
 	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNRelease)
 	defer cancel()
@@ -117,7 +114,7 @@ func (test *bpnCase) releaseRequest(request *unstructured.Unstructured) {
 	test.quietSince = time.Now()
 }
 
-func (test *bpnCase) releaseRequestWithin(ctx context.Context, request *unstructured.Unstructured) error {
+func (test *bpnFixture) releaseRequestWithin(ctx context.Context, request *unstructured.Unstructured) error {
 	if err := test.resolveRequestIntent(ctx, request); err != nil {
 		return err
 	}
@@ -137,7 +134,7 @@ func (test *bpnCase) releaseRequestWithin(ctx context.Context, request *unstruct
 	return nil
 }
 
-func (test *bpnCase) resolveRequestIntent(ctx context.Context, request *unstructured.Unstructured) error {
+func (test *bpnFixture) resolveRequestIntent(ctx context.Context, request *unstructured.Unstructured) error {
 	if request.GetUID() != "" {
 		return nil
 	}
@@ -163,7 +160,7 @@ func (test *bpnCase) resolveRequestIntent(ctx context.Context, request *unstruct
 	return nil
 }
 
-func (test *bpnCase) requireRestrictionsReleased() {
+func (test *bpnFixture) requireRestrictionsReleased() {
 	test.eventually(sbrparams.BPNRelease, "Normal deletion must release restrictions", func(ctx context.Context) error {
 		return test.checkRestoredRestrictions(ctx)
 	})
@@ -179,12 +176,12 @@ func bpnHasTaint(node *corev1.Node, key, value string, effect corev1.TaintEffect
 	return false
 }
 
-func (test *bpnCase) retainPod() {
+func (test *bpnFixture) retainPod() {
 	Expect(test.api(func(ctx context.Context) error { return APIClient.Delete(ctx, test.workload) })).To(Succeed())
 	test.eventually(sbrparams.BPNFaultReady, "The original Pod must remain terminating with its finalizer", test.heldPod)
 }
 
-func (test *bpnCase) heldPod(ctx context.Context) error {
+func (test *bpnFixture) heldPod(ctx context.Context) error {
 	current := &corev1.Pod{}
 	if err := APIClient.Get(ctx, client.ObjectKeyFromObject(test.workload), current); err != nil {
 		return err
@@ -201,7 +198,7 @@ func (test *bpnCase) heldPod(ctx context.Context) error {
 	return fmt.Errorf("the test workload finalizer disappeared")
 }
 
-func (test *bpnCase) setAdministratorFixtures(add bool) error {
+func (test *bpnFixture) setAdministratorFixtures(add bool) error {
 	return test.api(func(ctx context.Context) error {
 		node, err := test.getNode(ctx, 0)
 		if err != nil {
@@ -255,7 +252,7 @@ func bpnOwnedAdministratorTaint(taint corev1.Taint, initial *corev1.Node) bool {
 	return false
 }
 
-func (test *bpnCase) checkRestoredRestrictions(ctx context.Context) error {
+func (test *bpnFixture) checkRestoredRestrictions(ctx context.Context) error {
 	for index, node := range test.nodes {
 		current, err := test.cleanupNode(ctx, index)
 		if err != nil {
@@ -329,7 +326,7 @@ func (guard bpnRequestClient) Delete(ctx context.Context, object client.Object, 
 	return bpnCleanupAPI(ctx, func(call context.Context) error { return guard.Client.Delete(call, object, options...) })
 }
 
-func (test *bpnCase) deleteRequest(ctx context.Context, request *unstructured.Unstructured) error {
+func (test *bpnFixture) deleteRequest(ctx context.Context, request *unstructured.Unstructured) error {
 	if _, released := test.released[request.GetUID()]; released {
 		return nil
 	}
@@ -346,7 +343,7 @@ func (test *bpnCase) deleteRequest(ctx context.Context, request *unstructured.Un
 	return nil
 }
 
-func (test *bpnCase) markRequestReleased(uid types.UID) {
+func (test *bpnFixture) markRequestReleased(uid types.UID) {
 	if test.released == nil {
 		test.released = map[types.UID]time.Time{}
 	}
@@ -375,7 +372,7 @@ func bpnCleanupPoll(timeout time.Duration, operation func(context.Context) error
 	return nil
 }
 
-func (test *bpnCase) cleanupNode(ctx context.Context, index int) (*corev1.Node, error) {
+func (test *bpnFixture) cleanupNode(ctx context.Context, index int) (*corev1.Node, error) {
 	var node *corev1.Node
 	err := bpnCleanupAPI(ctx, func(call context.Context) error {
 		var err error
@@ -387,7 +384,7 @@ func (test *bpnCase) cleanupNode(ctx context.Context, index int) (*corev1.Node, 
 	return node, err
 }
 
-func (test *bpnCase) cleanup() {
+func (test *bpnFixture) cleanup() {
 	GinkgoHelper()
 	test.cleaning = true
 	var failures []string
@@ -444,8 +441,14 @@ func (test *bpnCase) cleanup() {
 	completed = true
 }
 
-func (test *bpnCase) restoreCleanupFaults(check func(string, func() error)) bool {
-	if test.plan.id == "RHWA-1839-16A" && len(test.journalFaults) > 0 {
+func (test *bpnFixture) restoreCleanupFaults(check func(string, func() error)) bool {
+	releaseRequests := false
+	for _, fault := range test.journalFaults {
+		if fault.releaseRequestsBeforeRestore {
+			releaseRequests = true
+		}
+	}
+	if releaseRequests {
 		cancelled := false
 		check("cancel pending requests before restoring journal writes", func() error {
 			for _, request := range test.requests {
@@ -482,7 +485,7 @@ func (test *bpnCase) restoreCleanupFaults(check func(string, func() error)) bool
 	return true
 }
 
-func (test *bpnCase) removeCleanupFixtures(check func(string, func() error)) {
+func (test *bpnFixture) removeCleanupFixtures(check func(string, func() error)) {
 	owners := map[types.UID]bool{}
 	if test.config != nil && test.config.GetUID() != "" {
 		captured := false
@@ -510,8 +513,8 @@ func (test *bpnCase) removeCleanupFixtures(check func(string, func() error)) {
 	check("delete workload namespace", test.deleteWorkloadNamespace)
 }
 
-func (test *bpnCase) removeCleanupRequest(request *unstructured.Unstructured) error {
-	if test.plan.id != "RHWA-1839-06" {
+func (test *bpnFixture) removeCleanupRequest(request *unstructured.Unstructured) error {
+	if !test.nhcRequests[request.GetUID()] {
 		ctx, cancel := context.WithTimeout(context.Background(), sbrparams.BPNRelease)
 		defer cancel()
 
@@ -537,11 +540,19 @@ func (test *bpnCase) removeCleanupRequest(request *unstructured.Unstructured) er
 	})
 }
 
-func (test *bpnCase) restoreHostSettings() error {
+func (test *bpnFixture) restoreHostSettings() error {
+	if test.hostSettings == nil {
+		return nil
+	}
+
+	return test.hostSettings.restore()
+}
+
+func (settings *bpnHostSettings) restore() error {
 	var failures []string
-	if test.kubeletStopped && len(test.nodes) > 0 && test.nodes[0].host != nil {
+	if settings.kubeletStopped && settings.host != nil {
 		if err := bpnCleanupPoll(sbrparams.BPNRelease, func(ctx context.Context) error {
-			_, err := test.nodes[0].host.Run(ctx, sbrparams.BPNHostCall,
+			_, err := settings.host.Run(ctx, sbrparams.BPNHostCall,
 				"sudo systemctl start kubelet && systemctl is-active --quiet kubelet")
 
 			return err
@@ -549,12 +560,12 @@ func (test *bpnCase) restoreHostSettings() error {
 			failures = append(failures, "start kubelet: "+err.Error())
 		}
 	}
-	if test.sysctlSaved != "" {
-		values := strings.Fields(test.sysctlSaved)
+	if settings.sysctlSaved != "" {
+		values := strings.Fields(settings.sysctlSaved)
 		if len(values) != 2 {
 			failures = append(failures, "saved SysRq settings are invalid")
 		} else {
-			_, err := test.nodes[0].host.Run(context.Background(), sbrparams.BPNHostCall,
+			_, err := settings.host.Run(context.Background(), sbrparams.BPNHostCall,
 				"sudo sysctl -w kernel.sysrq="+bpnQuote(values[0])+" kernel.panic="+bpnQuote(values[1]))
 			if err != nil {
 				failures = append(failures, "restore SysRq settings: "+err.Error())
@@ -568,7 +579,7 @@ func (test *bpnCase) restoreHostSettings() error {
 	return nil
 }
 
-func (test *bpnCase) restoreStorageHealth() error {
+func (test *bpnFixture) restoreStorageHealth() error {
 	return bpnCleanupPoll(sbrparams.BPNHealthChange, func(ctx context.Context) error {
 		for index := range test.nodes {
 			node, err := test.cleanupNode(ctx, index)
@@ -584,7 +595,7 @@ func (test *bpnCase) restoreStorageHealth() error {
 	})
 }
 
-func (test *bpnCase) restoreNode(index int) error {
+func (test *bpnFixture) restoreNode(index int) error {
 	return bpnCleanupPoll(sbrparams.BPNNodeReady, func(ctx context.Context) error {
 		node := test.nodes[index]
 		current, err := test.cleanupNode(ctx, index)
@@ -606,7 +617,7 @@ func (test *bpnCase) restoreNode(index int) error {
 	})
 }
 
-func (test *bpnCase) removeWorkload() error {
+func (test *bpnFixture) removeWorkload() error {
 	if test.workload == nil {
 		return nil
 	}
@@ -649,7 +660,7 @@ func (test *bpnCase) removeWorkload() error {
 	})
 }
 
-func (test *bpnCase) deleteFixture(object *unstructured.Unstructured) error {
+func (test *bpnFixture) deleteFixture(object *unstructured.Unstructured) error {
 	return bpnCleanupPoll(sbrparams.BPNAgentReady, func(ctx context.Context) error {
 		current := &unstructured.Unstructured{}
 		current.SetGroupVersionKind(object.GroupVersionKind())
@@ -676,7 +687,7 @@ func (test *bpnCase) deleteFixture(object *unstructured.Unstructured) error {
 	})
 }
 
-func (test *bpnCase) configurationOwners(owners map[types.UID]bool) error {
+func (test *bpnFixture) configurationOwners(owners map[types.UID]bool) error {
 	owners[test.config.GetUID()] = true
 	_, err := test.configurationOperands(context.Background(), owners)
 
@@ -693,7 +704,7 @@ func bpnOwnedBy(references []metav1.OwnerReference, owners map[types.UID]bool) b
 	return false
 }
 
-func (test *bpnCase) configurationGone(owners map[types.UID]bool) error {
+func (test *bpnFixture) configurationGone(owners map[types.UID]bool) error {
 	return bpnCleanupPoll(sbrparams.BPNAgentReady, func(ctx context.Context) error {
 		remaining, err := test.configurationOperands(ctx, owners)
 		if err != nil {
@@ -707,7 +718,7 @@ func (test *bpnCase) configurationGone(owners map[types.UID]bool) error {
 	})
 }
 
-func (test *bpnCase) configurationOperands(ctx context.Context, owners map[types.UID]bool) ([]string, error) {
+func (test *bpnFixture) configurationOperands(ctx context.Context, owners map[types.UID]bool) ([]string, error) {
 	var remaining []string
 	var firstError error
 	for _, resource := range []string{"daemonsets", "pods", "persistentvolumeclaims"} {
@@ -748,7 +759,7 @@ func (test *bpnCase) configurationOperands(ctx context.Context, owners map[types
 	return remaining, firstError
 }
 
-func (test *bpnCase) restoreWorkerLabel(index int) error {
+func (test *bpnFixture) restoreWorkerLabel(index int) error {
 	return bpnCleanupPoll(sbrparams.BPNRelease, func(ctx context.Context) error {
 		node, err := test.cleanupNode(ctx, index)
 		if err != nil {
@@ -777,7 +788,7 @@ func (test *bpnCase) restoreWorkerLabel(index int) error {
 	})
 }
 
-func (test *bpnCase) deleteWorkloadNamespace() error {
+func (test *bpnFixture) deleteWorkloadNamespace() error {
 	if test.namespace == nil || test.namespace.UID == "" {
 		return nil
 	}
@@ -807,7 +818,7 @@ func (test *bpnCase) deleteWorkloadNamespace() error {
 	})
 }
 
-func (test *bpnCase) finalRestoredObservation() error {
+func (test *bpnFixture) finalRestoredObservation() error {
 	if err := test.checkRestorationBoots(); err != nil {
 		return err
 	}
@@ -841,7 +852,7 @@ func (test *bpnCase) finalRestoredObservation() error {
 	}
 }
 
-func (test *bpnCase) finalCleanupBoots() error {
+func (test *bpnFixture) finalCleanupBoots() error {
 	for _, node := range test.nodes {
 		boot, err := node.host.BootID(context.Background(), sbrparams.BPNHostCall)
 		if err != nil {
@@ -855,7 +866,7 @@ func (test *bpnCase) finalCleanupBoots() error {
 	return nil
 }
 
-func (test *bpnCase) cleanupCoverage(from, through time.Time) error {
+func (test *bpnFixture) cleanupCoverage(from, through time.Time) error {
 	if err := test.crRecorder.Coverage(from, through); err != nil {
 		return err
 	}
@@ -868,7 +879,7 @@ func (test *bpnCase) cleanupCoverage(from, through time.Time) error {
 	return nil
 }
 
-func (test *bpnCase) checkFinalRestoration(from time.Time) error {
+func (test *bpnFixture) checkFinalRestoration(from time.Time) error {
 	if err := test.checkRestorationBoots(); err != nil {
 		return err
 	}
@@ -879,19 +890,19 @@ func (test *bpnCase) checkFinalRestoration(from time.Time) error {
 	return test.checkRestoredRestrictions(context.Background())
 }
 
-func (test *bpnCase) checkRestorationBoots() error {
+func (test *bpnFixture) checkRestorationBoots() error {
 	if err := test.checkBoots(test.baseline, 1, 2); err != nil {
 		return err
 	}
 	from := test.baseline
-	if !test.lastReboot.IsZero() {
-		from = test.lastReboot
+	if !test.nodes[0].rebootObservedAt.IsZero() {
+		from = test.nodes[0].rebootObservedAt
 	}
 
 	return test.checkBoots(from, 0)
 }
 
-func (test *bpnCase) finishCleanup(check func(string, func() error)) {
+func (test *bpnFixture) finishCleanup(check func(string, func() error)) {
 	if test.samplingCancel != nil {
 		test.samplingCancel()
 		if test.samplingDone != nil {
@@ -930,4 +941,20 @@ func (test *bpnCase) finishCleanup(check func(string, func() error)) {
 	samples := append([]bpnBootSample(nil), test.samples...)
 	test.mu.Unlock()
 	AddReportEntry("bpn-host-boot-samples", samples)
+}
+
+func (test *bpnFixture) holdWorkloadWithFinalizer() {
+	test.workload.Finalizers = append(test.workload.Finalizers, "tests.medik8s.io/hold-workload")
+	Expect(test.api(func(ctx context.Context) error { return APIClient.Update(ctx, test.workload) })).To(Succeed())
+}
+
+type bpnOwnedJournalFault struct {
+	*sbrutils.BlockJournalFault
+	releaseRequestsBeforeRestore bool
+}
+
+type bpnHostSettings struct {
+	host           *helpers.PreparedNodeAccess
+	kubeletStopped bool
+	sysctlSaved    string
 }

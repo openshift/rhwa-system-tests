@@ -187,7 +187,7 @@ func bpnOwnershipObject(kind, name string, uid, owner types.UID) *unstructured.U
 
 func bpnOwnershipFixture(t *testing.T,
 	objects ...*unstructured.Unstructured,
-) (*bpnCase, *dynamicfake.FakeDynamicClient) {
+) (*bpnFixture, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
 	resources := make([]runtime.Object, 0, len(objects))
 	for _, object := range objects {
@@ -202,7 +202,7 @@ func bpnOwnershipFixture(t *testing.T,
 	originalClient := APIClient
 	APIClient = &clients.Settings{Interface: fakeClient}
 	t.Cleanup(func() { APIClient = originalClient })
-	testCase := &bpnCase{config: &unstructured.Unstructured{}}
+	testCase := &bpnFixture{config: &unstructured.Unstructured{}}
 	testCase.config.SetUID("config")
 
 	return testCase, fakeClient

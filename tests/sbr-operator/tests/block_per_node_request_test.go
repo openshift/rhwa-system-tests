@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrutils"
@@ -95,7 +96,7 @@ func TestBPNJournalCleanupResolvesUnknownRequestUID(t *testing.T) {
 	}
 }
 
-func bpnPendingJournalCase(t *testing.T, requests ...*unstructured.Unstructured) (*bpnCase, *bpnJournalCleanupHost) {
+func bpnPendingJournalCase(t *testing.T, requests ...*unstructured.Unstructured) (*bpnFixture, *bpnJournalCleanupHost) {
 	t.Helper()
 	host := &bpnJournalCleanupHost{}
 	fault, err := sbrutils.NewBlockJournalFault(host, "uncertain-request-test")
@@ -108,9 +109,9 @@ func bpnPendingJournalCase(t *testing.T, requests ...*unstructured.Unstructured)
 	if err = fault.Activate(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &bpnCase{
-		ctx: t.Context(), plan: bpnPlan{id: "RHWA-1839-16A"},
-		requests: requests, journalFaults: []*sbrutils.BlockJournalFault{fault},
+	fixture := &bpnFixture{
+		ctx: t.Context(), requests: requests,
+		journalFaults: []*bpnOwnedJournalFault{{BlockJournalFault: fault, releaseRequestsBeforeRestore: true}},
 	}
 
 	return fixture, host
@@ -120,9 +121,11 @@ func TestBPNRequestIntentPrecedesDispatchAndSurvivesLostResponse(t *testing.T) {
 	fixture, host := bpnPendingJournalCase(t)
 	request := bpnCleanupRequest()
 	request.SetUID("")
+	var createEnteredAt time.Time
 	requestClient := &bpnUncertainRequestClient{
 		persisted: &unstructured.Unstructured{}, createErr: context.DeadlineExceeded,
 		beforeCreate: func(object client.Object) {
+			createEnteredAt = time.Now()
 			marker := object.GetAnnotations()[bpnRequestIntentAnnotation]
 			if len(fixture.requests) != 1 || marker == "" {
 				t.Fatal("cleanup must record ownership and request intent before Create dispatch")
@@ -136,8 +139,12 @@ func TestBPNRequestIntentPrecedesDispatchAndSurvivesLostResponse(t *testing.T) {
 	originalClient := APIClient
 	APIClient = &clients.Settings{Client: requestClient}
 	t.Cleanup(func() { APIClient = originalClient })
-	if err := fixture.createRequest(request); !errors.Is(err, context.DeadlineExceeded) {
+	dispatchedAt, err := fixture.createRequest(request)
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("creation must retain its lost response error: %v", err)
+	}
+	if dispatchedAt.IsZero() || dispatchedAt.After(createEnteredAt) {
+		t.Fatal("a lost Create response must retain the dispatch time recorded before the API call")
 	}
 	if len(fixture.requests) != 1 || request.GetUID() != "" {
 		t.Fatal("the lost response must leave a tracked intent without a confirmed UID")
@@ -200,8 +207,8 @@ func TestBPNRejectedCreationDoesNotLeaveUncertainIntent(t *testing.T) {
 	originalClient := APIClient
 	APIClient = &clients.Settings{Client: requestClient}
 	t.Cleanup(func() { APIClient = originalClient })
-	fixture := &bpnCase{ctx: t.Context()}
-	if err := fixture.createRequest(bpnCleanupRequest()); !apierrors.IsForbidden(err) || len(fixture.requests) != 0 {
+	fixture := &bpnFixture{ctx: t.Context()}
+	if _, err := fixture.createRequest(bpnCleanupRequest()); !apierrors.IsForbidden(err) || len(fixture.requests) != 0 {
 		t.Fatalf("a definitive API rejection must remove the unresolved intent: %v", err)
 	}
 }

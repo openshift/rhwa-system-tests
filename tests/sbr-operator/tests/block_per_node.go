@@ -11,14 +11,12 @@ import (
 	"time"
 
 	"github.com/medik8s/system-tests/tests/internal/helpers"
-	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrutils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,30 +31,13 @@ const bpnOwnerAnnotation = "sbr.medik8s.io/remediation-owner"
 
 var bpnRecoveryFailed bool
 
-var _ = Describe("SBR BlockPerNode", Serial,
-	Label(labels.OperatorSBR, labels.TierResiliency, labels.ComponentRemediation,
-		labels.DisruptionDestructive, labels.PlatformAny, labels.FrequencyWeekly), func() {
-		for _, plan := range bpnPlans {
-			It(plan.id+" "+plan.title, reportxml.ID(plan.id), FlakeAttempts(1), func() {
-				if bpnRecoveryFailed {
-					Skip("BLOCKED: an earlier case did not restore the cluster")
-				}
-
-				caseRun := &bpnCase{plan: plan, ctx: context.Background()}
-				DeferCleanup(caseRun.cleanup)
-				caseRun.step(1)
-				caseRun.prepare()
-				caseRun.execute()
-			})
-		}
-	})
-
 type bpnNode struct {
-	initial         *corev1.Node
-	host            *helpers.PreparedNodeAccess
-	boot            string
-	watchdogTimeout time.Duration
-	recorder        *helpers.ObjectRecorder[*corev1.Node]
+	initial          *corev1.Node
+	host             *helpers.PreparedNodeAccess
+	boot             string
+	rebootObservedAt time.Time
+	watchdogTimeout  time.Duration
+	recorder         *helpers.ObjectRecorder[*corev1.Node]
 }
 
 type bpnBootSample struct {
@@ -66,8 +47,8 @@ type bpnBootSample struct {
 	Error string
 }
 
-type bpnCase struct {
-	plan                  bpnPlan
+type bpnFixture struct {
+	caseID                string
 	ctx                   context.Context
 	nodes                 []*bpnNode
 	name                  string
@@ -78,18 +59,17 @@ type bpnCase struct {
 	podRecorder           *helpers.ObjectRecorder[*corev1.Pod]
 	workload              *corev1.Pod
 	faults                []*sbrutils.BlockNetworkFault
-	journalFaults         []*sbrutils.BlockJournalFault
+	journalFaults         []*bpnOwnedJournalFault
+	nhcRequests           map[types.UID]bool
 	networks              []sbrutils.BlockNetwork
-	baseline, trigger     time.Time
+	baseline              time.Time
 	samplingCancel        context.CancelFunc
 	samplingDone          chan struct{}
 	mu                    sync.Mutex
 	samples               []bpnBootSample
 	labelsAdded           bool
 	adminAdded            bool
-	kubeletStopped        bool
-	sysctlSaved           string
-	profile               time.Duration
+	hostSettings          *bpnHostSettings
 	cleaning              bool
 	prepared              bool
 	disrupted             bool
@@ -97,7 +77,6 @@ type bpnCase struct {
 	healthFaults          map[int]sbrutils.BlockFaultEvidence
 	released              map[types.UID]time.Time
 	quietSince            time.Time
-	lastReboot            time.Time
 }
 
 func bpnResource(kind string) dynamic.ResourceInterface {
@@ -106,11 +85,21 @@ func bpnResource(kind string) dynamic.ResourceInterface {
 	}).Namespace(medik8sparams.OperatorNs)
 }
 
-func (test *bpnCase) step(number int) {
-	By(test.plan.steps[number-1])
+func newBPNFixture(caseID string) *bpnFixture {
+	GinkgoHelper()
+	if bpnRecoveryFailed {
+		Skip("BLOCKED: an earlier case did not restore the cluster")
+	}
+	test := &bpnFixture{
+		ctx: context.Background(), caseID: caseID,
+		name: "sbr-bpn-" + strings.ToLower(strings.TrimPrefix(caseID, "RHWA-1839-")),
+	}
+	DeferCleanup(test.cleanup)
+
+	return test
 }
 
-func (test *bpnCase) api(operation func(context.Context) error) error {
+func (test *bpnFixture) api(operation func(context.Context) error) error {
 	if !test.cleaning {
 		if err := test.checkNodeIdentities(); err != nil {
 			return err
@@ -131,13 +120,13 @@ func (test *bpnCase) api(operation func(context.Context) error) error {
 	return nil
 }
 
-func (test *bpnCase) eventually(timeout time.Duration, reason string, operation func(context.Context) error) {
+func (test *bpnFixture) eventually(timeout time.Duration, reason string, operation func(context.Context) error) {
 	GinkgoHelper()
 	Eventually(func() error { return test.api(operation) }, timeout, sbrparams.BPNPoll).
 		Should(Succeed(), reason)
 }
 
-func (test *bpnCase) prepare() {
+func (test *bpnFixture) prepare(recoveryPeriod time.Duration) {
 	GinkgoHelper()
 	test.prepareNodes()
 	storageClass, err := sbrutils.DiscoverRBDStorageClass(test.ctx, APIClient, sbrparams.SBRRBDStorageClass)
@@ -167,17 +156,12 @@ func (test *bpnCase) prepare() {
 		})).To(Succeed(), "The test must label Node %s", node.initial.Name)
 	}
 
-	test.profile = sbrparams.BPNProfileDRecovery
-	if test.plan.id == "RHWA-1839-17C" || test.plan.id == "RHWA-1839-17D" || test.plan.id == "RHWA-1839-17E" {
-		test.profile = sbrparams.BPNProfileRRecovery
-	}
-
 	test.config = buildSBRC(test.name, map[string]interface{}{
 		"nodeSelector":            map[string]interface{}{"tests.medik8s.io/block-per-node": test.name},
 		"sharedStorageVolumeMode": "BlockPerNode", "sharedStorageClass": storageClass,
 		"ioTimeout": "15s", "sbrTimeoutSeconds": int64(sbrparams.BPNSBRTimeoutSeconds),
 		"maxConsecutiveFailures": int64(sbrparams.BPNMaxConsecutiveFailures),
-		"totalOutageGracePeriod": "60s", "autonomousRebootRecoveryPeriod": test.profile.String(),
+		"totalOutageGracePeriod": "60s", "autonomousRebootRecoveryPeriod": recoveryPeriod.String(),
 		"detectOnlyMode": "Disabled", "watchdogPath": sbrparams.AgentDefaultWatchdogPath,
 	})
 	expectedConfigSpec, _, err := unstructured.NestedMap(test.config.Object, "spec")
@@ -185,24 +169,9 @@ func (test *bpnCase) prepare() {
 	Expect(test.api(func(ctx context.Context) error { return APIClient.Create(ctx, test.config) })).To(Succeed(),
 		"BlockPerNode configuration must accept the proposed API")
 	test.config = test.readFixedSpec(test.config, expectedConfigSpec, bpnResource("storagebasedremediationconfigs"))
-	test.createPolicy()
-	test.eventually(sbrparams.BPNAgentReady, "Each selected Node must run an agent and reporter", test.componentsReady)
-	test.requireHealth(corev1.ConditionFalse)
-	if test.plan.id == "RHWA-1839-06" || strings.HasPrefix(test.plan.id, "RHWA-1839-15") {
-		test.createWorkload()
-	}
-
-	test.baseline = time.Now()
-	test.quietSince = test.baseline
-	test.observe(sbrparams.BPNBaseline, true, true)
-	test.prepared = true
-	AddReportEntry("bpn-identities", map[string]interface{}{
-		"case": test.plan.id, "configUID": test.config.GetUID(),
-		"storageClass": storageClass, "profile": test.profile.String(), "nodes": test.nodesEvidence(),
-	})
 }
 
-func (test *bpnCase) prepareNodes() {
+func (test *bpnFixture) prepareNodes() {
 	GinkgoHelper()
 	var nodeList *corev1.NodeList
 	Expect(test.api(func(ctx context.Context) error {
@@ -223,14 +192,13 @@ func (test *bpnCase) prepareNodes() {
 	}
 
 	if len(test.nodes) < sbrparams.BPNWorkers {
-		Skip(fmt.Sprintf("BLOCKED: %s needs three Ready Linux workers, found %d", test.plan.id, len(test.nodes)))
+		Skip(fmt.Sprintf("BLOCKED: %s needs three Ready Linux workers, found %d", test.caseID, len(test.nodes)))
 	}
 
 	sort.Slice(test.nodes, func(left, right int) bool {
 		return test.nodes[left].initial.Name < test.nodes[right].initial.Name
 	})
 	test.nodes = test.nodes[:sbrparams.BPNWorkers]
-	test.name = "sbr-bpn-" + strings.ToLower(strings.TrimPrefix(test.plan.id, "RHWA-1839-"))
 	test.checkConflicts()
 	test.recordOperatorImages()
 	for _, node := range test.nodes {
@@ -250,7 +218,7 @@ func (test *bpnCase) prepareNodes() {
 	}
 }
 
-func (test *bpnCase) recordOperatorImages() {
+func (test *bpnFixture) recordOperatorImages() {
 	GinkgoHelper()
 	var pods *corev1.PodList
 	Expect(test.api(func(ctx context.Context) error {
@@ -278,7 +246,7 @@ func (test *bpnCase) recordOperatorImages() {
 	AddReportEntry("bpn-existing-operator-images", images)
 }
 
-func (test *bpnCase) readFixedSpec(object *unstructured.Unstructured, expected map[string]interface{},
+func (test *bpnFixture) readFixedSpec(object *unstructured.Unstructured, expected map[string]interface{},
 	resource dynamic.ResourceInterface,
 ) *unstructured.Unstructured {
 	GinkgoHelper()
@@ -300,7 +268,7 @@ func (test *bpnCase) readFixedSpec(object *unstructured.Unstructured, expected m
 	return stored
 }
 
-func (test *bpnCase) checkConflicts() {
+func (test *bpnFixture) checkConflicts() {
 	for _, resource := range []struct{ group, version, resource string }{
 		{sbrparams.CRDGroup, sbrparams.CRDVersion, "storagebasedremediationconfigs"},
 		{"self-node-remediation.medik8s.io", "v1alpha1", "selfnoderemediationconfigs"},
@@ -349,7 +317,7 @@ func (test *bpnCase) checkConflicts() {
 	}
 }
 
-func (test *bpnCase) checkWatchdog(node *bpnNode) {
+func (test *bpnFixture) checkWatchdog(node *bpnNode) {
 	GinkgoHelper()
 	output, err := node.host.Run(test.ctx, sbrparams.BPNHostCall,
 		"sudo sh -c 'test -c /dev/watchdog && cat /sys/class/watchdog/watchdog0/timeout'")
@@ -367,7 +335,7 @@ func (test *bpnCase) checkWatchdog(node *bpnNode) {
 	node.watchdogTimeout = time.Duration(seconds) * time.Second
 }
 
-func (test *bpnCase) policySelectsWorkers(object *unstructured.Unstructured) bool {
+func (test *bpnFixture) policySelectsWorkers(object *unstructured.Unstructured) bool {
 	selector, found, _ := unstructured.NestedMap(object.Object, "spec", "selector")
 	if found {
 		data, _ := json.Marshal(selector)
@@ -407,7 +375,7 @@ func (test *bpnCase) policySelectsWorkers(object *unstructured.Unstructured) boo
 	return false
 }
 
-func (test *bpnCase) createPolicy() {
+func (test *bpnFixture) createPolicy(paused bool) {
 	test.template = buildSBRUnstructured("StorageBasedRemediationTemplate", test.name,
 		map[string]interface{}{"template": map[string]interface{}{"spec": map[string]interface{}{}}})
 	Expect(test.api(func(ctx context.Context) error { return APIClient.Create(ctx, test.template) })).To(Succeed())
@@ -421,13 +389,10 @@ func (test *bpnCase) createPolicy() {
 		"type": sbrparams.SBRStorageUnhealthyCondition, "status": "True", "duration": "30s",
 	}}, "spec", "unhealthyConditions")
 	_ = unstructured.SetNestedField(test.nhc.Object, test.name, "spec", "remediationTemplate", "name")
-	active := map[string]bool{
-		"RHWA-1839-01": true, "RHWA-1839-02": true, "RHWA-1839-05A": true, "RHWA-1839-05B": true,
-		"RHWA-1839-06": true, "RHWA-1839-09": true, "RHWA-1839-11": true,
-	}
-	if !active[test.plan.id] {
+	if paused {
 		_ = unstructured.SetNestedStringSlice(test.nhc.Object, []string{"sbr-block-test"}, "spec", "pauseRequests")
 	}
+
 	expectedSpec, _, err := unstructured.NestedMap(test.nhc.Object, "spec")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(test.api(func(ctx context.Context) error { return APIClient.Create(ctx, test.nhc) })).To(Succeed(),
@@ -437,7 +402,7 @@ func (test *bpnCase) createPolicy() {
 	}))
 	pauseRequests, _, err := unstructured.NestedStringSlice(test.nhc.Object, "spec", "pauseRequests")
 	Expect(err).NotTo(HaveOccurred())
-	if active[test.plan.id] {
+	if !paused {
 		Expect(pauseRequests).To(BeEmpty(), "The active NHC policy must have no pause requests")
 	} else {
 		Expect(pauseRequests).To(Equal([]string{"sbr-block-test"}), "The NHC policy must keep exactly the test pause request")
@@ -449,7 +414,7 @@ func (test *bpnCase) createPolicy() {
 	}
 }
 
-func (test *bpnCase) componentsReady(ctx context.Context) error {
+func (test *bpnFixture) componentsReady(ctx context.Context) error {
 	pods, err := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).List(ctx,
 		metav1.ListOptions{LabelSelector: "sbrconfig=" + test.name})
 	if err != nil {
@@ -492,7 +457,7 @@ func bpnPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-func (test *bpnCase) nodesEvidence() []map[string]interface{} {
+func (test *bpnFixture) nodesEvidence() []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(test.nodes))
 	for _, node := range test.nodes {
 		result = append(result, map[string]interface{}{
@@ -505,11 +470,38 @@ func (test *bpnCase) nodesEvidence() []map[string]interface{} {
 	return result
 }
 
-func (test *bpnCase) getNode(ctx context.Context, index int) (*corev1.Node, error) {
+func (test *bpnFixture) getNode(ctx context.Context, index int) (*corev1.Node, error) {
 	node, err := APIClient.CoreV1Interface.Nodes().Get(ctx, test.nodes[index].initial.Name, metav1.GetOptions{})
 	if err == nil && node.UID != test.nodes[index].initial.UID {
 		return nil, fmt.Errorf("node UID changed for %s", node.Name)
 	}
 
 	return node, err
+}
+
+func (test *bpnFixture) createActivePolicy() {
+	test.createPolicy(false)
+}
+
+func (test *bpnFixture) createPausedPolicy() {
+	test.createPolicy(true)
+}
+
+func (test *bpnFixture) requireComponentsReady() {
+	test.eventually(sbrparams.BPNAgentReady, "Each selected Node must run an agent and reporter", test.componentsReady)
+	test.requireHealth(corev1.ConditionFalse)
+}
+
+func (test *bpnFixture) establishBaseline() {
+	GinkgoHelper()
+	test.baseline = time.Now()
+	test.quietSince = test.baseline
+	test.observeHealthyWithoutRequests(sbrparams.BPNBaseline)
+	test.prepared = true
+	storageClass, _, _ := unstructured.NestedString(test.config.Object, "spec", "sharedStorageClass")
+	recoveryPeriod, _, _ := unstructured.NestedString(test.config.Object, "spec", "autonomousRebootRecoveryPeriod")
+	AddReportEntry("bpn-identities", map[string]interface{}{
+		"case": test.caseID, "configUID": test.config.GetUID(),
+		"storageClass": storageClass, "profile": recoveryPeriod, "nodes": test.nodesEvidence(),
+	})
 }
