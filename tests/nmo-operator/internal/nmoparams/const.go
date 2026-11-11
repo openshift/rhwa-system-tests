@@ -49,6 +49,9 @@ const (
 	ScheduleCheckTimeout = 30 * time.Second
 	// RunOnNodeTimeout is the timeout for running commands on a node via oc debug.
 	RunOnNodeTimeout = 2 * time.Minute
+	// NMOControllerRescheduleTimeout is the maximum wait for the NMO controller pod to
+	// run again, containers ready, on a different node after its node entered maintenance.
+	NMOControllerRescheduleTimeout = 5 * time.Minute
 
 	// DrainProgressComplete is the DrainProgress value indicating all pods have been evicted.
 	DrainProgressComplete = 100
@@ -173,6 +176,12 @@ const (
 	MustGatherNMNamePrefix = "node-maintenance-"
 	// MustGatherReason is the spec.reason recorded on that CR.
 	MustGatherReason = "system-tests must-gather validation (RHWA-1251)"
+
+	// EvictionNMNamePrefix prefixes the NodeMaintenance CR name created by the NMO pod
+	// eviction test (OCP-29600); the target node name is appended.
+	EvictionNMNamePrefix = "pod-eviction-"
+	// EvictionReason is the spec.reason recorded on that CR.
+	EvictionReason = "system-tests NMO pod eviction validation (RHWA-1252)"
 
 	// UnschedulableTaintKey is the taint the node controller applies to a cordoned node.
 	// The must-gather test asserts it alongside DrainTaintKey on the collected node yaml.
