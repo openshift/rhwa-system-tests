@@ -154,7 +154,7 @@ run-nhc-upgrade-unit-tests:
 
 .PHONY: run-sbr-upgrade-unit-tests
 run-sbr-upgrade-unit-tests:
-	UNIT_TEST=true WORKLOAD_IMAGE=unused go test ./tests/sbr-operator/internal/...
+	UNIT_TEST=true WORKLOAD_IMAGE=unused go test ./tests/sbr-operator/internal/... ./tests/sbr-operator/tests
 
 .PHONY: run-snr-upgrade-unit-tests
 run-snr-upgrade-unit-tests:
