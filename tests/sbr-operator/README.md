@@ -695,6 +695,11 @@ The 28 draft cases use stable identifiers from `RHWA-1839-01` through `RHWA-1839
 They check public storage conditions, requested and autonomous reboots, retained request identities, and normal resource deletion.
 The full case document is [rhwa-1839.md](../../docs/TESTCASES/rhwa-1839.md).
 The explicit specs are in [block_per_node_specs.go](tests/block_per_node_specs.go).
+Case 03A uses active NHC with `minHealthy: 2`. It waits for A's request before blocking storage on B and C.
+A's storage fault persists across reboot. B and C must receive no request or reboot through the outage and restoration.
+Restore B and C to healthy storage before restoring A. This staged case does not predict the request count for simultaneous failures.
+NHC uses `healthyDelay: 1m`. CR deletion and restriction release must finish within 360s. SBR's cleanup deadline remains 300s.
+Case 06 keeps its target storage fault active across reboot until the CR status and Pod removal assertions finish.
 Jira Task mapping remains deferred under the user instruction.
 
 - **Operators**: SBR and NHC builds with the proposed BlockPerNode API. Record the installed image identities before execution.

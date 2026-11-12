@@ -14,10 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 var _ = Describe("SBR BlockPerNode", Serial,
@@ -79,40 +76,102 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.observeHealthyWithoutRequests(sbrparams.BPNPostRestore)
 		})
 
-		// TODO(RHWA-1839-03A): Test NHC threshold behavior separately. This needs a defined condition-publication schedule and must not claim that thresholds prevent every reboot.
-		It("RHWA-1839-03A Broad storage failure without an authorized request — matrix row 3", reportxml.ID("RHWA-1839-03A"), FlakeAttempts(1), func() {
+		// TODO(RHWA-1839-03A): Count every target boot before SSH returns. This needs a trusted host boot counter and does not affect the initial result.
+		It("RHWA-1839-03A NHC limits requested remediation during broad storage failure — matrix row 3", reportxml.ID("RHWA-1839-03A"), FlakeAttempts(1), func() {
 			test := newBPNFixture("RHWA-1839-03A")
 
-			By("Complete the baseline and observer-readiness procedure.")
+			By("Complete the baseline with active NHC and minHealthy=2.")
 			test.prepare()
-			test.createPausedPolicy()
+			test.createActivePolicy()
 			test.requireComponentsReady()
 			test.establishBaseline(sbrparams.BPNBaseline)
 
-			By("Confirm the test NHC contains pauseRequests: [sbr-block-test].")
-			paused, _, err := unstructured.NestedStringSlice(test.nhc.Object, "spec", "pauseRequests")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(paused).To(Equal([]string{"sbr-block-test"}))
-
-			By("Reject storage traffic on all three workers.")
+			By("Prepare storage faults on all three workers. Make the target fault persistent across reboot.")
 			faults := make([]*sbrutils.BlockNetworkFault, 0, 3)
 			for index := range test.nodes {
-				faults = append(faults, test.prepareFault(index, sbrutils.BlockStorageLoss, false))
+				faults = append(faults, test.prepareFault(index, sbrutils.BlockStorageLoss, index == 0))
 			}
-			for _, fault := range faults {
-				test.activate(fault)
+			peersRestored := false
+			restorePeers := func() {
+				if peersRestored {
+					return
+				}
+				test.restoreFault(faults[1])
+				test.restoreFault(faults[2])
+				test.requireHealth(corev1.ConditionFalse, 1, 2)
+				peersRestored = true
 			}
+			DeferCleanup(func() {
+				defer func() {
+					if !peersRestored {
+						bpnRecoveryFailed = true
+					}
+				}()
+				restorePeers()
+			})
 
-			By("Confirm each fault. Require SBRStorageUnhealthy=True on each Node within HEALTH_CHANGE.")
-			By("Keep all faults active for NO_REBOOT after the last activation.")
-			test.observeStorageFaults(0, 1, 2)
+			By("Reject storage traffic only on worker A. Require SBRStorageUnhealthy=True within HEALTH_CHANGE.")
+			test.activate(faults[0])
+			test.requireUnhealthy(0)
 
-			By("Remove the faults. Require False storage conditions.")
-			test.restoreFaults()
+			By("Observe A's NHC-created SBR CR within REQUEST_CREATE. Record its UID before disrupting either peer.")
+			request, from := test.waitNHCRequest()
+			checkPeers := func() error {
+				if err := test.checkBoots(test.baseline, 1, 2); err != nil {
+					return err
+				}
+
+				return test.noRestrictions(test.baseline, 1, 2)
+			}
+			Expect(checkPeers()).To(Succeed(), "Neither peer may receive a request or reboot")
+
+			By("Reject storage traffic on workers B and C. Preserve API and SSH access on all three workers.")
+			test.activate(faults[1])
+			test.activate(faults[2])
+			outageDeadline, err := bpnStorageObservationDeadline(test.healthFaults, 1, 2)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Require True storage conditions on B and C within HEALTH_CHANGE. Check that neither peer receives a request or reboots.")
+			test.requireUnhealthyWhile(checkPeers, 1, 2)
+
+			By("Require A to reboot and its CR to satisfy the common requested-remediation result.")
+			requestBoot, rebootObservedAt := test.waitReboot(from)
+			test.nodes[0].boot = requestBoot
+			test.requireRequestedResult(request, from, rebootObservedAt)
+
+			By("Confirm that all storage faults remain active after A reboots.")
+			test.checkFaultAfterReboot(faults...)
+
+			By("Keep all faults active until the requested result and NO_REBOOT after the last peer fault are complete.")
+			check := func() error {
+				if err := checkPeers(); err != nil {
+					return err
+				}
+
+				return test.checkBoots(rebootObservedAt, 0)
+			}
+			if remaining := time.Until(outageDeadline); remaining > 0 {
+				Consistently(check, remaining, sbrparams.BPNPoll).Should(Succeed())
+			}
+			test.finalBoots()
+			test.coverage(test.baseline, time.Now(), false)
+			Expect(check()).To(Succeed(), "Only A may reboot. Neither peer may receive a request or restriction")
+
+			By("Restore storage on B and C. Require both storage conditions to be False before restoring A.")
+			restorePeers()
+
+			By("Restore storage on A. Require False storage conditions on all three workers.")
+			test.restoreFault(faults[0])
 			test.requireHealth(corev1.ConditionFalse)
+			healthyAt := time.Now()
+
+			By("Let NHC delete A's CR after its 60s healthy delay. Require SBR restriction release.")
+			test.waitNHCRelease(request, healthyAt)
 
 			By("Observe POST_RESTORE before common cleanup.")
 			test.observeHealthyWithoutRequests(sbrparams.BPNPostRestore)
+			test.coverage(test.baseline, time.Now(), false)
+			Expect(check()).To(Succeed(), "Peer requests and further reboots must remain absent through restoration")
 		})
 
 		// TODO(RHWA-1839-03B): Remove one peer during the request and check completion through the remaining peer. This needs a separate controlled peer-stop fixture.
@@ -324,45 +383,26 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			Expect(test.workload.UID).NotTo(BeEmpty())
 			test.finalBoots()
 
-			By("Reject storage traffic only on the target. Confirm the fault.")
-			fault := test.prepareFault(0, sbrutils.BlockStorageLoss, false)
+			By("Reject storage traffic only on the target. Confirm that the fault will persist across reboot.")
+			fault := test.prepareFault(0, sbrutils.BlockStorageLoss, true)
 			test.activate(fault)
 
 			By("Require SBRStorageUnhealthy=True within HEALTH_CHANGE.")
 			test.requireUnhealthy(0)
 
 			By("Observe the NHC-created SBR CR within REQUEST_CREATE. Record its UID.")
-			var request *unstructured.Unstructured
-			test.eventually(sbrparams.BPNRequestCreate, "NHC must create the request", func(ctx context.Context) error {
-				current, err := bpnResource("storagebasedremediations").Get(ctx, test.nodes[0].initial.Name, metav1.GetOptions{})
-				if err != nil {
-					return err
-				}
-				owned := false
-				for _, owner := range current.GetOwnerReferences() {
-					if owner.UID == test.nhc.GetUID() {
-						owned = true
-					}
-				}
-				if !owned {
-					return fmt.Errorf("the target request must belong to the test NHC")
-				}
-				request = current
+			request, from := test.waitNHCRequest()
 
-				return nil
-			})
-			test.requests = append(test.requests, request)
-			test.nhcRequests = map[types.UID]bool{request.GetUID(): true}
-			from := request.GetCreationTimestamp().Time
-			if from.IsZero() {
-				from = time.Now()
-			}
+			By("Require the target to reboot within REBOOT.")
+			requestBoot, requestRebootObservedAt := test.waitReboot(from)
+			test.nodes[0].boot = requestBoot
+
+			By("Confirm that the target storage fault remains active after reboot.")
+			test.checkFaultAfterReboot(fault)
 
 			By("Require the common requested-remediation result.")
-			requestBoot, requestRebootObservedAt := test.waitReboot(from)
 			test.requireRequestedResult(request, from, requestRebootObservedAt)
 			test.requirePeerBoots()
-			test.nodes[0].boot = requestBoot
 
 			By("Require the original workload Pod UID to disappear within WORKLOAD_GONE after OutOfService is observed.")
 			var taintObserved time.Time
@@ -388,20 +428,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.requireHealth(corev1.ConditionFalse)
 			healthyAt := time.Now()
 
-			By("Let NHC delete the CR after its 600s healthy delay. Require SBR restriction release.")
-			releaseBy := healthyAt.Add(sbrparams.BPNNHCHealthyDelay + sbrparams.BPNRelease)
-			test.eventually(time.Until(releaseBy), "NHC must delete and release within 900s", func(ctx context.Context) error {
-				_, err := test.requestCurrent(ctx, request)
-				if apierrors.IsNotFound(err) {
-					return test.checkRestoredRestrictions(ctx)
-				}
-				if err != nil {
-					return err
-				}
-
-				return fmt.Errorf("NHC request remains")
-			})
-			test.markRequestReleased(request.GetUID())
+			By("Let NHC delete the CR after its 60s healthy delay. Require SBR restriction release.")
+			test.waitNHCRelease(request, healthyAt)
 
 			By("Complete common cleanup.")
 		})

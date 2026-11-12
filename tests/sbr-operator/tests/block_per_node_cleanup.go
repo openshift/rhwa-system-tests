@@ -115,6 +115,24 @@ func (test *bpnFixture) releaseRequest(request *unstructured.Unstructured) {
 	test.quietSince = time.Now()
 }
 
+func (test *bpnFixture) waitNHCRelease(request *unstructured.Unstructured, healthyAt time.Time) {
+	GinkgoHelper()
+	releaseBy := healthyAt.Add(sbrparams.BPNNHCHealthyDelay + sbrparams.BPNRelease)
+	test.eventually(time.Until(releaseBy), "NHC must delete and release within 360s", func(ctx context.Context) error {
+		_, err := test.requestCurrent(ctx, request)
+		if apierrors.IsNotFound(err) {
+			return test.checkRestoredRestrictions(ctx)
+		}
+		if err != nil {
+			return err
+		}
+
+		return fmt.Errorf("NHC request remains")
+	})
+	test.markRequestReleased(request.GetUID())
+	test.quietSince = time.Now()
+}
+
 func (test *bpnFixture) releaseRequestWithin(ctx context.Context, request *unstructured.Unstructured) error {
 	if err := test.resolveRequestIntent(ctx, request); err != nil {
 		return err

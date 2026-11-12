@@ -326,12 +326,16 @@ func (test *bpnFixture) finalBoots(indices ...int) {
 	}
 }
 
-func (test *bpnFixture) noRestrictions(from time.Time) error {
+func (test *bpnFixture) noRestrictions(from time.Time, indices ...int) error {
+	if len(indices) == 0 {
+		indices = []int{0, 1, 2}
+	}
 	through := time.Now()
 	if err := bpnPermanentCoverage(test.crRecorder.Snapshot(), from, through); err != nil {
 		return fmt.Errorf("INCONCLUSIVE: request history: %w", err)
 	}
-	for _, node := range test.nodes {
+	for _, index := range indices {
+		node := test.nodes[index]
 		if err := bpnPermanentCoverage(node.recorder.Snapshot(), from, through); err != nil {
 			return fmt.Errorf("INCONCLUSIVE: Node %s history: %w", node.initial.Name, err)
 		}
@@ -339,7 +343,8 @@ func (test *bpnFixture) noRestrictions(from time.Time) error {
 	if err := test.checkNodeIdentities(); err != nil {
 		return err
 	}
-	for _, node := range test.nodes {
+	for _, index := range indices {
+		node := test.nodes[index]
 		for _, sample := range node.recorder.Snapshot().Observations {
 			if sample.At.Before(from) || sample.UID != node.initial.UID {
 				continue
@@ -359,7 +364,8 @@ func (test *bpnFixture) noRestrictions(from time.Time) error {
 		if released, ok := test.released[sample.UID]; ok && released.Before(from) {
 			continue
 		}
-		for _, node := range test.nodes {
+		for _, index := range indices {
+			node := test.nodes[index]
 			if sample.Object.GetName() == node.initial.Name {
 				return fmt.Errorf("unexpected SBR CR %s/%s UID %s",
 					sample.Object.GetNamespace(), sample.Object.GetName(), sample.UID)
@@ -520,6 +526,37 @@ func (test *bpnFixture) request() (*unstructured.Unstructured, time.Time) {
 	Expect(createErr).To(Succeed(), "A valid external request must be accepted")
 
 	return object, dispatchedAt
+}
+
+func (test *bpnFixture) waitNHCRequest() (*unstructured.Unstructured, time.Time) {
+	GinkgoHelper()
+	var request *unstructured.Unstructured
+	test.eventually(sbrparams.BPNRequestCreate, "NHC must create the request", func(ctx context.Context) error {
+		current, err := bpnResource("storagebasedremediations").Get(ctx, test.nodes[0].initial.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		for _, owner := range current.GetOwnerReferences() {
+			if owner.UID == test.nhc.GetUID() {
+				request = current
+
+				return nil
+			}
+		}
+
+		return fmt.Errorf("the target request must belong to the test NHC")
+	})
+	test.requests = append(test.requests, request)
+	if test.nhcRequests == nil {
+		test.nhcRequests = map[types.UID]bool{}
+	}
+	test.nhcRequests[request.GetUID()] = true
+	from := request.GetCreationTimestamp().Time
+	if from.IsZero() {
+		from = time.Now()
+	}
+
+	return request, from
 }
 
 const bpnRequestIntentAnnotation = "tests.medik8s.io/block-per-node-request"

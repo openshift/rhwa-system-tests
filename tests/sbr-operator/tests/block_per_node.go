@@ -381,7 +381,7 @@ func (test *bpnFixture) createPolicy(paused bool) {
 	Expect(test.api(func(ctx context.Context) error { return APIClient.Create(ctx, test.template) })).To(Succeed())
 	test.nhc = buildNHC(test.name)
 	_ = unstructured.SetNestedField(test.nhc.Object, int64(2), "spec", "minHealthy")
-	_ = unstructured.SetNestedField(test.nhc.Object, "10m", "spec", "healthyDelay")
+	_ = unstructured.SetNestedField(test.nhc.Object, sbrparams.BPNNHCHealthyDelay.String(), "spec", "healthyDelay")
 	_ = unstructured.SetNestedField(test.nhc.Object, map[string]interface{}{
 		"matchLabels": map[string]interface{}{"tests.medik8s.io/block-per-node": test.name},
 	}, "spec", "selector")

@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -184,6 +185,86 @@ func TestBPNObservationRejectsUnhealthyBaselineWithoutLaterEvents(t *testing.T) 
 				t.Fatalf("initial health error = %v, want error %t", err, unhealthy)
 			}
 		})
+	}
+}
+
+func TestBPNPeerRestrictionsPermitOnlyTargetRemediation(t *testing.T) {
+	for _, scenario := range []struct {
+		name         string
+		peerRequest  int
+		cordon       bool
+		outOfService bool
+	}{
+		{name: "target remediation"},
+		{name: "deleted B request", peerRequest: 1},
+		{name: "deleted C request", peerRequest: 2},
+		{name: "restored B cordon", cordon: true},
+		{name: "removed C OutOfService", outOfService: true},
+	} {
+		from := time.Now()
+		caseRun := &bpnFixture{}
+		for index := range 3 {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name: fmt.Sprintf("worker-%d", index), UID: types.UID(fmt.Sprintf("node-%d", index)),
+			}}
+			current := node.DeepCopy()
+			current.Spec.Unschedulable = index == 0 || (index == 1 && scenario.cordon)
+			if index == 0 || (index == 2 && scenario.outOfService) {
+				current.Spec.Taints = []corev1.Taint{{
+					Key: "node.kubernetes.io/out-of-service", Value: "nodeshutdown", Effect: corev1.TaintEffectNoExecute,
+				}}
+			}
+			watcher := watch.NewRaceFreeFake()
+			recorder, err := helpers.StartObjectRecorder(helpers.RecorderConfig[*corev1.Node]{
+				List: func(context.Context) ([]*corev1.Node, string, error) {
+					return []*corev1.Node{current}, "1", nil
+				},
+				Watch: func(context.Context, string) (watch.Interface, error) { return watcher, nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(recorder.Stop)
+			caseRun.nodes = append(caseRun.nodes, &bpnNode{initial: node, recorder: recorder})
+			watcher.Modify(node)
+		}
+		request := &unstructured.Unstructured{}
+		request.SetName(caseRun.nodes[scenario.peerRequest].initial.Name)
+		request.SetUID("request-original")
+		requestWatcher := watch.NewRaceFreeFake()
+		recorder, err := helpers.StartObjectRecorder(helpers.RecorderConfig[*unstructured.Unstructured]{
+			List: func(context.Context) ([]*unstructured.Unstructured, string, error) {
+				return []*unstructured.Unstructured{request}, "1", nil
+			},
+			Watch: func(context.Context, string) (watch.Interface, error) { return requestWatcher, nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(recorder.Stop)
+		caseRun.crRecorder = recorder
+		requestWatcher.Delete(request)
+		err = wait.PollUntilContextTimeout(context.Background(), time.Millisecond, 5*time.Second, true,
+			func(context.Context) (bool, error) {
+				for _, node := range caseRun.nodes {
+					if len(node.recorder.Snapshot().Observations) < 2 {
+						return false, nil
+					}
+				}
+
+				return len(recorder.Snapshot().Observations) >= 2, nil
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = caseRun.noRestrictions(from, 1, 2)
+		wantFailure := scenario.peerRequest != 0 || scenario.cordon || scenario.outOfService
+		if (err != nil) != wantFailure {
+			t.Fatalf("%s: got %v, want failure %t", scenario.name, err, wantFailure)
+		}
+		if err := caseRun.noRestrictions(from); err == nil {
+			t.Fatal("the default scope must still reject target requests and restrictions")
+		}
 	}
 }
 

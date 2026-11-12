@@ -34,7 +34,7 @@ const (
 	BPNPublish         = 60 * time.Second
 	BPNWorkloadGone    = 300 * time.Second
 	BPNRelease         = 300 * time.Second
-	BPNNHCHealthyDelay = 600 * time.Second
+	BPNNHCHealthyDelay = 60 * time.Second
 	BPNLatency         = 20 * time.Second
 	BPNBriefRecovery   = 20 * time.Second
 	BPNRecoveryPart    = 40 * time.Second
