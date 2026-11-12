@@ -262,17 +262,17 @@ lifecycle test (OCP-70636).
 
 Validates that a node fenced against a Ceph RBD block device stays fenced exactly once. The test
 creates an SBRC with `sharedStorageVolumeMode: Block`, triggers fencing with a manually created
-`StorageBasedRemediation` CR, and follows the node through reboot and recovery, checking that the
-operator does not create a second remediation CR for it afterwards.
+`StorageBasedRemediation` CR, reads the on-device fence slot through an observer agent before and
+after reboot, and consistently asserts that the operator does not create a second remediation CR.
 
 Full specification: [`../../docs/TESTCASES/rhwa-1916.md`](../../docs/TESTCASES/rhwa-1916.md).
 
 - **Operators**: SBR CSV ≥ 5.8.0 (`sharedStorageVolumeMode`, [RHWA-1313](https://redhat.atlassian.net/browse/RHWA-1313)); older operators Skip with the reason
-- **Cluster**: At least one schedulable worker node that hosts no SBR controller pod and may be rebooted
+- **Cluster**: At least two nodes with SBR agents (victim without controller + observer); victim may be rebooted
 - **Storage**: Ceph RBD block StorageClass (provisioner containing `rbd.csi.ceph.com`), auto-discovered or set with `SBR_RBD_STORAGE_CLASS`
-- **Environment**: Connected or disconnected. **Destructive** — the target node is fenced and hard-rebooted
+- **Environment**: Connected or disconnected. **Destructive** — the target node is fenced and hard-rebooted. Self Node Remediation must not be running; no NHC may remediate through the SBR template
 - **Standalone**: `ginkgo --label-filter="sbr" --focus="fencing state persists on Ceph RBD" ./tests/sbr-operator/...`
-- **Pass criteria**: `FencingSucceeded=True` on the SBR CR; node boot-id changes and the node returns Ready; node becomes schedulable again after the CR is deleted; agent pod returns to Running/ContainersReady; no new `StorageBasedRemediation` CR exists for the node
+- **Pass criteria**: `FencingSucceeded=True` on the SBR CR; fence request present in the target's slot before reboot; boot-id changes and the node returns Ready; node becomes schedulable after the CR is deleted; Ceph OSD blocklist cleared (DFBUGS-11731); agent returns Ready; fence slot quiet after agent restart; for 90s no phantom re-fencing (stable boot-id, Ready, no SBR CR)
 
 ### 13. Verify SBR Agents Write Concurrently to a Ceph RBD Block Device ([RHWA-1915](https://issues.redhat.com/browse/RHWA-1915))
 
