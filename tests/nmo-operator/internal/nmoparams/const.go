@@ -38,6 +38,14 @@ const (
 
 	// MaintenanceTimeout is the maximum wait for a NodeMaintenance CR to reach Succeeded phase.
 	MaintenanceTimeout = 5 * time.Minute
+	// MaintenanceRunningTimeout is the maximum wait for a NodeMaintenance on a NotReady
+	// node to reach the Running phase. The drain cannot complete while the node is
+	// NotReady, so Running -- not Succeeded -- is the expected phase (Python reference:
+	// 180s).
+	MaintenanceRunningTimeout = 3 * time.Minute
+	// NodeNotReadyTimeout is the maximum wait for a node's Ready condition to become
+	// Unknown after its kubelet is stopped (Python reference default: 300s).
+	NodeNotReadyTimeout = 5 * time.Minute
 	// RebootTimeout is the maximum wait for a node to recover after reboot.
 	RebootTimeout = 10 * time.Minute
 	// UncordonTimeout is the maximum wait for a node to become schedulable after maintenance ends.
@@ -52,6 +60,8 @@ const (
 	// NMOControllerRescheduleTimeout is the maximum wait for the NMO controller pod to
 	// run again, containers ready, on a different node after its node entered maintenance.
 	NMOControllerRescheduleTimeout = 5 * time.Minute
+	// SSHTimeout is the timeout for a single SSH command run against a cluster node.
+	SSHTimeout = 30 * time.Second
 
 	// DrainProgressComplete is the DrainProgress value indicating all pods have been evicted.
 	DrainProgressComplete = 100
@@ -112,6 +122,9 @@ const (
 
 	// QuorumReason is the spec.reason value used by the control-plane etcd-quorum test.
 	QuorumReason = "system-tests control-plane quorum validation (RHWA-1251)"
+	// NotReadyReason is the spec.reason set on the NodeMaintenance CR created for the
+	// NotReady-node maintenance test (OCP-71186).
+	NotReadyReason = "system-tests not-ready node maintenance validation (RHWA-1252)"
 
 	// EtcdNamespace is the namespace holding the etcd quorum PodDisruptionBudget.
 	// The NMO webhook lists the single PDB here to assess control-plane quorum.
@@ -170,10 +183,10 @@ const (
 	// comes from mustgather.ImageEnvVar / mustgather.DefaultImage, shared across suites.
 	MustGatherTimeout = 10 * time.Minute
 
-	// MustGatherNMNamePrefix prefixes the NodeMaintenance CR name created by the must-gather
-	// test; the target node name is appended, matching the Polarion plan's
+	// NMNamePrefix prefixes the NodeMaintenance CR names created by the must-gather and
+	// NotReady-node tests; the target node name is appended, matching the Polarion plan's
 	// `nodemaintenance-worker-0-0` and the Python's `node-maintenance-<node>`.
-	MustGatherNMNamePrefix = "node-maintenance-"
+	NMNamePrefix = "node-maintenance-"
 	// MustGatherReason is the spec.reason recorded on that CR.
 	MustGatherReason = "system-tests must-gather validation (RHWA-1251)"
 

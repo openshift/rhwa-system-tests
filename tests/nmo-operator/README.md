@@ -249,3 +249,18 @@ spec is not affected by spec ordering.
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="evicts the NMO pod" ./tests/nmo-operator/...`
 - **Pass criteria**: The NMO deployment is Ready; a Running NMO controller pod with all containers ready, owned by the NMO deployment, is found and its node recorded; stale NodeMaintenance CRs targeting that node are deleted; when the target is a control-plane node the etcd quorum PDB reports DisruptionsAllowed>=1 before the create; the NodeMaintenance CR is created and reaches Succeeded phase; the node is cordoned (Unschedulable=true) with both the medik8s.io/drain and node.kubernetes.io/unschedulable NoSchedule taints; DrainProgress=100 and PendingPods empty; every remaining pod on the node that is neither finished (Succeeded or Failed), nor terminating, nor one of the ownerless control-plane guard pods is owned by a DaemonSet or the Node; at least one Running NMO controller pod with all containers ready exists and none of the running controller pods is on the original node; on teardown the NMO deployment is Ready first, the NodeMaintenance CR is deleted, the node returns to Ready, uncordoned and free of the medik8s.io/drain taint, and the etcd quorum PDB allows a disruption again (best-effort, logged if incomplete; control-plane targets get the longer control-plane budgets)
+### 18. Verify Maintenance Can Be Started on a NotReady Node ([OCP-71186](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-71186))
+
+Stops kubelet on a control-plane node that does not host the NMO controller pod,
+waits for the node to become NotReady (Ready condition Unknown), and creates a
+NodeMaintenance CR for it. Because the drain cannot evict pods from a NotReady node,
+the CR is expected to reach Running -- not Succeeded -- while the node carries the
+exclude-from-remediation label. Deleting the CR removes the maintenance taints, and
+kubelet is restarted via SSH. Requires SSH access to cluster nodes (oc debug cannot
+restart a stopped kubelet); skips when no SSH key is available.
+
+- **Operators**: NMO v0.17.0+
+- **Cluster**: MNO with a Ready, schedulable control-plane node hosting neither the NMO controller pod nor the SSH bastion (skipped otherwise)
+- **Environment**: Connected or disconnected, with SSH access to cluster nodes; the private key is auto-discovered from `$CLUSTER_PROFILE_DIR/ssh-privatekey`, `/home/kni/.ssh/id_rsa` or `$HOME/.ssh/id_rsa` (on Prow AWS, via the ssh-bastion step)
+- **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="maintenance can be started on a NotReady node" ./tests/nmo-operator/...`
+- **Pass criteria**: An SSH key is available (skipped otherwise); the NMO deployment is Ready; a control-plane node hosting neither the NMO controller pod nor the SSH bastion is selected (skipped when no eligible node remains); kubelet is stopped on it via SSH and the node's Ready condition becomes Unknown; the NodeMaintenance CR is created for the NotReady node; the CR reaches Running phase; the node carries `remediation.medik8s.io/exclude-from-remediation=true`; the CR is deleted and fully removed; the `medik8s.io/drain` and `node.kubernetes.io/unschedulable` NoSchedule taints and the exclude-from-remediation label are removed from the node; kubelet is restarted via SSH and the node becomes Ready again; on teardown (even after a failed spec) the CR is deleted, kubelet is restarted when the node is NotReady, and the node returns to Ready, uncordoned and free of both maintenance taints (best-effort, logged if incomplete)
