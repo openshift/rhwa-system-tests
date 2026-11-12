@@ -216,11 +216,7 @@ var _ = Describe(
 			By("AfterAll: deleting StorageBasedRemediationConfig")
 
 			if testSBRC != nil {
-				deleteErr := APIClient.Delete(context.TODO(), testSBRC)
-				if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
-					GinkgoT().Logf("Warning: cleanup delete StorageBasedRemediationConfig %s: %v",
-						sbrparams.SBRCNHCTestName, deleteErr)
-				}
+				deleteSBRCAndWait(testSBRC, sbrparams.SBRCNHCTestName)
 			}
 
 			By("AfterAll: removing NodeHealthCheck CR if created by this test")
