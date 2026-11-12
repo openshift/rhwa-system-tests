@@ -264,3 +264,19 @@ restart a stopped kubelet); skips when no SSH key is available.
 - **Environment**: Connected or disconnected, with SSH access to cluster nodes; the private key is auto-discovered from `$CLUSTER_PROFILE_DIR/ssh-privatekey`, `/home/kni/.ssh/id_rsa` or `$HOME/.ssh/id_rsa` (on Prow AWS, via the ssh-bastion step)
 - **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="maintenance can be started on a NotReady node" ./tests/nmo-operator/...`
 - **Pass criteria**: An SSH key is available (skipped otherwise); the NMO deployment is Ready; a control-plane node hosting neither the NMO controller pod nor the SSH bastion is selected (skipped when no eligible node remains); kubelet is stopped on it via SSH and the node's Ready condition becomes Unknown; the NodeMaintenance CR is created for the NotReady node; the CR reaches Running phase; the node carries `remediation.medik8s.io/exclude-from-remediation=true`; the CR is deleted and fully removed; the `medik8s.io/drain` and `node.kubernetes.io/unschedulable` NoSchedule taints and the exclude-from-remediation label are removed from the node; kubelet is restarted via SSH and the node becomes Ready again; on teardown (even after a failed spec) the CR is deleted, kubelet is restarted when the node is NotReady, and the node returns to Ready, uncordoned and free of both maintenance taints (best-effort, logged if incomplete)
+
+### 19. Verify the SNR Agent Does Not Run on a Node Under NMO Maintenance ([OCP-69928](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-69928))
+
+Puts a worker node under NMO maintenance and verifies the exclude-from-remediation label
+keeps SNR off the node: SNR's agent DaemonSet excludes labelled nodes through a required
+node affinity, so the agent pod leaves the node while it is under maintenance and returns
+once maintenance ends. Ported from the Python `test_nmo_snr_conflict`; the Polarion plan's
+steps that create a SelfNodeRemediation CR and watch SNR decline to remediate it are
+intentionally not ported. Requires both NMO and SNR; skips on clusters where the
+SelfNodeRemediationConfig CRD is absent (the e2e-nmo-aws CI job installs only NMO).
+
+- **Operators**: NMO v0.17.0+, SNR
+- **Cluster**: MNO with at least 2 schedulable worker nodes; skipped when SNR is not installed or fewer workers exist
+- **Environment**: Connected or disconnected
+- **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="SNR agent does not run on a node under NMO maintenance" ./tests/nmo-operator/...`
+- **Pass criteria**: The NMO deployment is Ready; the SelfNodeRemediationConfig CRD exists (skipped otherwise); the SNR agent DaemonSet self-node-remediation-ds exists in the operator namespace; at least 2 schedulable non-control-plane worker nodes exist (skipped otherwise); an SNR agent pod is Running with all containers ready on the target worker before maintenance; the NodeMaintenance CR reaches Succeeded phase with the node cordoned (Unschedulable=true), the medik8s.io/drain NoSchedule taint applied, DrainProgress=100 and PendingPods empty; no SNR agent pod remains bound to the node; the node carries `remediation.medik8s.io/exclude-from-remediation=true`; no SNR agent pod appears on the node for the whole Consistently window; after deleting the NodeMaintenance CR the node is uncordoned (Unschedulable=false) with the drain taint removed and the exclude-from-remediation label absent; an SNR agent pod is Running with all containers ready on the node again; on teardown the NodeMaintenance CR is deleted and the node returns to Ready and uncordoned (best-effort, logged if incomplete)
