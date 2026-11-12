@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"reflect"
@@ -124,6 +125,9 @@ func (test *bpnFixture) releaseRequestWithin(ctx context.Context, request *unstr
 	var last error
 	err := wait.PollUntilContextCancel(ctx, sbrparams.BPNPoll, true, func(call context.Context) (bool, error) {
 		last = test.checkRestoredRestrictions(call)
+		if bpnIsPermanent(last) {
+			return false, last
+		}
 
 		return last == nil, nil
 	})
@@ -358,13 +362,22 @@ func bpnCleanupAPI(ctx context.Context, operation func(context.Context) error) e
 }
 
 func bpnCleanupPoll(timeout time.Duration, operation func(context.Context) error) error {
-	var last error
-	err := wait.PollUntilContextTimeout(context.Background(), sbrparams.BPNPoll, timeout, true,
-		func(ctx context.Context) (bool, error) {
-			last = operation(ctx)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-			return last == nil, nil
-		})
+	return bpnCleanupPollWithin(ctx, operation)
+}
+
+func bpnCleanupPollWithin(ctx context.Context, operation func(context.Context) error) error {
+	var last error
+	err := wait.PollUntilContextCancel(ctx, sbrparams.BPNPoll, true, func(call context.Context) (bool, error) {
+		last = operation(call)
+		if bpnIsPermanent(last) {
+			return false, last
+		}
+
+		return last == nil, nil
+	})
 	if err != nil {
 		return fmt.Errorf("%w: %w", err, last)
 	}
@@ -418,27 +431,48 @@ func (test *bpnFixture) cleanup() {
 	}
 	if test.prepared {
 		check("restore storage health", test.restoreStorageHealth)
-		for index, node := range test.nodes {
-			check("Node Ready "+node.initial.Name, func() error { return test.restoreNode(index) })
-		}
-	}
-	for _, request := range test.requests {
-		check("normal CR deletion", func() error { return test.removeCleanupRequest(request) })
-	}
-	if test.prepared {
-		check("SBR restriction release", func() error {
-			return bpnCleanupPoll(sbrparams.BPNRelease, test.checkRestoredRestrictions)
+		check("Nodes Ready", func() error {
+			return bpnCleanupPoll(sbrparams.BPNNodeReady, test.restoreNodes)
 		})
 	}
+	requestsReleased := test.releaseCleanupRequests(check)
 	if test.adminAdded {
 		check("remove administrator fixtures", func() error { return test.setAdministratorFixtures(false) })
 	}
 	check("remove test workload", test.removeWorkload)
-	test.removeCleanupFixtures(check)
+	if requestsReleased {
+		test.removeCleanupFixtures(check)
+	}
 	if test.prepared && len(failures) == 0 {
 		check("final restored observation", test.finalRestoredObservation)
 	}
 	completed = true
+}
+
+func (test *bpnFixture) releaseCleanupRequests(check func(string, func() error)) bool {
+	requestsReleased := true
+	for _, request := range test.requests {
+		released := false
+		check("normal CR deletion", func() error {
+			err := test.removeCleanupRequest(request)
+			released = err == nil
+
+			return err
+		})
+		requestsReleased = requestsReleased && released
+	}
+	if test.prepared {
+		released := false
+		check("SBR restriction release", func() error {
+			err := bpnCleanupPoll(sbrparams.BPNRelease, test.checkRestoredRestrictions)
+			released = err == nil
+
+			return err
+		})
+		requestsReleased = requestsReleased && released
+	}
+
+	return requestsReleased
 }
 
 func (test *bpnFixture) restoreCleanupFaults(check func(string, func() error)) bool {
@@ -499,16 +533,22 @@ func (test *bpnFixture) removeCleanupFixtures(check func(string, func() error)) 
 			return
 		}
 	}
-	for _, object := range []*unstructured.Unstructured{test.nhc, test.template, test.config} {
-		if object != nil && object.GetUID() != "" {
-			check("delete "+object.GetKind(), func() error { return test.deleteFixture(object) })
-		}
-	}
-	if len(owners) > 0 {
-		check("configuration-owned operands absent", func() error { return test.configurationGone(owners) })
-	}
-	for index, node := range test.nodes {
-		check("restore worker label "+node.initial.Name, func() error { return test.restoreWorkerLabel(index) })
+	removed := false
+	check("delete fixtures and configuration-owned operands", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), sbrparams.BPNAgentReady)
+		defer cancel()
+		err := test.deleteFixtures(ctx, owners)
+		removed = err == nil
+
+		return err
+	})
+	if removed {
+		check("restore worker labels", func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), sbrparams.BPNRelease)
+			defer cancel()
+
+			return test.restoreWorkerLabels(ctx)
+		})
 	}
 	check("delete workload namespace", test.deleteWorkloadNamespace)
 }
@@ -595,26 +635,35 @@ func (test *bpnFixture) restoreStorageHealth() error {
 	})
 }
 
-func (test *bpnFixture) restoreNode(index int) error {
-	return bpnCleanupPoll(sbrparams.BPNNodeReady, func(ctx context.Context) error {
-		node := test.nodes[index]
-		current, err := test.cleanupNode(ctx, index)
-		if err != nil {
-			return err
+func (test *bpnFixture) restoreNodes(ctx context.Context) error {
+	var failures []error
+	for index := range test.nodes {
+		if err := test.restoreNode(ctx, index); err != nil {
+			failures = append(failures, fmt.Errorf("node %s: %w", test.nodes[index].initial.Name, err))
 		}
-		if !helpers.IsNodeReady(current) {
-			return fmt.Errorf("node %s is not Ready", current.Name)
-		}
-		boot, err := node.host.BootID(ctx, sbrparams.BPNHostCall)
-		if err != nil {
-			return err
-		}
-		if current.Status.NodeInfo.BootID != boot {
-			return fmt.Errorf("node %s API and actual host boot IDs differ", current.Name)
-		}
+	}
 
-		return nil
-	})
+	return errors.Join(failures...)
+}
+
+func (test *bpnFixture) restoreNode(ctx context.Context, index int) error {
+	node := test.nodes[index]
+	current, err := test.cleanupNode(ctx, index)
+	if err != nil {
+		return err
+	}
+	if !helpers.IsNodeReady(current) {
+		return fmt.Errorf("node %s is not Ready", current.Name)
+	}
+	boot, err := node.host.BootID(ctx, sbrparams.BPNHostCall)
+	if err != nil {
+		return err
+	}
+	if current.Status.NodeInfo.BootID != boot {
+		return fmt.Errorf("node %s API and actual host boot IDs differ", current.Name)
+	}
+
+	return nil
 }
 
 func (test *bpnFixture) removeWorkload() error {
@@ -660,31 +709,73 @@ func (test *bpnFixture) removeWorkload() error {
 	})
 }
 
-func (test *bpnFixture) deleteFixture(object *unstructured.Unstructured) error {
-	return bpnCleanupPoll(sbrparams.BPNAgentReady, func(ctx context.Context) error {
-		current := &unstructured.Unstructured{}
-		current.SetGroupVersionKind(object.GroupVersionKind())
-		err := bpnCleanupAPI(ctx, func(call context.Context) error {
-			return APIClient.Get(call, client.ObjectKeyFromObject(object), current)
-		})
-		if apierrors.IsNotFound(err) {
-			return nil
+func (test *bpnFixture) deleteFixtures(ctx context.Context, owners map[types.UID]bool) error {
+	objects := []*unstructured.Unstructured{test.nhc, test.template, test.config}
+	finished := make(map[types.UID]bool)
+	var permanent []error
+	err := bpnCleanupPollWithin(ctx, func(call context.Context) error {
+		var pending []error
+		for _, object := range objects {
+			if object == nil || object.GetUID() == "" || finished[object.GetUID()] {
+				continue
+			}
+			deleteErr := test.deleteFixture(call, object)
+			if deleteErr == nil || bpnIsPermanent(deleteErr) {
+				finished[object.GetUID()] = true
+				if deleteErr != nil {
+					permanent = append(permanent, deleteErr)
+				}
+			} else {
+				pending = append(pending, deleteErr)
+			}
 		}
-		if err != nil {
-			return err
-		}
-		if current.GetUID() != object.GetUID() {
-			return fmt.Errorf("resource UID changed")
-		}
-		uid := object.GetUID()
-		if err = bpnCleanupAPI(ctx, func(call context.Context) error {
-			return APIClient.Delete(call, current, client.Preconditions{UID: &uid})
-		}); err != nil && !apierrors.IsNotFound(err) {
-			return err
+		if len(owners) > 0 {
+			if err := test.configurationGone(call, owners); err != nil {
+				pending = append(pending, err)
+			}
 		}
 
-		return fmt.Errorf("normal deletion remains pending")
+		return errors.Join(pending...)
 	})
+
+	return errors.Join(append(permanent, err)...)
+}
+
+func (test *bpnFixture) deleteFixture(ctx context.Context, object *unstructured.Unstructured) error {
+	current := &unstructured.Unstructured{}
+	current.SetGroupVersionKind(object.GroupVersionKind())
+	err := bpnCleanupAPI(ctx, func(call context.Context) error {
+		return APIClient.Get(call, client.ObjectKeyFromObject(object), current)
+	})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.GetUID() != object.GetUID() {
+		return bpnPermanentError{fmt.Errorf("%s %s UID changed", object.GetKind(), object.GetName())}
+	}
+	uid := object.GetUID()
+	if err = bpnCleanupAPI(ctx, func(call context.Context) error {
+		return APIClient.Delete(call, current, client.Preconditions{UID: &uid})
+	}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	err = bpnCleanupAPI(ctx, func(call context.Context) error {
+		return APIClient.Get(call, client.ObjectKeyFromObject(object), current)
+	})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.GetUID() != uid {
+		return bpnPermanentError{fmt.Errorf("%s %s UID changed during deletion", object.GetKind(), object.GetName())}
+	}
+
+	return fmt.Errorf("normal deletion of %s %s remains pending", object.GetKind(), object.GetName())
 }
 
 func (test *bpnFixture) configurationOwners(owners map[types.UID]bool) error {
@@ -704,18 +795,16 @@ func bpnOwnedBy(references []metav1.OwnerReference, owners map[types.UID]bool) b
 	return false
 }
 
-func (test *bpnFixture) configurationGone(owners map[types.UID]bool) error {
-	return bpnCleanupPoll(sbrparams.BPNAgentReady, func(ctx context.Context) error {
-		remaining, err := test.configurationOperands(ctx, owners)
-		if err != nil {
-			return err
-		}
-		if len(remaining) > 0 {
-			return fmt.Errorf("configuration-owned operands remain: %s", strings.Join(remaining, ", "))
-		}
+func (test *bpnFixture) configurationGone(ctx context.Context, owners map[types.UID]bool) error {
+	remaining, err := test.configurationOperands(ctx, owners)
+	if err != nil {
+		return err
+	}
+	if len(remaining) > 0 {
+		return fmt.Errorf("configuration-owned operands remain: %s", strings.Join(remaining, ", "))
+	}
 
-		return nil
-	})
+	return nil
 }
 
 func (test *bpnFixture) configurationOperands(ctx context.Context, owners map[types.UID]bool) ([]string, error) {
@@ -759,33 +848,69 @@ func (test *bpnFixture) configurationOperands(ctx context.Context, owners map[ty
 	return remaining, firstError
 }
 
-func (test *bpnFixture) restoreWorkerLabel(index int) error {
-	return bpnCleanupPoll(sbrparams.BPNRelease, func(ctx context.Context) error {
-		node, err := test.cleanupNode(ctx, index)
-		if err != nil {
-			return err
-		}
-		const key = "tests.medik8s.io/block-per-node"
-		original, originalExists := test.nodes[index].initial.Labels[key]
-		current, currentExists := node.Labels[key]
-		if originalExists == currentExists && original == current {
-			return nil
-		}
-		if current != test.name {
-			return fmt.Errorf("worker label has an unowned value %q", current)
-		}
-		if originalExists {
-			node.Labels[key] = original
-		} else {
-			delete(node.Labels, key)
+func (test *bpnFixture) restoreWorkerLabels(ctx context.Context) error {
+	finished := make(map[int]bool)
+	var permanent []error
+	err := bpnCleanupPollWithin(ctx, func(call context.Context) error {
+		var pending []error
+		for index, node := range test.nodes {
+			if finished[index] {
+				continue
+			}
+			labelErr := test.restoreWorkerLabel(call, index)
+			if labelErr == nil || bpnIsPermanent(labelErr) {
+				finished[index] = true
+				if labelErr != nil {
+					permanent = append(permanent, fmt.Errorf("node %s label: %w", node.initial.Name, labelErr))
+				}
+			} else {
+				pending = append(pending, fmt.Errorf("node %s label: %w", node.initial.Name, labelErr))
+			}
 		}
 
-		return bpnCleanupAPI(ctx, func(call context.Context) error {
-			_, err := APIClient.CoreV1Interface.Nodes().Update(call, node, metav1.UpdateOptions{})
-
-			return err
-		})
+		return errors.Join(pending...)
 	})
+
+	return errors.Join(append(permanent, err)...)
+}
+
+func (test *bpnFixture) restoreWorkerLabel(ctx context.Context, index int) error {
+	node, err := test.cleanupNode(ctx, index)
+	if err != nil {
+		return err
+	}
+	const key = "tests.medik8s.io/block-per-node"
+	original, originalExists := test.nodes[index].initial.Labels[key]
+	current, currentExists := node.Labels[key]
+	if originalExists == currentExists && original == current {
+		return nil
+	}
+	if current != test.name {
+		return bpnPermanentError{fmt.Errorf("worker label has an unowned value %q", current)}
+	}
+	if originalExists {
+		node.Labels[key] = original
+	} else {
+		delete(node.Labels, key)
+	}
+	err = bpnCleanupAPI(ctx, func(call context.Context) error {
+		_, err := APIClient.CoreV1Interface.Nodes().Update(call, node, metav1.UpdateOptions{})
+
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	node, err = test.cleanupNode(ctx, index)
+	if err != nil {
+		return err
+	}
+	current, currentExists = node.Labels[key]
+	if originalExists != currentExists || original != current {
+		return fmt.Errorf("worker label restoration awaits confirmation")
+	}
+
+	return nil
 }
 
 func (test *bpnFixture) deleteWorkloadNamespace() error {
@@ -867,11 +992,11 @@ func (test *bpnFixture) finalCleanupBoots() error {
 }
 
 func (test *bpnFixture) cleanupCoverage(from, through time.Time) error {
-	if err := test.crRecorder.Coverage(from, through); err != nil {
+	if err := bpnCoverage(test.crRecorder, from, through); err != nil {
 		return err
 	}
 	for _, node := range test.nodes {
-		if err := node.recorder.Coverage(from, through); err != nil {
+		if err := bpnCoverage(node.recorder, from, through); err != nil {
 			return err
 		}
 	}

@@ -28,10 +28,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-01")
 
 			By("Complete the baseline and observer-readiness procedure.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createActivePolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Record SBRStorageUnhealthy=False and the boot ID of each selected Node.")
 			test.requireHealth(corev1.ConditionFalse)
@@ -51,10 +51,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-02")
 
 			By("Complete the baseline and confirm that all observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createActivePolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Prepare API-loss rules for all three selected Nodes.")
 			faults := make([]*sbrutils.BlockNetworkFault, 0, 3)
@@ -84,10 +84,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-03A")
 
 			By("Complete the baseline and observer-readiness procedure.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Confirm the test NHC contains pauseRequests: [sbr-block-test].")
 			paused, _, err := unstructured.NestedStringSlice(test.nhc.Object, "spec", "pauseRequests")
@@ -104,10 +104,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			}
 
 			By("Confirm each fault. Require SBRStorageUnhealthy=True on each Node within HEALTH_CHANGE.")
-			test.requireUnhealthy()
-
 			By("Keep all faults active for NO_REBOOT after the last activation.")
-			test.observeNoRebootWithoutRequests()
+			test.observeStorageFaults(0, 1, 2)
 
 			By("Remove the faults. Require False storage conditions.")
 			test.restoreFaults()
@@ -122,10 +120,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-03B")
 
 			By("Complete the baseline and start all required observers.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Reject storage traffic on all three workers. Use the persistent fault handle on the target.")
 			faults := make([]*sbrutils.BlockNetworkFault, 0, 3)
@@ -170,11 +168,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-04A")
 
 			By("Complete the baseline, autonomous preparation, and observer-readiness procedure.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
-			test.autonomousPreparation(sbrparams.BPNProfileDRecovery)
+			test.autonomousPreparation()
 
 			By("Prepare persistent storage-loss and API-loss rules on the target.")
 			storage := test.prepareFault(0, sbrutils.BlockStorageLoss, true)
@@ -212,10 +209,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-04B")
 
 			By("Complete the baseline and start observers before the preparatory request.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Create one SBR CR. Require the common requested-remediation result.")
 			request, requestDispatchedAt := test.request()
@@ -232,7 +229,7 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			Expect(retained).To(Equal(request.GetUID()))
 
 			By("Record the current host boot ID. Complete autonomous preparation.")
-			test.autonomousPreparation(sbrparams.BPNProfileDRecovery)
+			test.autonomousPreparation()
 
 			By("Establish the first combined outage through Section 4.5. Observe a changed host boot ID.")
 			storage := test.prepareFault(0, sbrutils.BlockStorageLoss, true)
@@ -265,10 +262,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-05A")
 
 			By("Complete the baseline and confirm observer readiness.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createActivePolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Reject the target's API traffic. Confirm the transport fault.")
 			fault := test.prepareFault(0, sbrutils.BlockAPILoss, false)
@@ -290,10 +287,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-05B")
 
 			By("Complete the baseline and confirm all observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createActivePolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Prepare the singleton-isolation rules with explicit storage and SSH exceptions.")
 			fault := test.prepareFault(0, sbrutils.BlockSingletonIsolation, false)
@@ -317,11 +314,11 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-06")
 
 			By("Complete the baseline. Start CR, Node, host, and workload observers before the fault.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createActivePolicy()
 			test.requireComponentsReady()
 			test.createWorkload()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Record the workload Pod UID and all host boot IDs.")
 			Expect(test.workload.UID).NotTo(BeEmpty())
@@ -414,10 +411,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-07")
 
 			By("Complete the baseline and confirm Node and host observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Save /proc/sys/kernel/sysrq and /proc/sys/kernel/panic through SSH.")
 			settings := &bpnHostSettings{host: test.nodes[0].host}
@@ -460,10 +457,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-08")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Record the target agent Pod UID and all host boot IDs.")
 			var original *corev1.Pod
@@ -495,10 +492,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-09")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createActivePolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Stop target kubelet through SSH.")
 			settings := &bpnHostSettings{host: test.nodes[0].host, kubeletStopped: true}
@@ -534,10 +531,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-10A")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Prepare the owned storage traffic class with a 20s delay.")
 			fault := test.prepareFault(0, sbrutils.BlockStorageLatency, false)
@@ -546,10 +543,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.activate(fault)
 
 			By("Require SBRStorageUnhealthy=True within HEALTH_CHANGE.")
-			test.requireUnhealthy(0)
-
 			By("Keep the latency active for NO_REBOOT after activation.")
-			test.observeNoRebootWithoutRequests()
+			test.observeStorageFaults(0)
 
 			By("Remove the owned traffic-control objects. Require False storage health.")
 			test.restoreFaults()
@@ -564,20 +559,18 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-10B")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Activate target storage DROP rules. Confirm matching traffic.")
 			fault := test.prepareFault(0, sbrutils.BlockStorageTimeout, false)
 			test.activate(fault)
 
 			By("Require SBRStorageUnhealthy=True within HEALTH_CHANGE.")
-			test.requireUnhealthy(0)
-
 			By("Keep the DROP rules active for NO_REBOOT after activation.")
-			test.observeNoRebootWithoutRequests()
+			test.observeStorageFaults(0)
 
 			By("Remove the DROP rules. Require False storage health.")
 			test.restoreFaults()
@@ -592,10 +585,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-10C")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Drop storage traffic on both peers. Confirm both faults.")
 			faults := make([]*sbrutils.BlockNetworkFault, 0, 2)
@@ -641,10 +634,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-11")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createActivePolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Prepare rules for both directions of the worker-group partition.")
 			faults := []*sbrutils.BlockNetworkFault{test.prepareFault(0, sbrutils.BlockGroupPartition, false)}
@@ -682,10 +675,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-12A")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Reject target storage traffic. Require True storage health.")
 			fault := test.prepareFault(0, sbrutils.BlockStorageLoss, false)
@@ -725,10 +718,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-12B")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Prepare the target API fault without activating it.")
 			fault := test.prepareFault(0, sbrutils.BlockAPILoss, false)
@@ -767,12 +760,12 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-15A")
 
 			By("Complete the baseline and start all Node, CR, host, and Pod observers.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
 			test.createWorkload()
 			test.holdWorkloadWithFinalizer()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Record the test Pod UID. Request normal Pod deletion without removing its finalizer.")
 			test.retainPod()
@@ -842,12 +835,12 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-15B")
 
 			By("Start observers and complete the common healthy preparation before adding the administrator fixtures.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
 			test.createWorkload()
 			test.holdWorkloadWithFinalizer()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Make the test Pod terminating with its finalizer retained, as in case 15A.")
 			test.retainPod()
@@ -920,10 +913,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-16A")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Save the state directory's existing flags. Add only its immutable flag.")
 			journal := test.journal(0)
@@ -963,10 +956,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-16B")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Apply the immutable-directory fault. Confirm failed temporary file creation.")
 			journal := test.journal(0)
@@ -999,10 +992,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-16C")
 
 			By("Complete the baseline and confirm all observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Apply the immutable-directory fault to each peer. Confirm both access failures.")
 			first, second := test.journal(1), test.journal(2)
@@ -1037,10 +1030,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-17A")
 
 			By("Complete the baseline and confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
+			test.establishBaseline(sbrparams.BPNBaseline)
 
 			By("Apply persistent target storage loss. Require True storage health.")
 			storage := test.prepareFault(0, sbrutils.BlockStorageLoss, true)
@@ -1089,11 +1082,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-17B")
 
 			By("Complete autonomous preparation and confirm all observers are ready.")
-			test.prepare(sbrparams.BPNProfileDRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
-			test.autonomousPreparation(sbrparams.BPNProfileDRecovery)
+			test.autonomousPreparation()
 
 			By("Establish the first combined outage through Section 4.5. Observe the first changed host boot ID.")
 			storage, api, from := test.combined()
@@ -1139,11 +1131,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-17C")
 
 			By("Complete the baseline, autonomous preparation, and observer-readiness procedure.")
-			test.prepare(sbrparams.BPNProfileRRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
-			test.autonomousPreparation(sbrparams.BPNProfileRRecovery)
+			test.autonomousPreparation()
 
 			By("Establish the first combined outage through Section 4.5. Observe a changed host boot ID.")
 			storage, api, from := test.combined()
@@ -1165,7 +1156,7 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			By("Dispatch both fault commands at 20s. Confirm both faults before the window reaches 60s.")
 			test.activate(storage)
 			test.activate(api)
-			if time.Since(recoveryStart) >= sbrparams.BPNProfileRRecovery {
+			if time.Since(recoveryStart) >= sbrparams.BPNRecoveryPeriod {
 				Fail("INCONCLUSIVE: the possible healthy interval reached 60s")
 			}
 
@@ -1182,11 +1173,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-17D")
 
 			By("Complete the baseline and autonomous preparation. Confirm observers are ready.")
-			test.prepare(sbrparams.BPNProfileRRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
-			test.autonomousPreparation(sbrparams.BPNProfileRRecovery)
+			test.autonomousPreparation()
 
 			By("Establish the first combined outage through Section 4.5. Observe the first changed host boot ID.")
 			storage, api, from := test.combined()
@@ -1202,7 +1192,7 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.requireHealth(corev1.ConditionFalse)
 
 			By("Observe both healthy results continuously for 60s plus REARM_SETTLE, totaling 120s.")
-			test.healthyContinuous(sbrparams.BPNProfileRRecovery + sbrparams.BPNRearmSettle)
+			test.healthyContinuous(sbrparams.BPNRecoveryPeriod + sbrparams.BPNRearmSettle)
 
 			By("Record the current host boot ID. Apply a new persistent combined outage.")
 			test.activate(storage)
@@ -1226,11 +1216,10 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test := newBPNFixture("RHWA-1839-17E")
 
 			By("Complete autonomous preparation and confirm all observers are ready.")
-			test.prepare(sbrparams.BPNProfileRRecovery)
+			test.prepare()
 			test.createPausedPolicy()
 			test.requireComponentsReady()
-			test.establishBaseline()
-			test.autonomousPreparation(sbrparams.BPNProfileRRecovery)
+			test.autonomousPreparation()
 
 			By("Establish the first combined outage through Section 4.5. Observe the first changed host boot ID.")
 			storage, api, from := test.combined()
@@ -1251,7 +1240,7 @@ var _ = Describe("SBR BlockPerNode", Serial,
 
 			By("Dispatch the API fault at 40s. Keep confirmed API loss active for RECOVERY_BREAK=20s while storage remains available.")
 			test.activate(api)
-			if time.Since(recoveryStart) >= sbrparams.BPNProfileRRecovery {
+			if time.Since(recoveryStart) >= sbrparams.BPNRecoveryPeriod {
 				Fail("INCONCLUSIVE: the first possible healthy interval reached 60s")
 			}
 			firstEnd := api.Evidence().DispatchedAt
@@ -1267,13 +1256,13 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			secondEnd := time.Now()
 			test.activate(storage)
 			test.activate(api)
-			if time.Since(secondStart) >= sbrparams.BPNProfileRRecovery {
+			if time.Since(secondStart) >= sbrparams.BPNRecoveryPeriod {
 				Fail("INCONCLUSIVE: the second possible healthy interval reached 60s")
 			}
 
 			By("Require the confirmed healthy intervals to total more than 60s. Apply the bounds in Section 4.5.")
 			confirmedTotal := firstEnd.Sub(confirmedFirst) + secondEnd.Sub(confirmedSecond)
-			if confirmedTotal <= sbrparams.BPNProfileRRecovery {
+			if confirmedTotal <= sbrparams.BPNRecoveryPeriod {
 				Fail("INCONCLUSIVE: confirmed healthy time did not exceed 60s in total")
 			}
 			test.coverage(confirmedFirst, time.Now(), false)

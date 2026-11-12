@@ -712,5 +712,6 @@ ginkgo -v --procs=1 --timeout=2h --focus='RHWA-1839-06([[:space:]]|$)' ./tests/s
 tools/watch/sbr-watch.sh --loop -n 5
 ```
 
-Profile D retains the five-minute recovery period. Only cases 17C, 17D, and 17E use one minute.
+All 28 cases explicitly configure one-minute autonomous recovery with a 60s additional allowance.
+Explicit five-minute configuration and omitted-field defaulting are outside this suite.
 Rows 13 and 14, version upgrades, power loss, journal contents, and reboot mechanism attribution remain outside this scope.

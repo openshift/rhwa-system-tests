@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -51,7 +52,7 @@ func TestBPNUnhealthyRejectsLateObservedState(t *testing.T) {
 	caseRun, observedAt, api := bpnHealthTestCase(t, corev1.ConditionTrue)
 	active := observedAt.Add(-sbrparams.BPNHealthChange - time.Minute)
 	caseRun.healthFaults[0] = sbrutils.BlockFaultEvidence{DispatchedAt: active.Add(-time.Second), ActiveAt: active}
-	if _, err := caseRun.waitUnhealthy(0); err == nil {
+	if _, err := caseRun.waitUnhealthy(0, nil); err == nil {
 		t.Fatal("a late current True state must not prove health changed within the fault deadline")
 	}
 	if len(api.Actions()) != 0 {
@@ -64,7 +65,7 @@ func TestBPNUnhealthyRequiresCurrentTrueState(t *testing.T) {
 	caseRun.healthFaults[0] = sbrutils.BlockFaultEvidence{
 		DispatchedAt: observedAt.Add(-time.Second), ActiveAt: observedAt,
 	}
-	firstObserved, err := caseRun.waitUnhealthy(0)
+	firstObserved, err := caseRun.waitUnhealthy(0, nil)
 	if err == nil || !firstObserved.Equal(observedAt) {
 		t.Fatalf("timely history must not conceal a current False state: first=%s, err=%v", firstObserved, err)
 	}
@@ -78,7 +79,7 @@ func TestBPNUnhealthyPreservesEvidenceAfterLaterFaultPreparation(t *testing.T) {
 	timer := time.NewTimer(time.Until(deadline) + time.Millisecond)
 	defer timer.Stop()
 	<-timer.C
-	firstObserved, err := caseRun.waitUnhealthy(0)
+	firstObserved, err := caseRun.waitUnhealthy(0, nil)
 	if err != nil || !firstObserved.Equal(observedAt) {
 		t.Fatalf("timely history must survive a later assertion: first=%s, err=%v", firstObserved, err)
 	}
@@ -152,5 +153,42 @@ func TestBPNUnhealthyRejectsUnrelatedAndDeletedEvidence(t *testing.T) {
 				t.Fatal("unrelated or absent state must not prove a timely unhealthy condition")
 			}
 		})
+	}
+}
+
+func TestBPNUnhealthyChecksNegativeEvidenceBeforeHealth(t *testing.T) {
+	caseRun, observedAt, api := bpnHealthTestCase(t, corev1.ConditionTrue)
+	caseRun.healthFaults[0] = sbrutils.BlockFaultEvidence{
+		DispatchedAt: observedAt.Add(-time.Second), ActiveAt: observedAt,
+	}
+	prohibited := errors.New("a reboot occurred during health detection")
+	_, err := caseRun.waitUnhealthy(0, func() error { return prohibited })
+	if !errors.Is(err, prohibited) {
+		t.Fatalf("health detection must preserve the negative evidence failure: %v", err)
+	}
+	if len(api.Actions()) != 0 {
+		t.Fatal("prohibited evidence must stop the health wait before another API read")
+	}
+}
+
+func TestBPNStorageObservationUsesLastConfirmedActivation(t *testing.T) {
+	start := time.Now().Add(-2 * time.Minute)
+	faults := map[int]sbrutils.BlockFaultEvidence{
+		0: {DispatchedAt: start.Add(-time.Second), ActiveAt: start},
+		1: {DispatchedAt: start, ActiveAt: start.Add(10 * time.Second)},
+		2: {DispatchedAt: start, ActiveAt: start.Add(20 * time.Second)},
+	}
+	deadline, err := bpnStorageObservationDeadline(faults, 0, 1, 2)
+	if err != nil || !deadline.Equal(faults[2].ActiveAt.Add(sbrparams.BPNNoReboot)) {
+		t.Fatalf("broad fault deadline must use the last activation: %s, %v", deadline, err)
+	}
+	deadline, err = bpnStorageObservationDeadline(faults, 0)
+	if err != nil || !deadline.Equal(start.Add(sbrparams.BPNNoReboot)) {
+		t.Fatalf("single fault deadline must include elapsed health detection: %s, %v", deadline, err)
+	}
+	for _, indices := range [][]int{nil, {3}, {0, 3}} {
+		if _, err := bpnStorageObservationDeadline(faults, indices...); err == nil {
+			t.Fatalf("missing activation evidence must fail: %v", indices)
+		}
 	}
 }

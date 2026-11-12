@@ -122,11 +122,11 @@ func (test *bpnFixture) api(operation func(context.Context) error) error {
 
 func (test *bpnFixture) eventually(timeout time.Duration, reason string, operation func(context.Context) error) {
 	GinkgoHelper()
-	Eventually(func() error { return test.api(operation) }, timeout, sbrparams.BPNPoll).
+	Eventually(func() error { return bpnRetryResult(test.api(operation)) }, timeout, sbrparams.BPNPoll).
 		Should(Succeed(), reason)
 }
 
-func (test *bpnFixture) prepare(recoveryPeriod time.Duration) {
+func (test *bpnFixture) prepare() {
 	GinkgoHelper()
 	test.prepareNodes()
 	storageClass, err := sbrutils.DiscoverRBDStorageClass(test.ctx, APIClient, sbrparams.SBRRBDStorageClass)
@@ -161,7 +161,7 @@ func (test *bpnFixture) prepare(recoveryPeriod time.Duration) {
 		"sharedStorageVolumeMode": "BlockPerNode", "sharedStorageClass": storageClass,
 		"ioTimeout": "15s", "sbrTimeoutSeconds": int64(sbrparams.BPNSBRTimeoutSeconds),
 		"maxConsecutiveFailures": int64(sbrparams.BPNMaxConsecutiveFailures),
-		"totalOutageGracePeriod": "60s", "autonomousRebootRecoveryPeriod": recoveryPeriod.String(),
+		"totalOutageGracePeriod": "60s", "autonomousRebootRecoveryPeriod": sbrparams.BPNRecoveryPeriod.String(),
 		"detectOnlyMode": "Disabled", "watchdogPath": sbrparams.AgentDefaultWatchdogPath,
 	})
 	expectedConfigSpec, _, err := unstructured.NestedMap(test.config.Object, "spec")
@@ -473,7 +473,7 @@ func (test *bpnFixture) nodesEvidence() []map[string]interface{} {
 func (test *bpnFixture) getNode(ctx context.Context, index int) (*corev1.Node, error) {
 	node, err := APIClient.CoreV1Interface.Nodes().Get(ctx, test.nodes[index].initial.Name, metav1.GetOptions{})
 	if err == nil && node.UID != test.nodes[index].initial.UID {
-		return nil, fmt.Errorf("node UID changed for %s", node.Name)
+		return nil, bpnPermanentError{fmt.Errorf("node UID changed for %s", node.Name)}
 	}
 
 	return node, err
@@ -492,12 +492,12 @@ func (test *bpnFixture) requireComponentsReady() {
 	test.requireHealth(corev1.ConditionFalse)
 }
 
-func (test *bpnFixture) establishBaseline() {
+func (test *bpnFixture) establishBaseline(duration time.Duration) {
 	GinkgoHelper()
 	test.baseline = time.Now()
 	test.quietSince = test.baseline
-	test.observeHealthyWithoutRequests(sbrparams.BPNBaseline)
 	test.prepared = true
+	test.observeHealthyWithoutRequests(duration)
 	storageClass, _, _ := unstructured.NestedString(test.config.Object, "spec", "sharedStorageClass")
 	recoveryPeriod, _, _ := unstructured.NestedString(test.config.Object, "spec", "autonomousRebootRecoveryPeriod")
 	AddReportEntry("bpn-identities", map[string]interface{}{

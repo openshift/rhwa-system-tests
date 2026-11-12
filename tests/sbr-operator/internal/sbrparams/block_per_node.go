@@ -12,8 +12,7 @@ const (
 	BPNIOTimeout              = 15 * time.Second
 	BPNEvaluationInterval     = 5 * time.Second
 	BPNTotalOutageGracePeriod = 60 * time.Second
-	BPNProfileDRecovery       = 5 * time.Minute
-	BPNProfileRRecovery       = time.Minute
+	BPNRecoveryPeriod         = time.Minute
 	BPNNHCUnhealthyDuration   = 30 * time.Second
 	BPNWatchdogMaxTimeout     = 120 * time.Second
 

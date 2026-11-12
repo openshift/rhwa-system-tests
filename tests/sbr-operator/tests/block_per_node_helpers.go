@@ -113,6 +113,10 @@ func (test *bpnFixture) requireAgentRunning(rebootObservedAt time.Time) {
 				return bpnRunningAgent(pod)
 			})
 
+			if bpnIsPermanent(last) {
+				return false, last
+			}
+
 			return last == nil, nil
 		})
 	if err != nil && !rebootObservedAt.IsZero() {

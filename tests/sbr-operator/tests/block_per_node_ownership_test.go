@@ -107,7 +107,7 @@ func TestBPNConfigurationOwnershipPreservesUnownedReplacements(t *testing.T) {
 	}
 	testCase, fakeClient := bpnOwnershipFixture(t, objects...)
 	owners := map[types.UID]bool{"config": true, "old-set": true, "old-pod": true, "old-claim": true}
-	if err := testCase.configurationGone(owners); err != nil {
+	if err := testCase.configurationGone(context.Background(), owners); err != nil {
 		t.Fatal(err)
 	}
 	for _, object := range objects {

@@ -2,7 +2,9 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,5 +184,45 @@ func TestBPNObservationRejectsUnhealthyBaselineWithoutLaterEvents(t *testing.T) 
 				t.Fatalf("initial health error = %v, want error %t", err, unhealthy)
 			}
 		})
+	}
+}
+
+func TestBPNPermanentCoverageUsesOnlyRequiredInterval(t *testing.T) {
+	start := time.Now().Add(-time.Minute)
+	for _, example := range []struct {
+		name             string
+		gapStart, gapEnd time.Time
+		wantPermanent    bool
+	}{
+		{"earlier history", start.Add(-time.Minute), start.Add(-time.Second), false},
+		{"later history", start.Add(2 * time.Minute), start.Add(3 * time.Minute), false},
+		{"intersecting history", start.Add(-time.Second), start.Add(time.Second), true},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			snapshot := helpers.RecorderSnapshot[*corev1.Node]{
+				PendingSince: start,
+				Gaps:         []helpers.RecorderGap{{StartedAt: example.gapStart, EndedAt: example.gapEnd, Reason: "expired"}},
+			}
+			err := bpnPermanentCoverage(snapshot, start, start.Add(time.Minute))
+			if bpnIsPermanent(err) != example.wantPermanent {
+				t.Fatalf("permanent coverage failure = %v, want %t", err, example.wantPermanent)
+			}
+		})
+	}
+	snapshot := helpers.RecorderSnapshot[*corev1.Node]{PendingSince: start}
+	if err := bpnPermanentCoverage(snapshot, start, time.Now()); err != nil {
+		t.Fatalf("pending replay must remain retryable: %v", err)
+	}
+}
+
+func TestBPNRetryResultStopsOnlyPermanentEvidence(t *testing.T) {
+	transient := fmt.Errorf("temporary API failure")
+	if !errors.Is(bpnRetryResult(transient), transient) || bpnRetryResult(nil) != nil {
+		t.Fatal("transient errors and success must retain their normal polling behavior")
+	}
+	permanent := bpnPermanentError{fmt.Errorf("Node UID changed")}
+	if result := bpnRetryResult(fmt.Errorf("Node check: %w", permanent)); result == nil ||
+		!strings.Contains(result.Error(), "Required evidence cannot recover") {
+		t.Fatalf("permanent wrapped evidence must stop retries: %v", result)
 	}
 }

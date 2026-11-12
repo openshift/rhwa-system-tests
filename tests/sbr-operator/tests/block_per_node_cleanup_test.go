@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -301,5 +302,224 @@ func TestBPNAdministratorCleanupPreservesExistingFixtureTaint(t *testing.T) {
 	}
 	if !bpnOwnedAdministratorTaint(fixture, &corev1.Node{}) {
 		t.Fatal("cleanup must identify the fixture added by this test")
+	}
+}
+
+type bpnPhaseNodes struct {
+	typedcorev1.NodeInterface
+	nodes     map[string]*corev1.Node
+	deadlines []time.Time
+	checked   []string
+}
+
+func (nodes *bpnPhaseNodes) Get(ctx context.Context, name string, _ metav1.GetOptions) (*corev1.Node, error) {
+	deadline, _ := ctx.Deadline()
+	nodes.deadlines = append(nodes.deadlines, deadline)
+	nodes.checked = append(nodes.checked, name)
+
+	return nodes.nodes[name].DeepCopy(), nil
+}
+
+func (nodes *bpnPhaseNodes) Update(ctx context.Context, node *corev1.Node,
+	_ metav1.UpdateOptions,
+) (*corev1.Node, error) {
+	deadline, _ := ctx.Deadline()
+	nodes.deadlines = append(nodes.deadlines, deadline)
+	nodes.nodes[node.Name] = node.DeepCopy()
+
+	return node.DeepCopy(), nil
+}
+
+func bpnPhaseFixture(t *testing.T) (*bpnFixture, *bpnPhaseNodes) {
+	t.Helper()
+	fixture := &bpnFixture{name: "owned"}
+	nodes := &bpnPhaseNodes{nodes: map[string]*corev1.Node{}}
+	for index := range 3 {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("worker-%d", index), UID: types.UID(fmt.Sprintf("uid-%d", index)),
+		}}
+		fixture.nodes = append(fixture.nodes, &bpnNode{initial: node.DeepCopy()})
+		node.Labels = map[string]string{"tests.medik8s.io/block-per-node": fixture.name}
+		nodes.nodes[node.Name] = node
+	}
+	originalClient := APIClient
+	APIClient = &clients.Settings{CoreV1Interface: bpnCleanupCore{nodes: nodes}}
+	t.Cleanup(func() { APIClient = originalClient })
+
+	return fixture, nodes
+}
+
+func TestBPNNodeCleanupChecksAllNodesWithinOneDeadline(t *testing.T) {
+	fixture, nodes := bpnPhaseFixture(t)
+	nodes.nodes["worker-0"].UID = "replacement"
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	err := bpnCleanupPollWithin(ctx, fixture.restoreNodes)
+	if !bpnIsPermanent(err) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("changed identity must stop this phase promptly: %v", err)
+	}
+	if len(nodes.checked) != 3 {
+		t.Fatalf("all three Nodes must be checked: %v", nodes.checked)
+	}
+	for _, observed := range nodes.deadlines {
+		if !observed.Equal(deadline) {
+			t.Fatalf("Node checks must share deadline %s, observed %s", deadline, observed)
+		}
+	}
+	for _, name := range []string{"worker-0", "worker-1", "worker-2"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("cleanup must retain each Node failure: %v", err)
+		}
+	}
+}
+
+func TestBPNLabelsRestoreOtherNodesAfterPermanentFailure(t *testing.T) {
+	fixture, nodes := bpnPhaseFixture(t)
+	const key = "tests.medik8s.io/block-per-node"
+	nodes.nodes["worker-0"].UID = "replacement"
+	fixture.nodes[2].initial.Labels = map[string]string{key: "original"}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	err := fixture.restoreWorkerLabels(ctx)
+	if !bpnIsPermanent(err) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("permanent label failure must remain a failure: %v", err)
+	}
+	if nodes.nodes["worker-0"].Labels[key] != fixture.name {
+		t.Fatal("cleanup must not modify a replacement Node")
+	}
+	if _, present := nodes.nodes["worker-1"].Labels[key]; present {
+		t.Fatal("cleanup must still remove the second Node's owned label")
+	}
+	if nodes.nodes["worker-2"].Labels[key] != "original" {
+		t.Fatal("cleanup must still restore the third Node's original label")
+	}
+	for _, observed := range nodes.deadlines {
+		if !observed.Equal(deadline) {
+			t.Fatalf("label checks and updates must share deadline %s, observed %s", deadline, observed)
+		}
+	}
+}
+
+func TestBPNCleanupPollRetriesTransientErrors(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	transient := errors.New("API temporarily unavailable")
+	err := bpnCleanupPollWithin(ctx, func(context.Context) error { return transient })
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, transient) || bpnIsPermanent(err) {
+		t.Fatalf("a transient error must retain the retry deadline: %v", err)
+	}
+}
+
+type bpnPhaseFixtures struct {
+	client.Client
+	objects   map[string]*unstructured.Unstructured
+	deleted   []string
+	deadlines []time.Time
+}
+
+func (fixtures *bpnPhaseFixtures) Get(ctx context.Context, key client.ObjectKey, object client.Object,
+	_ ...client.GetOption,
+) error {
+	deadline, _ := ctx.Deadline()
+	fixtures.deadlines = append(fixtures.deadlines, deadline)
+	current := fixtures.objects[key.Name]
+	if current == nil {
+		return apierrors.NewNotFound(schema.GroupResource{Resource: "fixtures"}, key.Name)
+	}
+	target, ok := object.(*unstructured.Unstructured)
+	if !ok {
+		return fmt.Errorf("unexpected fixture type %T", object)
+	}
+	current.DeepCopyInto(target)
+
+	return nil
+}
+
+func (fixtures *bpnPhaseFixtures) Delete(ctx context.Context, object client.Object,
+	options ...client.DeleteOption,
+) error {
+	deadline, _ := ctx.Deadline()
+	fixtures.deadlines = append(fixtures.deadlines, deadline)
+	deleteOptions := &client.DeleteOptions{}
+	for _, option := range options {
+		option.ApplyToDelete(deleteOptions)
+	}
+	if deleteOptions.Preconditions == nil || deleteOptions.Preconditions.UID == nil ||
+		*deleteOptions.Preconditions.UID != object.GetUID() {
+		return errors.New("fixture deletion needs the original UID precondition")
+	}
+	fixtures.deleted = append(fixtures.deleted, object.GetName())
+	if len(object.GetFinalizers()) == 0 {
+		delete(fixtures.objects, object.GetName())
+	}
+
+	return nil
+}
+
+func TestBPNFixtureDeletionSharesOnePhase(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		t.Run(fmt.Sprintf("held=%t", held), func(t *testing.T) {
+			fixture := &bpnFixture{}
+			api := &bpnPhaseFixtures{objects: map[string]*unstructured.Unstructured{}}
+			for index, name := range []string{"nhc", "template", "config"} {
+				object := bpnCleanupRequest()
+				object.SetName(name)
+				object.SetUID(types.UID(name))
+				if held && index == 0 {
+					object.SetFinalizers([]string{"preserve"})
+				}
+				api.objects[name] = object.DeepCopy()
+				switch index {
+				case 0:
+					fixture.nhc = object
+				case 1:
+					fixture.template = object
+				case 2:
+					fixture.config = object
+				}
+			}
+			originalClient := APIClient
+			APIClient = &clients.Settings{Client: api}
+			t.Cleanup(func() { APIClient = originalClient })
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer cancel()
+			deadline, _ := ctx.Deadline()
+			err := fixture.deleteFixtures(ctx, nil)
+			if (err != nil) != held {
+				t.Fatalf("normal deletion result = %v, held finalizer = %t", err, held)
+			}
+			if len(api.deleted) != 3 {
+				t.Fatalf("all deletions must start without a serial wait: %v", api.deleted)
+			}
+			if held && len(api.objects["nhc"].GetFinalizers()) != 1 {
+				t.Fatal("normal deletion must preserve finalizers")
+			}
+			for _, observed := range api.deadlines {
+				if !observed.Equal(deadline) {
+					t.Fatalf("fixture calls must share deadline %s, observed %s", deadline, observed)
+				}
+			}
+		})
+	}
+}
+
+func TestBPNFixturePhaseWaitsForOwnedOperands(t *testing.T) {
+	claim := bpnOwnershipObject("PersistentVolumeClaim", "probe", "claim", "config")
+	fixture, _ := bpnOwnershipFixture(t, claim)
+	fixture.config = bpnCleanupRequest()
+	fixture.config.SetName("config")
+	fixture.config.SetUID("config")
+	api := &bpnPhaseFixtures{objects: map[string]*unstructured.Unstructured{"config": fixture.config.DeepCopy()}}
+	APIClient.Client = api
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	err := fixture.deleteFixtures(ctx, map[types.UID]bool{"config": true, "claim": true})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "probe") {
+		t.Fatalf("the shared fixture phase must wait for its owned claim: %v", err)
+	}
+	if len(api.objects) != 0 || len(api.deleted) != 1 {
+		t.Fatal("fixture deletion must finish before waiting for its remaining operands")
 	}
 }
