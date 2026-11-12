@@ -7,12 +7,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/pod"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
 	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
-	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,39 +26,31 @@ var _ = Describe(
 	ContinueOnFailure,
 	Label(labels.OperatorSBR, labels.ComponentRemediation), func() {
 		var (
-			targetNodeName     string
-			setupSBRC          *unstructured.Unstructured
-			rbdStorageClass    string
-			originalBootID     string
-			fencingSlotsBefore string
-			fencingSlotsAfter  string
+			targetNodeName   string
+			targetNodeID     uint16
+			observerPodName  string
+			setupSBRC        *unstructured.Unstructured
+			originalBootID   string
+			postRebootBootID string
 		)
 
 		BeforeAll(func() {
-			Skip("RHWA-1987: flaky — agent containers not ready after node reboot")
-
 			By("Clearing residual Ceph OSD blocklist entries from prior tests")
 			clearCephOSDBlocklist()
 
-			By("Discovering Ceph RBD block storage class")
-
-			rbdStorageClass = discoverCephRBDStorageClass()
-			Expect(rbdStorageClass).ToNot(BeEmpty(),
-				"No Ceph RBD storage class found; set SBR_RBD_STORAGE_CLASS env or deploy ODF before running")
-			GinkgoWriter.Printf("Using Ceph RBD storage class: %s\n", rbdStorageClass)
-
-			By("Verifying the installed SBR operator supports sharedStorageVolumeMode")
-
+			// An NHC remediating through the SBR template would create its own
+			// StorageBasedRemediation CR for this node and break the "exactly once" assertion.
+			requireNoSBRNodeHealthCheck()
 			requireSBRCBlockVolumeModeSupport()
+			setupSBRC = setupBlockModeSBRC(sbrparams.SBRCBlockPersistentFencingTestName)
 
-			By("Creating SBRC with Ceph RBD block storage")
+			By("Asserting the SBRC reports concurrent-writeable shared storage")
 
-			sbrSpec := buildBlockModeSBRC(rbdStorageClass, nil)
-			setupSBRC = buildSBRC(sbrparams.SBRCBlockPersistentFencingTestName, sbrSpec)
-			createErr := APIClient.Create(context.TODO(), setupSBRC)
-			Expect(createErr).ToNot(HaveOccurred(),
-				"StorageBasedRemediationConfig %q must be created", sbrparams.SBRCBlockPersistentFencingTestName)
-			waitForSBRCReady(sbrparams.SBRCBlockPersistentFencingTestName)
+			Eventually(func() (bool, error) {
+				return sbrcConcurrentWriteable(sbrparams.SBRCBlockPersistentFencingTestName)
+			}, sbrparams.StorageInjectionTimeout, sbrparams.DefaultPollInterval).Should(BeTrue(),
+				"SBRC %q must report status.storageValidation.concurrentWriteable=true before fencing "+
+					"can proceed", sbrparams.SBRCBlockPersistentFencingTestName)
 
 			By("Selecting target worker node (schedulable, not controller pod host)")
 
@@ -71,50 +61,50 @@ var _ = Describe(
 			}
 
 			GinkgoWriter.Printf("Target node: %s\n", targetNodeName)
+
+			By("Selecting an observer agent pod on a node other than the target")
+
+			var observerErr error
+
+			observerPodName, observerErr = agentPodNameByNode(
+				sbrparams.SBRCBlockPersistentFencingTestName, targetNodeName, false)
+			Expect(observerErr).ToNot(HaveOccurred(),
+				"An agent pod outside node %q must be available to read the shared device; "+
+					"fencing state cannot be observed from the fenced node itself", targetNodeName)
+			GinkgoWriter.Printf("Observer agent pod: %q\n", observerPodName)
+
+			By("Resolving the target node's Block-mode node ID from the on-device node map")
+
+			nodeMap, jsonPayload, mapErr := readNodeMapFromPod(observerPodName)
+			Expect(mapErr).ToNot(HaveOccurred(),
+				"Must read the node map through observer pod %q (payload: %s)",
+				observerPodName, jsonPayload)
+			entry, mapped := nodeMap.Entries[targetNodeName]
+			Expect(mapped).To(BeTrue(),
+				"Node map must assign a node ID to target node %q (payload: %s)",
+				targetNodeName, jsonPayload)
+			targetNodeID = entry.NodeID
+			Expect(targetNodeID).ToNot(BeZero(),
+				"Target node %q must have a non-zero Block-mode node ID", targetNodeName)
+			GinkgoWriter.Printf("Target node %q owns node ID %d (fence slot index %d)\n",
+				targetNodeName, targetNodeID, targetNodeID-1)
 		})
 
 		AfterAll(func() {
 			By("Clearing any residual Ceph OSD blocklist entries from fencing")
 			clearCephOSDBlocklist()
 
-			if setupSBRC != nil {
-				By("Deleting SBRC created for block persistent fencing test")
-
-				Eventually(func() error {
-					deleteErr := APIClient.Delete(context.TODO(), setupSBRC)
-					if deleteErr == nil || k8serrors.IsNotFound(deleteErr) {
-						return nil
-					}
-
-					return deleteErr
-				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"Failed to delete StorageBasedRemediationConfig %s",
-					sbrparams.SBRCBlockPersistentFencingTestName)
-
-				Eventually(func() error {
-					getErr := APIClient.Get(context.TODO(),
-						types.NamespacedName{
-							Name:      sbrparams.SBRCBlockPersistentFencingTestName,
-							Namespace: medik8sparams.OperatorNs,
-						},
-						setupSBRC.DeepCopy())
-
-					if k8serrors.IsNotFound(getErr) {
-						return nil
-					}
-
-					if getErr != nil {
-						return getErr
-					}
-
-					return fmt.Errorf("SBRC %s still present", sbrparams.SBRCBlockPersistentFencingTestName)
-				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed())
-			}
-
 			if targetNodeName != "" {
 				By("Force-deleting any leftover StorageBasedRemediation CR for target node")
 				cleanupSBRCR(context.Background(), targetNodeName)
+			}
 
+			if setupSBRC != nil {
+				By("Deleting SBRC created for block persistent fencing test")
+				deleteSBRCAndWait(setupSBRC, sbrparams.SBRCBlockPersistentFencingTestName)
+			}
+
+			if targetNodeName != "" {
 				By("Uncordoning target node if needed")
 
 				node, getErr := APIClient.CoreV1Interface.Nodes().Get(
@@ -170,7 +160,6 @@ var _ = Describe(
 					ticker := time.NewTicker(30 * time.Second)
 					defer ticker.Stop()
 
-					// Log initial status immediately
 					GinkgoWriter.Printf("\n=== Node Status Monitoring Started (every 30s) ===\n")
 					logNodeStatus(targetNodeName)
 
@@ -227,18 +216,29 @@ var _ = Describe(
 
 				GinkgoWriter.Printf("FencingSucceeded=True on StorageBasedRemediation/%s\n", targetNodeName)
 
-				By("Capturing block device slot state before node reboot")
+				By("Capturing block device fence slot state before node reboot")
 
-				// Get agent pod on the target node
-				agentPods, listErr := pod.List(APIClient, medik8sparams.OperatorNs,
-					metav1.ListOptions{
-						LabelSelector: sbrparams.AgentPodLabelSelector,
-						FieldSelector: fmt.Sprintf("spec.nodeName=%s", targetNodeName),
-					})
-				Expect(listErr).ToNot(HaveOccurred(), "Failed to list agent pods on node %s", targetNodeName)
-				Expect(agentPods).ToNot(BeEmpty(), "No agent pod found on node %s", targetNodeName)
-				agentPod := agentPods[0]
-				GinkgoWriter.Printf("Found agent pod: %s on node %s\n", agentPod.Object.Name, targetNodeName)
+				var fenceBefore FenceSlot
+
+				Eventually(func() error {
+					hood, readErr := readFenceNeighbourhood(observerPodName, targetNodeID)
+					if readErr != nil {
+						return readErr
+					}
+
+					var fenceErr error
+					fenceBefore, fenceErr = hood.fenceRequested()
+
+					return fenceErr
+				}, sbrparams.BlockFenceWriteTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+					"Fence slot for node %q (node ID %d) must hold a fence request after %s=True",
+					targetNodeName, targetNodeID, sbrparams.FencingSucceededCondition)
+				Expect(fenceBefore.TargetNodeID).To(Equal(targetNodeID),
+					"Fence message in slot index %d must target node ID %d (node %q)",
+					fenceBefore.SlotIndex, targetNodeID, targetNodeName)
+				GinkgoWriter.Printf("Fence slot before reboot: index=%d writer=%d target=%d reason=%d\n",
+					fenceBefore.SlotIndex, fenceBefore.WriterNodeID, fenceBefore.TargetNodeID,
+					fenceBefore.Reason)
 
 				By(fmt.Sprintf("Waiting for node %s to reboot", targetNodeName))
 
@@ -261,20 +261,7 @@ var _ = Describe(
 				By(fmt.Sprintf("Waiting for node %s to become Ready after reboot", targetNodeName))
 
 				Eventually(func() error {
-					node, nodeErr := APIClient.CoreV1Interface.Nodes().Get(
-						context.TODO(), targetNodeName, metav1.GetOptions{})
-					if nodeErr != nil {
-						return fmt.Errorf("get node %s: %w", targetNodeName, nodeErr)
-					}
-
-					// Just check Ready status, not full schedulability (taints will be removed after SBR CR deletion)
-					for _, cond := range node.Status.Conditions {
-						if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-							return nil
-						}
-					}
-
-					return fmt.Errorf("node %s not yet Ready", targetNodeName)
+					return nodeConditionIs(targetNodeName, string(corev1.NodeReady), corev1.ConditionTrue, "")
 				}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).Should(Succeed(),
 					"Node %s must return Ready after reboot", targetNodeName)
 
@@ -289,110 +276,82 @@ var _ = Describe(
 						return pullErr
 					}
 
-					// Delete the SBR CR
 					deleteErr := APIClient.Delete(context.TODO(), sbrToDelete)
 					if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
 						return deleteErr
 					}
 
 					return nil
-				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+				}, sbrparams.SBRCRCleanupTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
 					"Failed to delete StorageBasedRemediation CR for %s", targetNodeName)
 
 				By("Waiting for out-of-service taint to be removed")
 
+				// While the CR (and therefore the taint) remains, the Ceph RBD CSI node plugin is
+				// evicted; waiting for the agent before this leaves it stuck in ContainerCreating.
 				Eventually(func() error {
-					node, nodeErr := APIClient.CoreV1Interface.Nodes().Get(
-						context.TODO(), targetNodeName, metav1.GetOptions{})
-					if nodeErr != nil {
-						return fmt.Errorf("get node %s: %w", targetNodeName, nodeErr)
-					}
-
-					// Check if node is now fully schedulable (no taints blocking it)
-					if !isNodeSchedulable(node) {
-						return fmt.Errorf("node %s not yet schedulable (has taints or cordoned)", targetNodeName)
-					}
-
-					return nil
+					return nodeRestoredAfterRemediation(targetNodeName)
 				}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).Should(Succeed(),
 					"Node %s must become schedulable after SBR CR deletion", targetNodeName)
 
-				newBootID, newBootIDErr := getNodeBootID(targetNodeName)
+				var newBootIDErr error
+				postRebootBootID, newBootIDErr = getNodeBootID(targetNodeName)
 				Expect(newBootIDErr).ToNot(HaveOccurred(),
 					"Must read post-reboot boot-id from node %s", targetNodeName)
-				Expect(newBootID).ToNot(Equal(originalBootID),
+				Expect(postRebootBootID).ToNot(Equal(originalBootID),
 					"Boot-id must change after reboot: node %s boot-id stayed %q",
 					targetNodeName, originalBootID)
-				GinkgoWriter.Printf("Boot-id changed: %q -> %q (node rebooted)\n", originalBootID, newBootID)
+				GinkgoWriter.Printf("Boot-id changed: %q -> %q (node rebooted)\n",
+					originalBootID, postRebootBootID)
+
+				// ODF blocklists the victim's IP range in Ceph while the taint is on, and does not
+				// always lift it once the taint is gone (DFBUGS-11731). Until it is lifted, the
+				// victim's RBD map fails with ret=-108 and its agent never becomes Ready.
+				By("Clearing the Ceph OSD blocklist left on the target by the fencing")
+				clearCephOSDBlocklist()
 
 				By("Waiting for agent pod to restart on rebooted node")
 
 				Eventually(func() error {
-					pods, podErr := pod.List(APIClient, medik8sparams.OperatorNs,
-						metav1.ListOptions{
-							LabelSelector: sbrparams.AgentPodLabelSelector,
-							FieldSelector: fmt.Sprintf("spec.nodeName=%s", targetNodeName),
-						})
-					if podErr != nil {
-						return podErr
-					}
-
-					if len(pods) == 0 {
-						return fmt.Errorf("no agent pod on node %s", targetNodeName)
-					}
-
-					agentPod = pods[0]
-					if agentPod.Object.Status.Phase != corev1.PodRunning {
-						return fmt.Errorf("agent pod %s not Running yet (phase: %s)",
-							agentPod.Object.Name, agentPod.Object.Status.Phase)
-					}
-
-					// Check all containers are ready
-					for _, cond := range agentPod.Object.Status.Conditions {
-						if cond.Type == corev1.ContainersReady && cond.Status != corev1.ConditionTrue {
-							return fmt.Errorf("agent pod %s containers not ready", agentPod.Object.Name)
-						}
-					}
-
-					return nil
+					return agentPodReadyOnNode(sbrparams.SBRCBlockPersistentFencingTestName, targetNodeName)
 				}, sbrparams.BlockAgentReadyAfterRebootTimeout, sbrparams.BlockFencingStateCheckInterval).
-					Should(Succeed(), "Agent pod must be Running on node %s after reboot", targetNodeName)
+					Should(Succeed(),
+						"The SBRC %q agent pod on node %q must become Ready after it rebooted",
+						sbrparams.SBRCBlockPersistentFencingTestName, targetNodeName)
 
-				GinkgoWriter.Printf("Agent pod %s is Running on node %s\n", agentPod.Object.Name, targetNodeName)
+				By("Capturing block device fence slot state after reboot")
 
-				By("Capturing block device slot state after reboot")
-
-				// In a real implementation, you would exec into the agent pod and run
-				// sbr-device-summary or similar command to inspect block device slots.
-				// For now, we verify the agent pod is running and ready.
-				fencingSlotsAfter = "block-device-slots-after-reboot"
-				GinkgoWriter.Printf("Block device slots after reboot: %s\n", fencingSlotsAfter)
-
-				By("Verifying no duplicate fencing attempts occurred")
-
-				// Check that no new SBR CR was created for this node after reboot
+				// The rebooted agent disarms its own fence slot on startup (FENCE_REASON_NONE or
+				// empty). Seeing that through the observer proves the on-device fencing state was
+				// read back correctly rather than left as a live fence request that would drive
+				// phantom re-fencing.
 				Eventually(func() error {
-					_, pullErr := pullSBRCR(targetNodeName)
-					if k8serrors.IsNotFound(pullErr) {
-						return nil // Good - no new SBR CR
+					hood, readErr := readFenceNeighbourhood(observerPodName, targetNodeID)
+					if readErr != nil {
+						return readErr
 					}
 
-					if pullErr != nil {
-						return pullErr
-					}
-
-					return fmt.Errorf("unexpected SBR CR found for node %s after reboot - "+
-						"this indicates phantom re-fencing", targetNodeName)
+					return hood.ownSlotQuiet()
 				}, sbrparams.BlockFencingStateCheckTimeout, sbrparams.BlockFencingStateCheckInterval).
-					Should(Succeed(), "No new SBR CR should exist for node %s after reboot", targetNodeName)
+					Should(Succeed(),
+						"Fence slot for node %q (node ID %d) must be quiet after the agent restarts: "+
+							"empty or FENCE_REASON_NONE", targetNodeName, targetNodeID)
+				GinkgoWriter.Printf("Fence slot after reboot is quiet for node %q (node ID %d)\n",
+					targetNodeName, targetNodeID)
+
+				By(fmt.Sprintf("Consistently asserting for %s that no duplicate fencing occurs "+
+					"(stable boot-id, Ready, no StorageBasedRemediation CR)",
+					sbrparams.BlockNoFencingCheckDuration))
+
+				Consistently(func() error {
+					return victimUnfenced(targetNodeName, postRebootBootID)
+				}, sbrparams.BlockNoFencingCheckDuration, sbrparams.BlockNoFencingCheckInterval).
+					Should(Succeed(),
+						"Node %q must not be re-fenced after recovery: boot-id must stay %q, "+
+							"it must stay Ready, and no StorageBasedRemediation CR may appear",
+						targetNodeName, postRebootBootID)
 
 				GinkgoWriter.Printf("✓ No phantom re-fencing detected - fencing state persisted correctly\n")
 				GinkgoWriter.Printf("✓ Fence state persisted across reboot for node %s\n", targetNodeName)
-
-				// Store the before/after slot states for future reference
-				fencingSlotsBefore = "block-device-slots-before-reboot"
-				GinkgoWriter.Printf("Fencing state persistence validated:\n")
-				GinkgoWriter.Printf("  Before reboot: %s\n", fencingSlotsBefore)
-				GinkgoWriter.Printf("  After reboot:  %s\n", fencingSlotsAfter)
 			})
 	})
