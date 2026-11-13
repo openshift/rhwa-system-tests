@@ -17,6 +17,7 @@ for the person running the test, not for the test itself.
 | Script | Watches | Written for |
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
+| [`sbr-watch.sh`](sbr-watch.sh) | Full Node UIDs and boot IDs, storage conditions, cordons, exact taint values, SBR request conditions and cleanup times, and namespace Pods | [`rhwa-1839`](../../docs/TESTCASES/rhwa-1839.md) — draft BlockPerNode cases |
 
 ## `snr-watch.sh`
 
@@ -57,6 +58,29 @@ A rebooting node appears in three stages, and the last is the slowest:
 Requires only `oc` logged in and `awk`; it runs on Fedora Linux and macOS alike. Each tick
 is four small reads; raise `-n` to reduce API traffic. `SNR_WATCH_NS` overrides the
 namespace.
+
+## `sbr-watch.sh`
+
+```bash
+tools/watch/sbr-watch.sh
+tools/watch/sbr-watch.sh --loop -n 5
+```
+
+The script uses `oc` and POSIX `awk`. Its shell syntax supports Bash 3.2.
+Set `SBR_WATCH_NS` to select another namespace. The default is `openshift-workload-availability`.
+
+| Block | Shows |
+|---|---|
+| Nodes | Name, full UID, Ready, cordon, full API boot ID, `SBRStorageUnhealthy`, and taint key/value/effect |
+| SBR requests | Namespace/name, full UID, target, all conditions, cleanup phase, start, and deadline |
+| Agent and reporter Pods | All namespace Pods with full UIDs, Nodes, phases, container readiness, and restart counts |
+
+Record the initial boot IDs before the case. A no-reboot interval must preserve the relevant host boot IDs.
+A requested reboot changes the target boot ID. An agent replacement changes its Pod UID.
+The API boot ID can remain stale while kubelet cannot report. The display cannot replace the test's direct host observations.
+
+The script marks changed lines with `*`. Missing fields appear as `<unset>`, and failed API reads have explicit messages.
+The display provides diagnostics. It cannot establish that a transient CR or taint never existed between reads.
 
 ## Adding one
 

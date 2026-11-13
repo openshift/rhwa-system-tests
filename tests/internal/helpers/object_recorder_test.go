@@ -3,6 +3,7 @@ package helpers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -14,9 +15,11 @@ import (
 
 // fakeNodeAPI serves a scripted List and hands out one FakeWatcher per Watch call.
 type fakeNodeAPI struct {
-	mu      sync.Mutex
-	listed  []*corev1.Node
-	listErr error
+	mu            sync.Mutex
+	listed        []*corev1.Node
+	listErr       error
+	listCalls     int
+	watchVersions []string
 	// failLists makes the next failLists List calls fail with listErr.
 	failLists int
 	watchers  chan *watch.FakeWatcher
@@ -32,6 +35,7 @@ func (f *fakeNodeAPI) config() RecorderConfig[*corev1.Node] {
 		List: func(context.Context) ([]*corev1.Node, string, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
+			f.listCalls++
 
 			if f.failLists > 0 {
 				f.failLists--
@@ -41,7 +45,10 @@ func (f *fakeNodeAPI) config() RecorderConfig[*corev1.Node] {
 
 			return f.listed, "1", nil
 		},
-		Watch: func(context.Context, string) (watch.Interface, error) {
+		Watch: func(_ context.Context, resourceVersion string) (watch.Interface, error) {
+			f.mu.Lock()
+			f.watchVersions = append(f.watchVersions, resourceVersion)
+			f.mu.Unlock()
 			fakeWatcher := watch.NewFake()
 			f.watchers <- fakeWatcher
 
@@ -72,7 +79,7 @@ func (f *fakeNodeAPI) nextWatcher(t *testing.T) *watch.FakeWatcher {
 }
 
 func testNode(tainted bool) *corev1.Node {
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-0"}}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", UID: "node-uid", ResourceVersion: "1"}}
 	if tainted {
 		node.Spec.Taints = []corev1.Taint{{Key: corev1.TaintNodeOutOfService}}
 	}
@@ -149,7 +156,7 @@ func TestObjectRecorderGone(t *testing.T) {
 	waitFor(t, rec.Gone())
 }
 
-func TestObjectRecorderRelistsAfterWatchCloses(t *testing.T) {
+func TestObjectRecorderResumesLastVersionAfterWatchCloses(t *testing.T) {
 	api := newFakeNodeAPI(testNode(false))
 	rec, err := StartObjectRecorder(api.config())
 	if err != nil {
@@ -157,11 +164,28 @@ func TestObjectRecorderRelistsAfterWatchCloses(t *testing.T) {
 	}
 	defer rec.Stop()
 
-	// The taint lands while no watch is open; the re-list after the drop must pick it up.
-	api.setListed(testNode(true))
-	api.nextWatcher(t).Stop()
-	api.nextWatcher(t)
+	firstWatcher := api.nextWatcher(t)
+	node := testNode(true)
+	node.ResourceVersion = "7"
+	firstWatcher.Modify(node)
 	waitFor(t, rec.EverSaw("taint", isTainted))
+	firstWatcher.Stop()
+	resumedWatcher := api.nextWatcher(t)
+	api.mu.Lock()
+	listCalls := api.listCalls
+	versions := append([]string(nil), api.watchVersions...)
+	api.mu.Unlock()
+	if listCalls != 1 || len(versions) != 2 || versions[1] != "7" {
+		t.Fatalf("reconnect lost history: lists=%d versions=%v", listCalls, versions)
+	}
+	if rec.Coverage(rec.Snapshot().ReadyAt, time.Now()) == nil {
+		t.Fatal("pending replay must prevent a complete negative interval")
+	}
+
+	resumedWatcher.Action(watch.Bookmark, &metav1.PartialObjectMetadata{
+		ObjectMeta: metav1.ObjectMeta{ResourceVersion: "8"},
+	})
+	waitFor(t, func() error { return rec.Coverage(rec.Snapshot().ReadyAt, time.Now()) })
 }
 
 func TestObjectRecorderRecordsWatchErrorEvents(t *testing.T) {
@@ -207,4 +231,162 @@ func TestStartObjectRecorderGivesUpAfterStartTimeout(t *testing.T) {
 	if _, err := StartObjectRecorder(cfg); err == nil {
 		t.Fatal("expected StartObjectRecorder to fail when no list succeeds within StartTimeout")
 	}
+}
+
+func TestObjectRecorderWaitsForWatchReadiness(t *testing.T) {
+	api := newFakeNodeAPI()
+	cfg := api.config()
+	opening := make(chan struct{})
+	release := make(chan struct{})
+	watcher := watch.NewFake()
+	cfg.Watch = func(ctx context.Context, _ string) (watch.Interface, error) {
+		close(opening)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-release:
+			return watcher, nil
+		}
+	}
+	type result struct {
+		recorder *ObjectRecorder[*corev1.Node]
+		err      error
+	}
+	started := make(chan result, 1)
+	go func() {
+		recorder, err := StartObjectRecorder(cfg)
+		started <- result{recorder: recorder, err: err}
+	}()
+	<-opening
+	select {
+	case <-started:
+		t.Fatal("recorder returned before Watch establishment")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	response := <-started
+	if response.err != nil {
+		t.Fatal(response.err)
+	}
+	defer response.recorder.Stop()
+	if response.recorder.Snapshot().ReadyAt.IsZero() {
+		t.Fatal("recorder did not retain readiness time")
+	}
+}
+
+func TestObjectRecorderBoundsWatchOpeningWithoutBoundingLifetime(t *testing.T) {
+	t.Run("list", func(t *testing.T) {
+		api := newFakeNodeAPI()
+		cfg := api.config()
+		cfg.APICallTimeout = 15 * time.Millisecond
+		release := make(chan struct{})
+		defer close(release)
+		cfg.List = func(context.Context) ([]*corev1.Node, string, error) {
+			<-release
+
+			return nil, "1", nil
+		}
+		if _, err := StartObjectRecorder(cfg); err == nil {
+			t.Fatal("unresponsive List must return an error")
+		}
+	})
+	t.Run("opening", func(t *testing.T) {
+		api := newFakeNodeAPI()
+		cfg := api.config()
+		cfg.APICallTimeout = 15 * time.Millisecond
+		release := make(chan struct{})
+		defer close(release)
+		cfg.Watch = func(context.Context, string) (watch.Interface, error) {
+			<-release
+
+			return watch.NewFake(), nil
+		}
+		if _, err := StartObjectRecorder(cfg); err == nil {
+			t.Fatal("unresponsive Watch establishment must return an error")
+		}
+	})
+	t.Run("lifetime", func(t *testing.T) {
+		api := newFakeNodeAPI(testNode(false))
+		cfg := api.config()
+		cfg.APICallTimeout = 10 * time.Millisecond
+		cfg.Watch = func(ctx context.Context, _ string) (watch.Interface, error) {
+			fakeWatcher := watch.NewFake()
+			api.watchers <- fakeWatcher
+			go func() {
+				<-ctx.Done()
+				fakeWatcher.Stop()
+			}()
+
+			return fakeWatcher, nil
+		}
+		rec, err := StartObjectRecorder(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rec.Stop()
+		fakeWatcher := api.nextWatcher(t)
+		time.Sleep(30 * time.Millisecond)
+		fakeWatcher.Modify(testNode(true))
+		waitFor(t, rec.EverSaw("taint", isTainted))
+	})
+}
+
+func TestObjectRecorderExpiredHistoryRemainsIncomplete(t *testing.T) {
+	api := newFakeNodeAPI(testNode(false))
+	rec, err := StartObjectRecorder(api.config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Stop()
+	start := rec.Snapshot().ReadyAt
+	api.setListed(testNode(true))
+	api.nextWatcher(t).Error(&metav1.Status{
+		Reason: metav1.StatusReasonExpired, Code: 410, Message: "expired history",
+	})
+	resumedWatcher := api.nextWatcher(t)
+	waitFor(t, rec.EverSaw("taint", isTainted))
+	if rec.Coverage(start, time.Now()) == nil {
+		t.Fatal("a relist must not restore missing negative evidence")
+	}
+	if len(rec.Snapshot().Gaps) != 1 {
+		t.Fatal("expired history must retain one gap")
+	}
+
+	afterGap := rec.Snapshot().Gaps[0].EndedAt.Add(time.Nanosecond)
+	if rec.Coverage(afterGap, time.Now()) == nil {
+		t.Fatal("the relisted Watch must establish replay progress before a new negative interval")
+	}
+	resumedWatcher.Action(watch.Bookmark, &metav1.PartialObjectMetadata{
+		ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"},
+	})
+	waitFor(t, func() error { return rec.Coverage(afterGap, time.Now()) })
+}
+
+func TestObjectRecorderSnapshotsCopyObjectsAndRetainUIDs(t *testing.T) {
+	api := newFakeNodeAPI(testNode(false))
+	rec, err := StartObjectRecorder(api.config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Stop()
+	firstSnapshot := rec.Snapshot()
+	firstSnapshot.Observations[0].Object.UID = "replacement"
+	if err := rec.EverSaw("original UID", func(node *corev1.Node) bool { return node.UID == "node-uid" })(); err != nil {
+		t.Fatal(err)
+	}
+	fakeWatcher := api.nextWatcher(t)
+	replacement := testNode(false)
+	replacement.UID = "replacement"
+	fakeWatcher.Modify(replacement)
+	waitFor(t, func() error {
+		snapshot := rec.Snapshot()
+		if len(snapshot.Observations) < 2 {
+			return fmt.Errorf("replacement has not arrived")
+		}
+		if snapshot.Observations[0].UID != "node-uid" || snapshot.Observations[1].UID != "replacement" {
+			t.Fatal("snapshot combined different object identities")
+		}
+
+		return nil
+	})
 }

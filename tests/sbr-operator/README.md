@@ -688,3 +688,37 @@ make run-tests
 Live validation passed on 2026-10-22 against SBR v5.8.0 with CephFS, including
 same-volume recreation, zero agent restarts during the stability window, and
 complete test cleanup. A before/after comparison still requires a pre-fix build.
+
+### 25. BlockPerNode external behavior — draft (RHWA-1839)
+
+The 28 draft cases use stable identifiers from `RHWA-1839-01` through `RHWA-1839-17E`.
+They check public storage conditions, requested and autonomous reboots, retained request identities, and normal resource deletion.
+The full case document is [rhwa-1839.md](../../docs/TESTCASES/rhwa-1839.md).
+The explicit specs are in [block_per_node_specs.go](tests/block_per_node_specs.go).
+All 28 cases include `feature:block-per-node` and `tier:preview`. They retain `tier:resiliency`.
+Case 03A uses active NHC with `minHealthy: 2`. It waits for A's request before blocking storage on B and C.
+A's storage fault persists across reboot. B and C must receive no request or reboot through the outage and restoration.
+Restore B and C to healthy storage before restoring A. This staged case does not predict the request count for simultaneous failures.
+NHC uses `healthyDelay: 1m`. CR deletion and restriction release must finish within 360s. SBR's cleanup deadline remains 300s.
+Case 06 keeps its target storage fault active across reboot until the CR status and Pod removal assertions finish.
+Jira Task mapping remains deferred under the user instruction.
+
+- **Operators**: SBR and NHC builds with the proposed BlockPerNode API. Record the installed image identities before execution.
+- **Cluster**: Exactly three selected Ready Linux workers. Preserve existing SSH access and the management path.
+- **Storage**: Dynamically provisioned Ceph RBD with RWO Block support. `SBR_RBD_STORAGE_CLASS` selects a class when discovery is ambiguous.
+- **Environment**: Existing native host commands and `WORKLOAD_IMAGE`. No helper image, injector image, `oc debug`, or package installation.
+- **Watchdog**: Hardware watchdog or SBR-loaded `softdog`. Check `/dev/watchdog` and its timeout after agent readiness, before disruption.
+- **Destructive**: Cases can reboot a worker, stop kubelet, block network traffic, or change journal directory flags.
+- **Pass criteria**: Every required external assertion passes. Continuous observations cover the required intervals. Normal cleanup restores the saved Node settings.
+- **Execution limit**: Complete each spec and its helpers before its first live run. Run one disruptive case at a time.
+- **Expected current result**: Missing runtime behavior produces FAIL. These draft entries do not claim a passing live run.
+
+```bash
+export KUBECONFIG="$HOME/.kube/ocpctl-cluster"
+ginkgo -v --procs=1 --timeout=2h --focus='RHWA-1839-06([[:space:]]|$)' ./tests/sbr-operator
+tools/watch/sbr-watch.sh --loop -n 5
+```
+
+All 28 cases explicitly configure one-minute autonomous recovery with a 60s additional allowance.
+Explicit five-minute configuration and omitted-field defaulting are outside this suite.
+Rows 13 and 14, version upgrades, power loss, journal contents, and reboot mechanism attribution remain outside this scope.
