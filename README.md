@@ -109,6 +109,77 @@ Parameters for the script are controlled by the following environment variables:
 
 It is recommended to execute the runner script through the `make run-tests` make target.
 
+### Local SSH bastion
+
+Use this setup when the test runner cannot reach node InternalIP addresses directly.
+It creates a bastion Pod on a control-plane node and forwards local port `2222` through the OpenShift API.
+It does not need a LoadBalancer or an external VM.
+
+Prerequisites:
+
+- Log in to the target cluster with `oc login` before setup.
+- Your cluster account must be able to create an SCC and grant its use to the bastion ServiceAccount.
+- Install `oc`, `jq`, Bash, OpenSSH, and Make on the local computer.
+- Supply an unencrypted private key that permits SSH as `core` on the nodes.
+  The nodes must permit passwordless `sudo` for this account.
+- Provide a Ready Linux control-plane node with the `node-role.kubernetes.io/master` label.
+  That node must be able to pull the [CI bastion image](https://github.com/eparis/ssh-bastion/blob/master/deploy/deployment.yaml), `quay.io/eparis/ssh:latest`.
+- Leave local port `2222` available.
+
+From this repository, run the following command in Bash or Zsh:
+
+```bash
+bastion_env=$(make -s setup-local-bastion SSH_KEY=/absolute/path/to/private-key) && eval "$bastion_env"
+```
+
+Quote the `SSH_KEY` value if its path contains spaces.
+Make cannot change its parent shell. The `eval` command loads the settings only after setup succeeds.
+Do not replace this command with an unconditional `eval` of Make output.
+
+The script creates local files under `/tmp/medik8s-local-bastion-$(id -u)`.
+It copies the key to `cluster-profile/ssh-privatekey` with mode `0600`.
+It saves the current cluster configuration in a separate `kubeconfig` file with mode `0600`.
+The cluster receives the public key and a separate bastion host key. The node private key stays local.
+
+The command sets `KUBECONFIG`, `CLUSTER_PROFILE_DIR`, and `SHARED_DIR` in the current shell.
+It adds a local SSH wrapper to `PATH` so the existing test helper can use the forwarded port.
+It does not edit your existing SSH configuration.
+Run `make run-tests` from the same shell with the usual workload and test selection settings.
+
+Repeated setup runs reuse the namespace, host key, and active port-forward supervisor.
+The supervisor restarts `oc port-forward` one second after it exits. Setup checks SSH plus passwordless `sudo` on every Ready Linux node.
+The dedicated `system-tests-local-bastion` SCC permits `SYS_CHROOT` and `AUDIT_WRITE`, which the SSH server requires.
+
+The supervisor runs in the background. Its PID and log are in `port-forward.pid` and `port-forward.log`.
+The log records forward exits and restart attempts. Connection failures remain visible to tests during reconnection.
+Keep the computer awake and the cluster API accessible during tests.
+
+To remove this setup, stop all tests first. Check the saved process from the configured shell:
+
+```bash
+bastion_state="/tmp/medik8s-local-bastion-$(id -u)"
+bastion_pid=$(cat "$bastion_state/port-forward.pid")
+ps -ww -p "$bastion_pid" -o command=
+```
+
+Confirm that the command runs this repository's `scripts/local-bastion-forward.sh` for the bastion.
+For an older setup, confirm that it runs `oc port-forward` for `test-ssh-bastion`.
+If that process still exists, stop it before removing the resources. The supervisor also stops its active child:
+
+```bash
+kill "$bastion_pid"
+```
+
+Then remove the cluster resources and local files:
+
+```bash
+oc --kubeconfig="$bastion_state/kubeconfig" delete namespace test-ssh-bastion --ignore-not-found
+oc --kubeconfig="$bastion_state/kubeconfig" delete scc system-tests-local-bastion --ignore-not-found
+rm -rf "$bastion_state"
+```
+
+### Test runner examples
+
 Example:
 ```
 $ export KUBECONFIG=/path/to/kubeconfig

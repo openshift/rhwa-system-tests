@@ -137,6 +137,12 @@ run-tests: ginkgo
 	@echo "Executing test-runner script"
 	GINKGO=$(GINKGO) scripts/test-runner.sh
 
+.PHONY: setup-local-bastion
+export SSH_KEY
+setup-local-bastion: override SSH_KEY := $(value SSH_KEY)
+setup-local-bastion: ## Configure SSH access through the currently logged-in OpenShift cluster.
+	@bash scripts/setup-local-bastion.sh "$${SSH_KEY:-}"
+
 run-internal-pkg-unit-tests:
 	@echo "Executing internal package unit tests"
 	UNIT_TEST=true WORKLOAD_IMAGE=unused go test -v ./tests/internal/...
