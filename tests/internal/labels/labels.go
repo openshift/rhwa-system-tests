@@ -32,6 +32,11 @@ const (
 	TierFreshInstall = "tier:fresh-install"
 	// TierResiliency marks resiliency tests.
 	TierResiliency = "tier:resiliency"
+	// TierPreview marks preview tests.
+	TierPreview = "tier:preview"
+
+	// FeatureBlockPerNode marks BlockPerNode tests.
+	FeatureBlockPerNode = "feature:block-per-node"
 
 	// FrequencyPresubmit marks tests that run in presubmit jobs.
 	FrequencyPresubmit = "frequency:presubmit"

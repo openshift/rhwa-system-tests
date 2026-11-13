@@ -18,7 +18,8 @@ import (
 )
 
 var _ = Describe("SBR BlockPerNode", Serial,
-	Label(labels.OperatorSBR, labels.TierResiliency, labels.ComponentRemediation,
+	Label(labels.OperatorSBR, labels.TierResiliency, labels.TierPreview, labels.FeatureBlockPerNode,
+		labels.ComponentRemediation,
 		labels.DisruptionDestructive, labels.PlatformAny, labels.FrequencyWeekly), func() {
 		// TODO(RHWA-1839-01): Check an existing application during the interval. This needs an application-specific health endpoint and must not affect this test's result.
 		It("RHWA-1839-01 Healthy storage and API — matrix row 1", reportxml.ID("RHWA-1839-01"), FlakeAttempts(1), func() {

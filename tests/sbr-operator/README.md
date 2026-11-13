@@ -695,6 +695,7 @@ The 28 draft cases use stable identifiers from `RHWA-1839-01` through `RHWA-1839
 They check public storage conditions, requested and autonomous reboots, retained request identities, and normal resource deletion.
 The full case document is [rhwa-1839.md](../../docs/TESTCASES/rhwa-1839.md).
 The explicit specs are in [block_per_node_specs.go](tests/block_per_node_specs.go).
+All 28 cases include `feature:block-per-node` and `tier:preview`. They retain `tier:resiliency`.
 Case 03A uses active NHC with `minHealthy: 2`. It waits for A's request before blocking storage on B and C.
 A's storage fault persists across reboot. B and C must receive no request or reboot through the outage and restoration.
 Restore B and C to healthy storage before restoring A. This staged case does not predict the request count for simultaneous failures.
