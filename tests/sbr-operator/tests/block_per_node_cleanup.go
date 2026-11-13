@@ -1056,7 +1056,7 @@ func (test *bpnFixture) finishCleanup(check func(string, func() error)) {
 		if node.recorder != nil {
 			check("stop Node observer "+node.initial.Name, func() error {
 				node.recorder.Stop()
-				AddReportEntry("bpn-node-observations "+node.initial.Name, node.recorder.Snapshot())
+				AddReportEntry("bpn-node-observations "+node.initial.Name, node.recorder.Snapshot(), ReportEntryVisibilityNever)
 
 				return nil
 			})
@@ -1068,7 +1068,7 @@ func (test *bpnFixture) finishCleanup(check func(string, func() error)) {
 	if test.crRecorder != nil {
 		check("stop request observer", func() error {
 			test.crRecorder.Stop()
-			AddReportEntry("bpn-request-observations", test.crRecorder.Snapshot())
+			AddReportEntry("bpn-request-observations", test.crRecorder.Snapshot(), ReportEntryVisibilityNever)
 
 			return nil
 		})
@@ -1083,7 +1083,7 @@ func (test *bpnFixture) finishCleanup(check func(string, func() error)) {
 	test.mu.Lock()
 	samples := append([]bpnBootSample(nil), test.samples...)
 	test.mu.Unlock()
-	AddReportEntry("bpn-host-boot-samples", samples)
+	AddReportEntry("bpn-host-boot-samples", samples, ReportEntryVisibilityNever)
 }
 
 func (test *bpnFixture) holdWorkloadWithFinalizer() {

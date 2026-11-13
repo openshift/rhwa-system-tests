@@ -214,7 +214,6 @@ func (test *bpnFixture) prepareNodes() {
 		Expect(node.boot).NotTo(BeEmpty(), "Node %s must have a nonempty host boot ID", node.initial.Name)
 		Expect(node.boot).To(Equal(node.initial.Status.NodeInfo.BootID),
 			"Node %s API and host boot IDs must match", node.initial.Name)
-		test.checkWatchdog(node)
 	}
 }
 
@@ -243,7 +242,7 @@ func (test *bpnFixture) recordOperatorImages() {
 			"pod": pod.Name, "uid": pod.UID, "node": pod.Spec.NodeName, "containers": containers,
 		})
 	}
-	AddReportEntry("bpn-existing-operator-images", images)
+	AddReportEntry("bpn-existing-operator-images", images, ReportEntryVisibilityNever)
 }
 
 func (test *bpnFixture) readFixedSpec(object *unstructured.Unstructured, expected map[string]interface{},
@@ -262,6 +261,17 @@ func (test *bpnFixture) readFixedSpec(object *unstructured.Unstructured, expecte
 		actual, found, err := unstructured.NestedFieldNoCopy(stored.Object, "spec", field)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(found).To(BeTrue(), "%s must preserve spec.%s", object.GetKind(), field)
+		switch field {
+		case "ioTimeout", "totalOutageGracePeriod", "autonomousRebootRecoveryPeriod", "healthyDelay":
+			actualText, actualIsString := actual.(string)
+			Expect(actualIsString).To(BeTrue(), "%s spec.%s must be a duration string", object.GetKind(), field)
+			expectedText, expectedIsString := value.(string)
+			Expect(expectedIsString).To(BeTrue(), "The expected spec.%s must be a duration string", field)
+			actual, err = time.ParseDuration(actualText)
+			Expect(err).NotTo(HaveOccurred(), "%s spec.%s must contain a valid duration", object.GetKind(), field)
+			value, err = time.ParseDuration(expectedText)
+			Expect(err).NotTo(HaveOccurred(), "The expected spec.%s must contain a valid duration", field)
+		}
 		Expect(actual).To(Equal(value), "%s must preserve the fixed spec.%s", object.GetKind(), field)
 	}
 
@@ -322,7 +332,7 @@ func (test *bpnFixture) checkWatchdog(node *bpnNode) {
 	output, err := node.host.Run(test.ctx, sbrparams.BPNHostCall,
 		"sudo sh -c 'test -c /dev/watchdog && cat /sys/class/watchdog/watchdog0/timeout'")
 	if err != nil {
-		Skip(fmt.Sprintf("BLOCKED: Node %s needs the existing default watchdog and a readable sysfs timeout: %v",
+		Skip(fmt.Sprintf("BLOCKED: Node %s needs /dev/watchdog and a readable sysfs timeout after SBR agent startup: %v",
 			node.initial.Name, err))
 	}
 
@@ -490,6 +500,10 @@ func (test *bpnFixture) createPausedPolicy() {
 func (test *bpnFixture) requireComponentsReady() {
 	test.eventually(sbrparams.BPNAgentReady, "Each selected Node must run an agent and reporter", test.componentsReady)
 	test.requireHealth(corev1.ConditionFalse)
+	// The agent can create /dev/watchdog by loading softdog during startup.
+	for _, node := range test.nodes {
+		test.checkWatchdog(node)
+	}
 }
 
 func (test *bpnFixture) establishBaseline(duration time.Duration) {

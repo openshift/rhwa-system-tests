@@ -71,8 +71,7 @@ if [[ ! -z "${ECO_TEST_FOCUS}" ]]; then
 fi
 cmd+=" $@ $feature_dirs"   # add user args before feature dirs
 
-# Execute ginkgo command. A label typo otherwise exits successfully after
-# selecting zero specs, which is particularly dangerous for dedicated CI jobs.
+# Keep the original test result while collecting output and reports.
 ginkgo_log=$(mktemp)
 echo $cmd
 set -o pipefail
@@ -80,8 +79,11 @@ eval $cmd 2>&1 | tee "$ginkgo_log"
 GINKGO_EXIT=${PIPESTATUS[0]}
 set +o pipefail
 
-if [[ -n "${ECO_TEST_LABELS}" ]] && grep -Eq 'Ran 0 of [0-9]+ Specs' "$ginkgo_log"; then
-    echo "Label filter selected zero specs: ${ECO_TEST_LABELS}" >&2
+# A zero count can mean prerequisite skips or an empty suite beside one that ran.
+if [[ $GINKGO_EXIT -eq 0 && -n "${ECO_TEST_LABELS}" ]] &&
+    grep -Eq 'Ran 0 of [0-9]+ Specs' "$ginkgo_log" &&
+    ! grep -Eq 'Ran [1-9][0-9]* of [0-9]+ Specs' "$ginkgo_log"; then
+    echo "No specs completed for label filter: ${ECO_TEST_LABELS}. Check prerequisite skips and the filter." >&2
     GINKGO_EXIT=1
 fi
 rm -f "$ginkgo_log"
@@ -89,11 +91,14 @@ rm -f "$ginkgo_log"
 # Copy reportxml testrun XML to SHARED_DIR for the Polarion reporter post step.
 COPY_EXIT=0
 if [[ -n "${SHARED_DIR}" ]]; then
-    mapfile -t testrun_files < <(find "${ECO_REPORTS_DUMP_DIR}" -type f -name '*_testrun.xml' 2>/dev/null)
+    testrun_files=()
+    while IFS= read -r -d '' testrun_file; do
+        testrun_files+=("$testrun_file")
+    done < <(find "${ECO_REPORTS_DUMP_DIR}" -type f -name '*_testrun.xml' -print0 2>/dev/null)
     if [[ ${#testrun_files[@]} -eq 0 ]]; then
         echo "Warning: no *_testrun.xml files found in ${ECO_REPORTS_DUMP_DIR}" >&2
         COPY_EXIT=1
-    elif ! cp -t "${SHARED_DIR}/" "${testrun_files[@]}"; then
+    elif ! cp "${testrun_files[@]}" "${SHARED_DIR}/"; then
         echo "Failed to copy *_testrun.xml from ${ECO_REPORTS_DUMP_DIR} to ${SHARED_DIR}" >&2
         COPY_EXIT=1
     fi

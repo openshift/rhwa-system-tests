@@ -706,6 +706,7 @@ Jira Task mapping remains deferred under the user instruction.
 - **Cluster**: Exactly three selected Ready Linux workers. Preserve existing SSH access and the management path.
 - **Storage**: Dynamically provisioned Ceph RBD with RWO Block support. `SBR_RBD_STORAGE_CLASS` selects a class when discovery is ambiguous.
 - **Environment**: Existing native host commands and `WORKLOAD_IMAGE`. No helper image, injector image, `oc debug`, or package installation.
+- **Watchdog**: Hardware watchdog or SBR-loaded `softdog`. Check `/dev/watchdog` and its timeout after agent readiness, before disruption.
 - **Destructive**: Cases can reboot a worker, stop kubelet, block network traffic, or change journal directory flags.
 - **Pass criteria**: Every required external assertion passes. Continuous observations cover the required intervals. Normal cleanup restores the saved Node settings.
 - **Execution limit**: Complete each spec and its helpers before its first live run. Run one disruptive case at a time.
