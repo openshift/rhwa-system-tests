@@ -13,11 +13,14 @@ This directory contains cross-cutting architecture, shared testing workflows, an
   - [NMO Operator Tests](../tests/nmo-operator/README.md)
   - [SBR Operator Tests](../tests/sbr-operator/README.md)
   - [SNR Operator Tests](../tests/snr-operator/README.md)
+  - [WAO Operator Tests](../tests/wao-operator/README.md)
 
 ## Guides
 
 - [File-Based Catalog (FBC) Operator Upgrades](fbc-upgrades.md) (`tier:upgrade-operator`): Common release upgrade contract, environment inputs, and execution for all six operators.
 - [SBR Test Analysis](SBR/sbr_test_analysis.md): SBR coverage analysis, storage class requirements, and proposed tests.
+- [WAO Admission Webhooks Test Plan](wao-webhooks-test-plan.md) (`component:webhook`): the admission rules that WAO serves for FAR, NHC, NMO and SNR, the coverage of the existing specs, the gaps, and `make run-webhook-tests`.
+- [WAO Admission Webhooks Test Report](wao-webhooks-test-report.md): the results of the plan on a live cluster, and the commands to run it again.
 
 ## Test Case Documents
 

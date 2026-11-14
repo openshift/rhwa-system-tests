@@ -227,9 +227,12 @@ before the first `It`. In order:
 `Available` already accounts for webhook admission readiness
 (`status.components[].admissionReady`, which waits on the service CA bundle), so
 once an operand is `Available` its CRs can be created without a further wait.
-While an operand is disabled its webhooks are gone, so CRs are admitted
-unvalidated — a spec that asserts a webhook rejection is meaningless unless its
-operand is enabled first.
+WAO itself serves the admission webhooks of FAR, NHC, NMO and SNR, so those
+webhooks answer for the whole life of WAO — also while the operand is disabled,
+when no manager reconciles what is admitted. A spec that asserts one of their
+rejections therefore does not prove the operand is running. SBR serves its own
+webhooks: while it is disabled they are gone and its CRs are admitted
+unvalidated. See [wao-webhooks-test-plan.md](../wao-webhooks-test-plan.md).
 
 Both layouts exist during the transition. Branch on the singleton, not on an env
 var or a cluster name: if the `WorkloadAvailabilityConfig` is `IsNotFound`, the
