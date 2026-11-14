@@ -12,6 +12,7 @@ import (
 	"github.com/medik8s/system-tests/tests/internal/helpers"
 	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
+	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/nhc-operator/internal/nhcparams"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -37,6 +38,12 @@ var _ = Describe("NHC Escalation -- Validation and Webhook",
 
 		BeforeAll(func() {
 			ctx = context.Background()
+
+			By("Ensuring the NHC and SNR operands are enabled when WAO manages them")
+			Expect(helpers.EnsureWAOComponentsAvailable(ctx, APIClient,
+				medik8sparams.WAOOperandAvailableTimeout, medik8sparams.WAOOperandPollInterval,
+				medik8sparams.WAOComponentNHC, medik8sparams.WAOComponentSNR)).To(Succeed(),
+				"WAO must report the NHC and SNR operands are Available before the first spec")
 
 			By("Verifying NHC controller deployment is ready")
 
@@ -201,6 +208,12 @@ var _ = Describe("NHC Escalation -- Edit During Remediation",
 
 		BeforeAll(func() {
 			ctx = context.Background()
+
+			By("Ensuring the NHC and SNR operands are enabled when WAO manages them")
+			Expect(helpers.EnsureWAOComponentsAvailable(ctx, APIClient,
+				medik8sparams.WAOOperandAvailableTimeout, medik8sparams.WAOOperandPollInterval,
+				medik8sparams.WAOComponentNHC, medik8sparams.WAOComponentSNR)).To(Succeed(),
+				"WAO must report the NHC and SNR operands are Available before the first spec")
 
 			By("Verifying NHC controller deployment is ready")
 

@@ -44,6 +44,12 @@ var _ = Describe("NHC Negative -- Validation and Webhook",
 		BeforeAll(func() {
 			ctx = context.Background()
 
+			By("Ensuring the NHC and SNR operands are enabled when WAO manages them")
+			Expect(helpers.EnsureWAOComponentsAvailable(ctx, APIClient,
+				medik8sparams.WAOOperandAvailableTimeout, medik8sparams.WAOOperandPollInterval,
+				medik8sparams.WAOComponentNHC, medik8sparams.WAOComponentSNR)).To(Succeed(),
+				"WAO must report the NHC and SNR operands are Available before the first spec")
+
 			By("Verifying NHC controller deployment is ready")
 
 			nhcDeployment, err := deployment.Pull(

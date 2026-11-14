@@ -36,6 +36,12 @@ var _ = Describe("FAR Negative -- Misconfiguration",
 		BeforeAll(func() {
 			ctx = context.Background()
 
+			By("Ensuring the FAR operand is enabled when WAO manages it")
+			Expect(helpers.EnsureWAOComponentsAvailable(ctx, APIClient,
+				medik8sparams.WAOOperandAvailableTimeout, medik8sparams.WAOOperandPollInterval,
+				medik8sparams.WAOComponentFAR)).To(Succeed(),
+				"WAO must report the FAR operand Available before the first spec")
+
 			By("Verifying FAR controller deployment is Ready")
 
 			farDeployment, err := deployment.Pull(
