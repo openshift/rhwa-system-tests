@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -160,6 +162,110 @@ func WAOComponentPhase(config *unstructured.Unstructured, component string) (str
 	}
 
 	return "", nil
+}
+
+// WAOComponentAdmissionReady reports status.components[].admissionReady of one operand: whether
+// the WAO admission listener serves the webhooks of that operand. WAO reports the field only for
+// the operands whose admission it serves; an operand with no such field returns false.
+func WAOComponentAdmissionReady(config *unstructured.Unstructured, component string) (bool, error) {
+	if config == nil {
+		return false, fmt.Errorf("no WAO configuration to read operand %q status from", component)
+	}
+
+	statuses, _, err := unstructured.NestedSlice(config.Object, "status", "components")
+	if err != nil {
+		return false, fmt.Errorf("read WAO operand statuses: %w", err)
+	}
+
+	for _, status := range statuses {
+		statusMap, ok := status.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		if name, _, _ := unstructured.NestedString(statusMap, "name"); name != component {
+			continue
+		}
+
+		ready, _, readyErr := unstructured.NestedBool(statusMap, "admissionReady")
+		if readyErr != nil {
+			return false, fmt.Errorf("read WAO operand %q admission readiness: %w", component, readyErr)
+		}
+
+		return ready, nil
+	}
+
+	return false, nil
+}
+
+// EnsureWAOComponentsAvailable is the suite precondition for operands under WAO. It makes sure
+// each named operand is enabled and reports phase Available, and changes nothing when that is
+// already true. On a cluster without WAO (the singleton is NotFound) it returns nil, so the
+// caller continues with the per-operator readiness check it already has.
+func EnsureWAOComponentsAvailable(
+	ctx context.Context, k8sClient client.Client, timeout, interval time.Duration, components ...string,
+) error {
+	config, err := GetWAOConfig(ctx, k8sClient)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+
+		return err
+	}
+
+	pending, err := waoComponentsNotAvailable(config, components)
+	if err != nil {
+		return err
+	}
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	if err := EnableWAOComponents(ctx, k8sClient, pending...); err != nil {
+		return err
+	}
+
+	pollErr := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+		current, getErr := GetWAOConfig(ctx, k8sClient)
+		if getErr != nil {
+			return false, getErr
+		}
+
+		pending, err = waoComponentsNotAvailable(current, components)
+
+		return len(pending) == 0, err
+	})
+	if pollErr != nil {
+		return fmt.Errorf("WAO operands %s did not reach phase %s within %s: %w",
+			strings.Join(pending, ", "), medik8sparams.WAOPhaseAvailable, timeout, pollErr)
+	}
+
+	return nil
+}
+
+// waoComponentsNotAvailable names the operands that are not enabled or not Available.
+func waoComponentsNotAvailable(config *unstructured.Unstructured, components []string) ([]string, error) {
+	var pending []string
+
+	for _, component := range components {
+		enabled, err := WAOComponentEnabled(config, component)
+		if err != nil {
+			return nil, err
+		}
+
+		phase, err := WAOComponentPhase(config, component)
+		if err != nil {
+			return nil, err
+		}
+
+		if !enabled || phase != medik8sparams.WAOPhaseAvailable {
+			pending = append(pending, component)
+		}
+	}
+
+	return pending, nil
 }
 
 // WAOComponentRetainedResources lists what outlived a disable of one operand: agent DaemonSets,
