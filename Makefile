@@ -137,6 +137,15 @@ run-tests: ginkgo
 	@echo "Executing test-runner script"
 	GINKGO=$(GINKGO) scripts/test-runner.sh
 
+# Admission webhook specs only. WEBHOOK_TARGET: all (default), wao, far, nhc, nmo or snr.
+# WEBHOOK_DESTRUCTIVE=true also selects the destructive webhook specs.
+# e.g. make run-webhook-tests WEBHOOK_TARGET=snr
+WEBHOOK_TARGET ?= all
+.PHONY: run-webhook-tests
+run-webhook-tests: ginkgo
+	@echo "Executing webhook specs: $(WEBHOOK_TARGET)"
+	GINKGO=$(GINKGO) scripts/run-webhook-tests.sh $(WEBHOOK_TARGET)
+
 run-internal-pkg-unit-tests:
 	@echo "Executing internal package unit tests"
 	UNIT_TEST=true WORKLOAD_IMAGE=unused go test -v ./tests/internal/...

@@ -18,6 +18,7 @@ for the person running the test, not for the test itself.
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
 | [`wao-watch.sh`](wao-watch.sh) | Per-operand `desiredState`/`phase`/`admissionReady`/retained count from the `WorkloadAvailabilityConfig`, WAO's own conditions, and the Deployments, DaemonSets and pods in the operator namespace | [`rhwa-2040`](../../docs/TESTCASES/rhwa-2040.md) — suits any spec that enables or disables a WAO operand |
+| [`webhook-watch.sh`](webhook-watch.sh) | The webhook entries that call a Service in the operator namespace (`failurePolicy`, timeout, Service), the ready endpoints of the WAO admission Service, the per-operand `phase`/`admissionReady` rows, the stored objects of the admission kinds, and the pods | [`rhwa-9001`](../../docs/TESTCASES/rhwa-9001.md) to [`rhwa-9007`](../../docs/TESTCASES/rhwa-9007.md) — suits any spec about the admission webhooks that WAO serves |
 | [`far-watch.sh`](far-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `FenceAgentsRemediation`/`FenceAgentsRemediationTemplate`/`NodeHealthCheck` CRs, each FAR CR's `Processing`/`FenceAgentActionSucceeded`/`Succeeded` conditions, the controller leader `Lease` holder, and the controller pods with their ages | any FAR spec — destructive fence/reboot tests, controller-lifecycle leader handover, and FAR↔NHC interop |
 
 ## `snr-watch.sh`
@@ -174,3 +175,28 @@ document. Keep to the same shape:
   boot ID arriving last) cost real debugging time to learn. Write yours down.
 - **List it in the catalog** above, and document its invocation in section 11 of the test
   case document.
+
+## `webhook-watch.sh`
+
+```bash
+watch -n 5 -d tools/watch/webhook-watch.sh   # Linux, or macOS with `brew install watch`
+tools/watch/webhook-watch.sh --loop          # anywhere, no `watch` needed
+tools/watch/webhook-watch.sh                 # one snapshot and exit
+```
+
+| Block             | Shows                                                                                   |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `webhook entries` | each entry that calls a Service in the operator namespace: type (`V`/`M`), name, `failurePolicy`, timeout and Service |
+| `endpoints`       | the endpoints of the WAO admission Service with their readiness                         |
+| `operands`        | the `DESIRED`, `PHASE`, `ADMIT` and retained count rows of `wao-watch.sh`               |
+| `stored objects`  | the stored objects of the kinds WAO serves admission for, the NetworkPolicies, and the legacy FAR Secret |
+| `pods`            | name, ready, status, age and node for everything in the namespace                       |
+
+The entries block must not change during any webhook spec: WAO registers ten entries for the life
+of its install. The stored objects block is where a test object appears and goes — a remediation
+request (`fenceagentsremediation`, `selfnoderemediation`) must never appear there. `ADMIT` reports
+the local listener of WAO, so it stays `true` while the failure policy spec blocks the network
+path.
+
+`WAO_WATCH_NS` overrides the namespace, `WAO_WATCH_WAC` the configuration name and
+`WAO_WATCH_SERVICE` the Service name. Requires only `oc` and `awk`.
