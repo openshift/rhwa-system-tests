@@ -133,10 +133,14 @@ func nodeMapCleanupPreflight(ctx context.Context) string {
 	}
 	By("Removing only node-map test resources left by an interrupted run")
 	cleanupStaleNodeMapResources(ctx)
-	configs := medik8sparams.NewUnstructuredList(sbrparams.CRDGroup, sbrparams.CRDVersion,
-		"StorageBasedRemediationConfigList")
-	Expect(APIClient.List(ctx, configs, client.InNamespace(medik8sparams.OperatorNs))).To(Succeed())
-	Expect(configs.Items).To(BeEmpty(), "Remove existing SBRCs before running this isolated regression test")
+	By("Waiting for any leftover SBRCs to finish deletion before this isolated test")
+	Eventually(func(assertion Gomega) {
+		configs := medik8sparams.NewUnstructuredList(sbrparams.CRDGroup, sbrparams.CRDVersion,
+			"StorageBasedRemediationConfigList")
+		assertion.Expect(APIClient.List(ctx, configs, client.InNamespace(medik8sparams.OperatorNs))).To(Succeed())
+		assertion.Expect(configs.Items).To(BeEmpty(),
+			"All SBRCs must be gone before this isolated regression test")
+	}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed())
 	nodes, err := APIClient.CoreV1Interface.Nodes().List(ctx,
 		metav1.ListOptions{LabelSelector: "node-role.kubernetes.io/worker"})
 	Expect(err).NotTo(HaveOccurred())

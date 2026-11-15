@@ -299,12 +299,7 @@ var _ = Describe(
 			}
 
 			By("Removing StorageBasedRemediationConfig created for the remediation CR test")
-
-			deleteErr := APIClient.Delete(context.TODO(), setupSBRC)
-			if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
-				GinkgoT().Logf("Warning: cleanup delete StorageBasedRemediationConfig %s: %v",
-					sbrparams.SBRCFunctionalTestName, deleteErr)
-			}
+			deleteSBRCAndWait(setupSBRC, sbrparams.SBRCFunctionalTestName)
 		})
 
 		It("Verify StorageBasedRemediation CR lifecycle: admission, finalizer, and deletion cleanup",

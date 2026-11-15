@@ -215,15 +215,7 @@ var _ = Describe(
 			By("AfterAll: deleting StorageBasedRemediationConfig")
 
 			if testSBRC != nil {
-				Eventually(func() error {
-					deleteErr := APIClient.Delete(context.TODO(), testSBRC)
-					if deleteErr == nil || k8serrors.IsNotFound(deleteErr) {
-						return nil
-					}
-
-					return deleteErr
-				}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-					"Failed to delete StorageBasedRemediationConfig %s", sbrparams.SBRCStorageLossWriteName)
+				deleteSBRCAndWait(testSBRC, sbrparams.SBRCStorageLossWriteName)
 			}
 
 			By("AfterAll: removing NodeHealthCheck CR if created by this test")
