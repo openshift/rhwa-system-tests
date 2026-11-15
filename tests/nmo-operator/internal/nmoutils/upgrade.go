@@ -60,7 +60,7 @@ func VerifyMaintenance(object *unstructured.Unstructured, since time.Time) error
 	if err != nil {
 		return err
 	}
-	if !since.IsZero() && !updated.After(since) {
+	if !since.IsZero() && updated.Before(since) {
 		return fmt.Errorf("NMO status is stale: %s is not newer than %s", updated, since)
 	}
 
