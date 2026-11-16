@@ -260,4 +260,111 @@ const (
 	// SNRAgentPodTimeout is the maximum wait for a ready SNR agent pod to appear on a
 	// node: before maintenance starts (baseline) and after maintenance ends (return).
 	SNRAgentPodTimeout = 5 * time.Minute
+
+	// NHCLeaseInteropReason is the spec.reason set on the NodeMaintenance CR created by
+	// the NMO+NHC lease interop test (OCP-65651).
+	NHCLeaseInteropReason = "system-tests NHC lease interop validation (RHWA-1255)"
+
+	// NHCGroup is the API group of NodeHealthCheck CRs, for unstructured access from
+	// this suite: the NMO suite has no typed NHC API and the NHC suite's helpers are
+	// package-private there. Mirrors nhcparams (tests/nhc-operator/internal/
+	// nhcparams/const.go); suites do not import each other's params packages.
+	NHCGroup = "remediation.medik8s.io"
+	// NHCVersion is the API version of NodeHealthCheck CRs. Mirrors nhcparams.
+	NHCVersion = "v1alpha1"
+	// NHCKind is the Kind of NodeHealthCheck CRs. Mirrors nhcparams.
+	NHCKind = "NodeHealthCheck"
+
+	// NHCCRDName is the full CRD name for NodeHealthCheck. The lease interop test uses
+	// it to detect that NHC is installed: the spec requires both NMO and NHC, so it
+	// skips on clusters where the CRD is absent rather than failing.
+	NHCCRDName = "nodehealthchecks.remediation.medik8s.io"
+
+	// NHCOperatorDeploymentName is the NHC controller-manager deployment the lease
+	// interop test verifies is Ready once NHC is installed.
+	NHCOperatorDeploymentName = "node-healthcheck-controller-manager"
+
+	// NHCControllerServiceAccount is the NHC controller's ServiceAccount, the subject
+	// of the TestRemediation fixture's ClusterRoleBinding. Mirrors nhcparams.
+	NHCControllerServiceAccount = "node-healthcheck-controller-manager"
+
+	// NHCLeaseCRName is the NodeHealthCheck CR name created by the lease interop test,
+	// matching the Python reference's nhc-node-lease-test.
+	NHCLeaseCRName = "nhc-node-lease-test"
+
+	// NHCLeaseMinWorkers is the minimum number of eligible worker nodes the lease
+	// interop test requires: one is maintained and disrupted while at least one other
+	// stays healthy, so minHealthy 30% still lets NHC remediate. With a single worker
+	// NHC would refuse to remediate for lack of healthy nodes and the hand-over half
+	// of the spec could never pass.
+	NHCLeaseMinWorkers = 2
+
+	// NHCPhaseEnabled is the NodeHealthCheck status.phase value meaning no ongoing remediation.
+	NHCPhaseEnabled = "Enabled"
+	// NHCPhaseRemediating is the NodeHealthCheck status.phase value meaning remediation is in progress.
+	NHCPhaseRemediating = "Remediating"
+
+	// NHCLeaseHolderPrefix builds the lease holder identity NHC sets on a node lease:
+	// NodeHealthCheck-<CR name>. The Python reference matches it by substring; the
+	// exact identity format is confirmed on the first live run.
+	NHCLeaseHolderPrefix = "NodeHealthCheck-"
+
+	// NHCMinHealthy is the minHealthy of the lease interop NHC CR. A percentage
+	// string, as in the Python reference's yaml: an integer would mean an absolute
+	// node count and would block remediation on clusters with few workers.
+	NHCMinHealthy = "30%"
+
+	// NHCUnhealthyDuration is the unhealthyConditions duration of the lease interop
+	// NHC CR, for both Ready=False and Ready=Unknown (Python reference: 30s).
+	NHCUnhealthyDuration = "30s"
+
+	// NHCEnabledTimeout is the maximum wait for the lease interop NHC to reach the
+	// Enabled phase (Python reference: 60s).
+	NHCEnabledTimeout = 1 * time.Minute
+
+	// NHCLeaseRemediationWindow is how long NHC must stay Enabled while NMO holds the
+	// node lease, and the maximum wait for remediation to start once the lease is
+	// released. The Python reference waited 60s plus a 3s API request timeout; the
+	// window must exceed NHCUnhealthyDuration so an unblocked NHC would have started
+	// remediating inside it.
+	NHCLeaseRemediationWindow = 63 * time.Second
+
+	// TestRemediationGroup is the API group of the dummy TestRemediation remediator
+	// the lease interop NHC points at. Mirrors nhcparams (tests/nhc-operator/
+	// internal/nhcparams/const.go), which is internal to the NHC suite and cannot be
+	// imported here; keep the values in sync.
+	TestRemediationGroup = "test.medik8s.io"
+	// TestRemediationVersion is the API version of the TestRemediation CRDs. Mirrors nhcparams.
+	TestRemediationVersion = "v1alpha1"
+	// TestRemediationTemplateCRDName is the CRD name for TestRemediationTemplate. Mirrors nhcparams.
+	TestRemediationTemplateCRDName = "testremediationtemplates.test.medik8s.io"
+	// TestRemediationCRDName is the CRD name for TestRemediation. Mirrors nhcparams.
+	TestRemediationCRDName = "testremediations.test.medik8s.io"
+	// TestRemediationTemplateName is the name of the TestRemediationTemplate CR. Mirrors nhcparams.
+	TestRemediationTemplateName = "test-remediation-template"
+	// TestRemediationClusterRoleName is the ClusterRole granting the NHC controller
+	// access to TestRemediation CRs. Mirrors nhcparams.
+	TestRemediationClusterRoleName = "test-remediation-cluster-role"
+	// TestRemediationClusterRoleBindingName is the ClusterRoleBinding for the above
+	// role. Mirrors nhcparams.
+	TestRemediationClusterRoleBindingName = "test-remediation-binding"
+
+	// TestRemediationRetryLimit is the template strategy's retry count. The strategy
+	// is a no-op Wait, so the spec ends remediation by restarting kubelet rather than
+	// by any real remediator action.
+	TestRemediationRetryLimit = int64(1)
+	// TestRemediationStrategyTimeout is the template strategy's timeout. Mirrors nhcparams.
+	TestRemediationStrategyTimeout = "5m0s"
+	// TestRemediationStrategyType is the template strategy's type: Wait. Mirrors nhcparams.
+	TestRemediationStrategyType = "Wait"
+
+	// TestRemediationCRDEstablishedTimeout is the maximum wait for the TestRemediation
+	// CRDs to report Established after creation.
+	TestRemediationCRDEstablishedTimeout = 2 * time.Minute
+
+	// TestRemediationFixtureDeletionTimeout is the budget for deleting the
+	// TestRemediation fixture at teardown. CRD deletion waits on finalizer-driven CR
+	// garbage collection, which can outlast the generic CRDeletionTimeout. Mirrors
+	// nhcparams.RemediationCRDeletionTimeout.
+	TestRemediationFixtureDeletionTimeout = 5 * time.Minute
 )
