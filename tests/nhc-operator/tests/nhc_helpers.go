@@ -1126,9 +1126,16 @@ func setupMultipleTemplateSupport(ctx context.Context) (string, string) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: nhcparams.MultiTemplateClusterRoleBindingName,
 		},
+		// Under WAO the WAO manager serves NHC admission, so its ServiceAccount does the List. WAO
+		// gives it list on the template kinds of its own bundle only; a kind from a different
+		// vendor needs this grant. On a cluster without WAO the second subject matches nothing.
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
 			Name:      nhcparams.NHCControllerServiceAccount,
+			Namespace: medik8sparams.OperatorNs,
+		}, {
+			Kind:      "ServiceAccount",
+			Name:      medik8sparams.WAOManagerServiceAccount,
 			Namespace: medik8sparams.OperatorNs,
 		}},
 		RoleRef: rbacv1.RoleRef{

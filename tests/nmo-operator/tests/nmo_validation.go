@@ -77,6 +77,12 @@ var _ = Describe("NMO Negative Validation",
 			err := APIClient.AttachScheme(nmov1beta1.AddToScheme)
 			Expect(err).ToNot(HaveOccurred(), "Failed to register NMO scheme")
 
+			By("Ensuring the NMO operand is enabled when WAO manages it")
+			Expect(helpers.EnsureWAOComponentsAvailable(ctx, APIClient,
+				medik8sparams.WAOOperandAvailableTimeout, medik8sparams.WAOOperandPollInterval,
+				medik8sparams.WAOComponentNMO)).To(Succeed(),
+				"WAO must report the NMO operand Available before the first spec")
+
 			By("Verifying NMO deployment is Ready")
 
 			nmoDeployment, err := deployment.Pull(

@@ -11,6 +11,7 @@ import (
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/deployment"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/reportxml"
 
+	"github.com/medik8s/system-tests/tests/internal/helpers"
 	"github.com/medik8s/system-tests/tests/internal/labels"
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
@@ -30,6 +31,12 @@ var _ = Describe(
 	ContinueOnFailure,
 	Label(labels.OperatorSNR), func() {
 		BeforeAll(func() {
+			By("Ensuring the SNR operand is enabled when WAO manages it")
+			Expect(helpers.EnsureWAOComponentsAvailable(context.TODO(), APIClient,
+				medik8sparams.WAOOperandAvailableTimeout, medik8sparams.WAOOperandPollInterval,
+				medik8sparams.WAOComponentSNR)).To(Succeed(),
+				"WAO must report the SNR operand Available before the first spec")
+
 			By("Verify SNR admission webhook is ready before running webhook-dependent tests")
 
 			snrDeployment, err := deployment.Pull(
@@ -82,7 +89,7 @@ var _ = Describe(
 			reportxml.ID("50961"),
 			Label(labels.TierAcceptance, labels.DisruptionNonDestructive,
 				labels.PlatformAny, labels.FrequencyPresubmit,
-				labels.ComponentController), func() {
+				labels.ComponentController, labels.ComponentWebhook), func() {
 				By("Attempting to create a non-default SelfNodeRemediationConfig")
 
 				nonDefaultSNRC := buildSNRCR("SelfNodeRemediationConfig",
@@ -102,7 +109,7 @@ var _ = Describe(
 			reportxml.ID("47330"),
 			Label(labels.TierAcceptance, labels.DisruptionNonDestructive,
 				labels.PlatformAny, labels.FrequencyPresubmit,
-				labels.ComponentController), func() {
+				labels.ComponentController, labels.ComponentWebhook), func() {
 				By("Creating SNRC with invalid string duration values")
 
 				invalidStringSNRC := buildSNRCR("SelfNodeRemediationConfig",

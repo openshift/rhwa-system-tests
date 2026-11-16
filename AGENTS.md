@@ -105,6 +105,7 @@ make vet                         # go vet all non-vendor packages
 make deps-update                 # go mod tidy && go mod vendor
 make install                     # deps-update + install ginkgo v2
 make run-tests                   # execute test-runner.sh (requires ECO_TEST_FEATURES)
+make run-webhook-tests           # admission webhook specs only (WEBHOOK_TARGET=all|wao|far|nhc|nmo|snr)
 make sync-eco-goinfra            # bump eco-goinfra dep (ECO_GOINFRA_BRANCH=release-4.20 optional)
 make build-docker-image          # build podman image system-tests:latest
 ```

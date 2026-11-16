@@ -1,5 +1,7 @@
 package medik8sparams
 
+import "time"
+
 const (
 	// WAOCRDGroup is the API group of the workload-availability-operator configuration CRD.
 	WAOCRDGroup = "workloadavailability.medik8s.io"
@@ -16,6 +18,17 @@ const (
 	// WAOConfigName is the only permitted name of the configuration: the CR is a
 	// cluster-scoped singleton that WAO creates automatically with every operand disabled.
 	WAOConfigName = "cluster"
+
+	// WAOManagerServiceAccount is the ServiceAccount of the WAO manager. The manager serves the
+	// admission webhooks of FAR, NHC, NMO and SNR, so admission reads use this account.
+	WAOManagerServiceAccount = "workload-availability-operator-controller-manager"
+
+	// WAOOperandAvailableTimeout bounds the wait for an enabled operand to report Available in a
+	// suite precondition. It covers the image pull and the manager Deployment rollout.
+	WAOOperandAvailableTimeout = 5 * time.Minute
+
+	// WAOOperandPollInterval is the poll interval for the phase of an operand.
+	WAOOperandPollInterval = 5 * time.Second
 )
 
 // Operand keys under spec.components of the WorkloadAvailabilityConfig. The same keys

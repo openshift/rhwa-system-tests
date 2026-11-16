@@ -3,7 +3,9 @@ package helpers
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 
@@ -201,6 +203,103 @@ func TestWAOComponentPhase(t *testing.T) {
 
 		if phase != want {
 			t.Errorf("operand %s phase = %q, want %q", component, phase, want)
+		}
+	}
+}
+
+// waoConfigWithStatus builds the singleton with the given intent and observed phase per operand.
+func waoConfigWithStatus(enabled map[string]bool, phases map[string]string) *unstructured.Unstructured {
+	components := make(map[string]interface{}, len(enabled))
+	for component, value := range enabled {
+		components[component] = map[string]interface{}{"enabled": value}
+	}
+
+	statuses := make([]interface{}, 0, len(phases))
+	for component, phase := range phases {
+		statuses = append(statuses, map[string]interface{}{
+			"name": component, "phase": phase, "admissionReady": phase != medik8sparams.WAOPhaseDegraded,
+		})
+	}
+
+	config := waoConfig(components)
+	config.Object["status"] = map[string]interface{}{"components": statuses}
+
+	return config
+}
+
+func TestEnsureWAOComponentsAvailable(t *testing.T) {
+	const timeout, interval = 50 * time.Millisecond, 10 * time.Millisecond
+
+	t.Run("no singleton is a cluster without WAO", func(t *testing.T) {
+		err := EnsureWAOComponentsAvailable(
+			context.Background(), waoClient(), timeout, interval, medik8sparams.WAOComponentFAR)
+		if err != nil {
+			t.Fatalf("EnsureWAOComponentsAvailable: %v", err)
+		}
+	})
+
+	t.Run("an Available operand is not patched", func(t *testing.T) {
+		k8sClient := waoClient(waoConfigWithStatus(
+			map[string]bool{medik8sparams.WAOComponentFAR: true},
+			map[string]string{medik8sparams.WAOComponentFAR: medik8sparams.WAOPhaseAvailable}))
+		before, err := GetWAOConfig(context.Background(), k8sClient)
+		if err != nil {
+			t.Fatalf("GetWAOConfig: %v", err)
+		}
+
+		err = EnsureWAOComponentsAvailable(
+			context.Background(), k8sClient, timeout, interval, medik8sparams.WAOComponentFAR)
+		if err != nil {
+			t.Fatalf("EnsureWAOComponentsAvailable: %v", err)
+		}
+
+		after, err := GetWAOConfig(context.Background(), k8sClient)
+		if err != nil {
+			t.Fatalf("GetWAOConfig: %v", err)
+		}
+
+		if before.GetResourceVersion() != after.GetResourceVersion() {
+			t.Errorf("resourceVersion changed from %s to %s; the precondition patched a correct cluster",
+				before.GetResourceVersion(), after.GetResourceVersion())
+		}
+	})
+
+	t.Run("a Disabled operand is enabled and the wait names it", func(t *testing.T) {
+		k8sClient := waoClient(waoConfigWithStatus(
+			map[string]bool{medik8sparams.WAOComponentNHC: false},
+			map[string]string{medik8sparams.WAOComponentNHC: medik8sparams.WAOPhaseDisabled}))
+
+		// No controller changes the phase of the fake object, so the wait must end with an error.
+		err := EnsureWAOComponentsAvailable(
+			context.Background(), k8sClient, timeout, interval, medik8sparams.WAOComponentNHC)
+		if err == nil || !strings.Contains(err.Error(), medik8sparams.WAOComponentNHC) {
+			t.Fatalf("EnsureWAOComponentsAvailable error = %v, want a timeout that names the operand", err)
+		}
+
+		if !waoEnabled(t, k8sClient, medik8sparams.WAOComponentNHC) {
+			t.Error("nodeHealthCheck was not enabled")
+		}
+	})
+}
+
+func TestWAOComponentAdmissionReady(t *testing.T) {
+	config := waoConfigWithStatus(nil, map[string]string{
+		medik8sparams.WAOComponentFAR: medik8sparams.WAOPhaseDisabled,
+		medik8sparams.WAOComponentNHC: medik8sparams.WAOPhaseDegraded,
+	})
+
+	for component, want := range map[string]bool{
+		medik8sparams.WAOComponentFAR: true,
+		medik8sparams.WAOComponentNHC: false,
+		medik8sparams.WAOComponentMDR: false,
+	} {
+		got, err := WAOComponentAdmissionReady(config, component)
+		if err != nil {
+			t.Fatalf("WAOComponentAdmissionReady(%s): %v", component, err)
+		}
+
+		if got != want {
+			t.Errorf("WAOComponentAdmissionReady(%s) = %v, want %v", component, got, want)
 		}
 	}
 }
