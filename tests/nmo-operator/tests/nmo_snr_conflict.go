@@ -9,8 +9,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -178,19 +176,8 @@ var _ = Describe(
 // silently skip the spec.
 func isSNRCRDInstalled(ctx context.Context) bool {
 	GinkgoHelper()
-	crd := &apiextensionsv1.CustomResourceDefinition{}
-	err := APIClient.Get(ctx, client.ObjectKey{Name: nmoparams.SNRCRDName}, crd)
-	if err == nil {
-		return true
-	}
 
-	if errors.IsNotFound(err) {
-		return false
-	}
-
-	Fail(fmt.Sprintf("checking SNR CRD %s: %v", nmoparams.SNRCRDName, err))
-
-	return false
+	return isCRDInstalled(ctx, nmoparams.SNRCRDName)
 }
 
 // countSNRAgentPodsOnNode returns how many SNR agent DaemonSet pods are bound to nodeName,

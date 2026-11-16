@@ -351,7 +351,7 @@ func assertMaintenanceEvent(ctx context.Context, nmCRName, expectedReason string
 }
 
 func assertMaintenanceLease(ctx context.Context, nodeName string, shouldExist bool) {
-	leaseName := fmt.Sprintf("node-%s", nodeName)
+	leaseName := nodeLeaseName(nodeName)
 
 	if shouldExist {
 		EventuallyWithOffset(1, func(assertion Gomega) {
