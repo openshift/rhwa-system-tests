@@ -17,6 +17,7 @@ import (
 	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
+	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // getNodeBootID returns the bootID of the named node.
@@ -417,6 +419,108 @@ func requireSBRCBlockVolumeModeSupport() {
 		"installed SBR operator CSV v%s predates %s (RHWA-1313, first shipped in v%s); "+
 			"skipping Ceph RBD block persistent fencing",
 		csvVersion, sbrparams.SBRCBlockVolumeModeField, sbrparams.FirstSBRCsvWithBlockVolumeMode))
+}
+
+// requireSBRCBlockPerNodeSupport skips the spec unless the installed SBR operator accepts
+// sharedStorageVolumeMode: BlockPerNode (RHWA-1839). Like requireSBRCBlockVolumeModeSupport it asks
+// the installed API rather than a version number, but through a server-side dry-run create: the
+// value is a CRD enum member, so an operator that predates the mode rejects the object and nothing
+// is ever persisted. Only an invalid-value error on that field skips; every other error fails, so a
+// webhook or API server problem can never be mistaken for a missing feature.
+func requireSBRCBlockPerNodeSupport() {
+	By("Verifying the installed SBR operator accepts sharedStorageVolumeMode: BlockPerNode")
+
+	// The class name is never resolved: the dry run stops at admission, and only the volume mode
+	// is under test here. It has to be non-empty, because BlockPerNode without a StorageClass is
+	// rejected by the operator's own validation for a different reason.
+	probe := buildSBRC(sbrparams.SBRCBlockPerNodeLockTestName,
+		buildBlockPerNodeSBRC("sbr-block-per-node-support-probe", nil))
+	createErr := APIClient.Create(context.TODO(), probe, runtimeclient.DryRunAll)
+	if createErr == nil {
+		GinkgoWriter.Printf("SBR operator accepts %s: BlockPerNode\n", sbrparams.SBRCBlockVolumeModeField)
+
+		return
+	}
+
+	rejected := k8serrors.IsInvalid(createErr) || k8serrors.IsBadRequest(createErr)
+	if rejected && (strings.Contains(createErr.Error(), sbrparams.SBRCBlockVolumeModeField) ||
+		strings.Contains(createErr.Error(), "BlockPerNode")) {
+		Skip(fmt.Sprintf("installed SBR operator does not accept %s: BlockPerNode (RHWA-1839): %v",
+			sbrparams.SBRCBlockVolumeModeField, createErr))
+
+		return
+	}
+
+	Fail(fmt.Sprintf("a dry-run StorageBasedRemediationConfig with %s: BlockPerNode must be "+
+		"accepted or rejected as an invalid value for that field, got: %v",
+		sbrparams.SBRCBlockVolumeModeField, createErr))
+}
+
+// patchSBRCSpecField patches one spec field on the named SBRC and waits until the controller has
+// re-rendered its DaemonSet, returning the re-rendered DaemonSet. The generation is what proves the
+// controller acted: it advances only when the rendered pod template actually changed, so a patch
+// the operator ignored fails here rather than later.
+func patchSBRCSpecField(sbrcName, field string, value interface{}, previousGeneration int64) *appsv1.DaemonSet {
+	dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrcName
+	patchPayload, marshalErr := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{field: value},
+	})
+	Expect(marshalErr).ToNot(HaveOccurred(), "Failed to marshal the %s=%v patch", field, value)
+	patchErr := APIClient.Patch(
+		context.TODO(),
+		buildSBRC(sbrcName, map[string]interface{}{}),
+		runtimeclient.RawPatch(types.MergePatchType, patchPayload),
+	)
+	Expect(patchErr).ToNot(HaveOccurred(),
+		"StorageBasedRemediationConfig %q must accept %s=%v", sbrcName, field, value)
+
+	var agentDS *appsv1.DaemonSet
+
+	Eventually(func() error {
+		fetched, getErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
+			context.TODO(), dsName, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("DaemonSet %s not found: %w", dsName, getErr)
+		}
+
+		if fetched.Generation <= previousGeneration {
+			return fmt.Errorf("DaemonSet %s generation not advanced (current: %d, pre-patch: %d)",
+				dsName, fetched.Generation, previousGeneration)
+		}
+
+		agentDS = fetched
+
+		return nil
+	}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
+		"Controller must re-render DaemonSet %s after %s=%v", dsName, field, value)
+
+	return agentDS
+}
+
+// labelNodes puts one label on every named node. The nodes are patched, not updated, so a
+// concurrent writer on another field cannot make this fail.
+func labelNodes(key, value string, nodeNames ...string) {
+	GinkgoHelper()
+	patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, key, value))
+
+	for _, nodeName := range nodeNames {
+		_, patchErr := APIClient.CoreV1Interface.Nodes().Patch(context.TODO(), nodeName,
+			types.MergePatchType, patch, metav1.PatchOptions{})
+		Expect(patchErr).ToNot(HaveOccurred(), "Node %q must accept the %q label", nodeName, key)
+	}
+}
+
+// removeNodeLabel removes one label from every named node. Failures are logged rather than
+// asserted: this runs in teardown, where it must never mask the test result.
+func removeNodeLabel(key string, nodeNames ...string) {
+	patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{%q:null}}}`, key))
+
+	for _, nodeName := range nodeNames {
+		if _, patchErr := APIClient.CoreV1Interface.Nodes().Patch(context.TODO(), nodeName,
+			types.MergePatchType, patch, metav1.PatchOptions{}); patchErr != nil {
+			GinkgoWriter.Printf("Warning: remove label %s from node %s: %v\n", key, nodeName, patchErr)
+		}
+	}
 }
 
 // nhcsUsingSBRTemplate returns the names of NodeHealthChecks that use SBR as a remediator,
