@@ -147,15 +147,19 @@ Label(
     labels.Operator<OP>,
     labels.Tier<TIER>,
     labels.Component<COMPONENT>,
+    labels.StabilityCandidate,
 )
 ```
 
 > Operator, tier, and component are mandatory — CI selects specs with
 > `ECO_TEST_LABELS` expressions such as `operator:nhc && tier:smoke`, and a spec
-> missing its operator label is silently skipped by those runs. Add frequency,
-> disruption, platform, and topology whenever the test is constrained on that
-> axis, and keep them consistent with section 4. Constants only, from
-> `tests/internal/labels` — never a bare string literal.
+> missing its operator label is silently skipped by those runs. Every **new**
+> default-lane spec must also include `labels.StabilityCandidate`.
+> Do not add it for upgrade / interop /
+> disconnected-only workflows. Add frequency, disruption, platform, and topology
+> whenever the test is constrained on that axis, and keep them consistent with
+> section 4. Constants only, from `tests/internal/labels` — never a bare string
+> literal.
 
 ## 11. Running it standalone
 
@@ -173,6 +177,7 @@ It("RHWA-XXXX: <It text>",
         labels.Operator<OP>,
         labels.Tier<TIER>,
         labels.Component<COMPONENT>,
+        labels.StabilityCandidate,
     ), func() {
         DeferCleanup(func() {
             By("DeferCleanup: <recovery>")

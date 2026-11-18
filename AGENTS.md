@@ -175,10 +175,13 @@ All `It`/`DescribeTable` specs should be labelled using constants from `tests/in
 | Operator   | `operator:far`, `operator:nhc`, `operator:snr`, `operator:mdr`, `operator:nmo`, `operator:sbr`, `operator:cur`     |
 | Tier       | `tier:smoke`, `tier:acceptance`, `tier:resiliency`, `tier:upgrade`, `tier:interop`                                 |
 | Frequency  | `frequency:presubmit`, `frequency:nightly`, `frequency:weekly`, `frequency:release`                                |
+| Stability  | `stability:candidate` (presence = not yet stable) |
 | Disruption | `disruption:destructive`, `disruption:nondestructive`                                                              |
 | Component  | `component:controller`, `component:remediation`, `component:webhook`, `component:metrics`, `component:post-deploy` |
 | Platform   | `platform:aws`, `platform:baremetal`, `platform:any`                                                               |
 | Topology   | `topology:control-plane`, `topology:minimal-worker`, `topology:zero-worker`                                        |
+
+Every **new** `It`/`DescribeTable` must include `labels.StabilityCandidate`. Do **not** put `stability:candidate` on specs that need a non-default workflow (`tier:upgrade`, `tier:upgrade-operator`, `tier:upgrade-cluster`, `tier:fresh-install`, `tier:interop`, disconnected-only paths, etc.) — those stabilize outside the candidate daily lane.
 
 ### Key Conventions
 
