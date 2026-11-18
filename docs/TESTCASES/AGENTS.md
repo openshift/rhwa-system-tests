@@ -147,9 +147,11 @@ These are enforced in review and, where noted, by `make lint`.
   axis, and keep them consistent with section 4 of the document. Older specs
   predate this rule and do not all satisfy it; new ones must.
 - Every **new** spec must also carry `labels.StabilityCandidate` (`stability:candidate`).
-  Normal jobs filter with `!stability:candidate`; candidate dailies select only
-  candidates. When the test is promoted, the label will be automatically removed. Do not add `StabilityCandidate` to specs that require a
-  non-default workflow (`tier:upgrade`, `tier:upgrade-operator`,
+  rhwa-system-tests **presubmits** include candidates so PRs validate them before
+  merge. Stable periodics and medik8s operator jobs use `!stability:candidate`;
+  candidate dailies select only candidates for soak/promotion. When the test is
+  promoted, the label is removed. Do not add `StabilityCandidate` to specs that
+  require a non-default workflow (`tier:upgrade`, `tier:upgrade-operator`,
   `tier:upgrade-cluster`, `tier:fresh-install`, `tier:interop`, disconnected-only
   paths, and similar): those are outside the candidate daily lane.
 - Assertion messages state what *must* hold, naming the resource:

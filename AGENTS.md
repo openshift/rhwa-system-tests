@@ -183,6 +183,11 @@ All `It`/`DescribeTable` specs should be labelled using constants from `tests/in
 
 Every **new** `It`/`DescribeTable` must include `labels.StabilityCandidate`. Do **not** put `stability:candidate` on specs that need a non-default workflow (`tier:upgrade`, `tier:upgrade-operator`, `tier:upgrade-cluster`, `tier:fresh-install`, `tier:interop`, disconnected-only paths, etc.) — those stabilize outside the candidate daily lane.
 
+CI routing for `stability:candidate`:
+- **rhwa-system-tests presubmits** include candidates so a PR can validate new specs before merge (no extra candidate-only PR job).
+- **Stable periodics** (upstream/konflux/disconnected weeklies and non-candidate dailies) and **medik8s operator** jobs exclude them with `!stability:candidate`.
+- **Candidate dailies** select only `stability:candidate` for soak / promotion.
+
 ### Key Conventions
 
 - Every new test ships as two artifacts in the same PR: a test case document `docs/TESTCASES/rhwa-<jira-id>.md` (run `make new-testcase JIRA=RHWA-<id>` to generate it from the [TEMPLATE.md](docs/TESTCASES/TEMPLATE.md) skeleton; [EXAMPLE.md](docs/TESTCASES/EXAMPLE.md) shows a finished one) and its Ginkgo spec. Existing specs need no backfilled document. Requirements: [docs/TESTCASES/AGENTS.md](docs/TESTCASES/AGENTS.md).
