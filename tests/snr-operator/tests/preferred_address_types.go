@@ -101,7 +101,7 @@ var _ = Describe(
 
 			By("Collecting control plane nodes and their InternalIP addresses")
 
-			nodeList, listErr := listMasterNodes(ctx, APIClient)
+			nodeList, listErr := listControlPlaneNodes(ctx, APIClient)
 			Expect(listErr).ToNot(HaveOccurred(), "Failed to list control plane nodes")
 			Expect(nodeList.Items).ToNot(BeEmpty(), "Cluster must have at least one control plane node")
 			controlPlaneInternalIPs = make(map[string]string, len(nodeList.Items))

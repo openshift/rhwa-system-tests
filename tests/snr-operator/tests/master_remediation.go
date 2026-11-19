@@ -43,7 +43,7 @@ var _ = Describe("SNR Functional - Master Remediation",
 
 			// 3 masters minimum: target (kubelet stopped) + 2 surviving
 			// masters to maintain etcd quorum (majority requirement).
-			masterCount, err := countReadyMasterNodes(ctx, APIClient)
+			masterCount, err := countReadyControlPlaneNodes(ctx, APIClient)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(masterCount).To(BeNumerically(">=", snrparams.MinReadyMasterNodes),
 				"Master remediation tests require at least %d Ready master nodes for etcd quorum",
@@ -51,7 +51,7 @@ var _ = Describe("SNR Functional - Master Remediation",
 
 			By("Selecting target master node")
 
-			masterNode, err := selectMasterNode(ctx, APIClient)
+			masterNode, err := selectControlPlaneNode(ctx, APIClient)
 			Expect(err).ToNot(HaveOccurred(), "Failed to select master node")
 			targetMasterName = masterNode.Name
 			GinkgoWriter.Printf("Target master node: %s\n", targetMasterName)
