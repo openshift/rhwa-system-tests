@@ -42,6 +42,11 @@ const (
 	// FrequencyRelease marks tests that run for releases.
 	FrequencyRelease = "frequency:release"
 
+	// StabilityCandidate marks new or not-yet-stable tests. Specs with this label
+	// run only in candidate CI jobs until the label is removed after promotion.
+	// Absence of this label means the test is treated as stable.
+	StabilityCandidate = "stability:candidate"
+
 	// DisruptionDestructive marks tests that reboot or drain nodes.
 	DisruptionDestructive = "disruption:destructive"
 	// DisruptionNonDestructive marks tests that do not disrupt nodes.

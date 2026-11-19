@@ -145,14 +145,16 @@ Label(
     labels.PlatformAny,
     labels.ComponentRemediation,
     labels.TopologyMinimalWorker,
+    labels.StabilityCandidate,
 )
 ```
 
 > Always set operator, tier, and component — `ECO_TEST_LABELS` filtering in CI
-> depends on them. Add frequency, disruption, platform, and topology whenever the
-> test is constrained on that axis; the topology constant here matches the
-> `topology:minimal-worker` declared in section 4. One constant per axis, taken
-> from `tests/internal/labels` — never a bare string literal.
+> depends on them. New default-lane specs also carry `labels.StabilityCandidate`
+> until automatically promoted. Add frequency, disruption, platform, and
+> topology whenever the test is constrained on that axis; the topology constant
+> here matches the `topology:minimal-worker` declared in section 4. One constant
+> per axis, taken from `tests/internal/labels` — never a bare string literal.
 
 ## 11. Running it standalone
 
@@ -174,6 +176,7 @@ It("RHWA-1234: NHC creates a SelfNodeRemediation CR for an unhealthy worker node
         labels.PlatformAny,
         labels.ComponentRemediation,
         labels.TopologyMinimalWorker,
+        labels.StabilityCandidate,
     ), func() {
         DeferCleanup(func() {
             By("DeferCleanup: restoring the target node and removing the NodeHealthCheck")

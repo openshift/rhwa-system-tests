@@ -146,6 +146,14 @@ These are enforced in review and, where noted, by `make lint`.
   disruption, platform, and topology whenever the test is constrained on that
   axis, and keep them consistent with section 4 of the document. Older specs
   predate this rule and do not all satisfy it; new ones must.
+- Every **new** spec must also carry `labels.StabilityCandidate` (`stability:candidate`).
+  rhwa-system-tests **presubmits** include candidates so PRs validate them before
+  merge. Stable periodics and medik8s operator jobs use `!stability:candidate`;
+  candidate dailies select only candidates for soak/promotion. When the test is
+  promoted, the label is removed. Do not add `StabilityCandidate` to specs that
+  require a non-default workflow (`tier:upgrade`, `tier:upgrade-operator`,
+  `tier:upgrade-cluster`, `tier:fresh-install`, `tier:interop`, disconnected-only
+  paths, and similar): those are outside the candidate daily lane.
 - Assertion messages state what *must* hold, naming the resource:
   `"Node %q must reach %s=True after CephFS port injection"`.
 - Gomega assertions live in test files only, never in `internal/` packages.
@@ -187,6 +195,9 @@ the work item is gone or you cannot find it, write `None` and move on.
 - [ ] Destructive tests declared and labelled
 - [ ] Labels use `tests/internal/labels` constants; operator, tier, and
       component set, plus every other axis the test is constrained on
+- [ ] New specs include `labels.StabilityCandidate` unless they need a
+      non-default workflow (upgrade / interop / disconnected-only / …); never leave
+      a new default-lane spec without it
 - [ ] No `time.Sleep`; timeouts come from `<op>params`/`medik8sparams`
 - [ ] Preconditions clean stale state and wait for removal
 - [ ] Cleanup idempotent and `IsNotFound`-tolerant
