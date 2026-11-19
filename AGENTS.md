@@ -94,7 +94,7 @@ make vet                         # go vet all non-vendor packages
 make deps-update                 # go mod tidy && go mod vendor
 make install                     # deps-update + install ginkgo v2
 make run-tests                   # execute test-runner.sh (requires ECO_TEST_FEATURES)
-make sync-eco-goinfra            # bump eco-goinfra dep (ECO_GOINFRA_BRANCH=release-4.20 optional)
+make sync-eco-goinfra            # bump eco-goinfra from medik8s fork (ECO_GOINFRA_BRANCH=main optional)
 make build-docker-image          # build podman image system-tests:latest
 ```
 
@@ -188,7 +188,7 @@ All `It`/`DescribeTable` specs should be labelled using constants from `tests/in
 - Use `Eventually`/`Consistently` with explicit timeout + poll interval from `<op>params`/`medik8sparams` — never `time.Sleep`.
 - Gomega assertions belong only in test files, never in `internal/` packages.
 - Always run `go mod vendor` after any dependency change.
-- To update eco-goinfra: use the GitHub Actions "eco-goinfra-bump" workflow, or run `make sync-eco-goinfra ECO_GOINFRA_BRANCH=release-4.20`.
+- To update eco-goinfra: use the GitHub Actions "eco-goinfra-bump" workflow, or run `make sync-eco-goinfra` (pulls `github.com/medik8s/eco-goinfra` via a `replace`; import path stays `github.com/rh-ecosystem-edge/eco-goinfra`).
 - CI gates: lint, `ECO_DRY_RUN=true` dry-run, unit tests. ≥2 reviewer approvals required to merge.
 
 ### Migrating Tests from Python (ocp-edge-auto)

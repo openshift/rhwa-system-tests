@@ -13,7 +13,7 @@ jobs:
     env:
       SHELL: /bin/bash
       ECO_GOINFRA_PATH: goinfra
-      ECO_GOINFRA_REPO: rh-ecosystem-edge/eco-goinfra
+      ECO_GOINFRA_REPO: medik8s/eco-goinfra
 
     steps:
       - name: Check out the system-tests code

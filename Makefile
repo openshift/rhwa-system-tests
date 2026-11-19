@@ -69,14 +69,13 @@ deps-update:
 	go mod tidy && \
 	go mod vendor
 
-# ECO_GOINFRA_BRANCH: optional branch to sync from (e.g. release-4.20). Empty = default branch.
+# ECO_GOINFRA_BRANCH: optional ref on the medik8s fork (e.g. main). Empty = main.
+# Import path stays github.com/rh-ecosystem-edge/eco-goinfra; content comes from the fork via replace.
 ECO_GOINFRA_BRANCH ?=
+ECO_GOINFRA_MODULE ?= github.com/rh-ecosystem-edge/eco-goinfra
+ECO_GOINFRA_FORK ?= github.com/medik8s/eco-goinfra
 sync-eco-goinfra:
-ifneq ($(ECO_GOINFRA_BRANCH),)
-	go get github.com/rh-ecosystem-edge/eco-goinfra@$(ECO_GOINFRA_BRANCH)
-else
-	go get github.com/rh-ecosystem-edge/eco-goinfra
-endif
+	go mod edit -replace $(ECO_GOINFRA_MODULE)=$(ECO_GOINFRA_FORK)@$(if $(ECO_GOINFRA_BRANCH),$(ECO_GOINFRA_BRANCH),main)
 	go mod tidy
 	go mod vendor
 
