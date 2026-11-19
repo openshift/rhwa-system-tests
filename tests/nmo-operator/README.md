@@ -280,3 +280,27 @@ SelfNodeRemediationConfig CRD is absent (the e2e-nmo-aws CI job installs only NM
 - **Environment**: Connected or disconnected
 - **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="SNR agent does not run on a node under NMO maintenance" ./tests/nmo-operator/...`
 - **Pass criteria**: The NMO deployment is Ready; the SelfNodeRemediationConfig CRD exists (skipped otherwise); the SNR agent DaemonSet self-node-remediation-ds exists in the operator namespace; at least 2 schedulable non-control-plane worker nodes exist (skipped otherwise); an SNR agent pod is Running with all containers ready on the target worker before maintenance; the NodeMaintenance CR reaches Succeeded phase with the node cordoned (Unschedulable=true), the medik8s.io/drain NoSchedule taint applied, DrainProgress=100 and PendingPods empty; no SNR agent pod remains bound to the node; the node carries `remediation.medik8s.io/exclude-from-remediation=true`; no SNR agent pod appears on the node for the whole Consistently window; after deleting the NodeMaintenance CR the node is uncordoned (Unschedulable=false) with the drain taint removed and the exclude-from-remediation label absent; an SNR agent pod is Running with all containers ready on the node again; on teardown the NodeMaintenance CR is deleted and the node returns to Ready and uncordoned (best-effort, logged if incomplete)
+
+### 20. Verify NHC Does Not Remediate a Worker Node Leased by NMO ([OCP-65651](https://polarion.engineering.redhat.com/polarion/#/project/OSE/workitem?id=OCP-65651))
+
+Puts a worker node under NMO maintenance -- so NMO holds the node's lease in
+medik8s-leases -- and stops kubelet on it. While the lease is held, NHC must not
+start remediating: it stays Enabled, the lease holder stays node-maintenance and no
+TestRemediation CR is created for the whole window. Deleting the NodeMaintenance CR
+hands the lease over: NHC starts remediating within the same window and becomes the
+lease holder. Restarting kubelet ends the remediation (the dummy template's Wait
+strategy never finishes on its own): the node returns to Ready, NHC returns to
+Enabled, and no lease remains in medik8s-leases. Ported from the Python
+`test_nmo_node_lease_on_worker`. The hand-over half is the positive control proving
+the negative window was not vacuous: the same node with kubelet still down does get
+remediated once the lease is released. The NHC CR uses the TestRemediation dummy
+remediator (as the Python and the NHC suite's merged specs do), not the Polarion
+plan's SNR template. Requires NMO and NHC together plus SSH access to the nodes;
+skips when either operator, SSH or enough eligible workers are missing. Labelled
+`tier:interop`, so the regular per-operator CI lanes exclude it.
+
+- **Operators**: NMO v0.17.0+, NHC
+- **Cluster**: MNO with at least 2 eligible worker nodes (Ready, schedulable, non-control-plane, hosting neither the NMO controller pod nor the SSH bastion); skipped otherwise
+- **Environment**: Connected or disconnected, with SSH access to cluster nodes; the private key is auto-discovered from `$CLUSTER_PROFILE_DIR/ssh-privatekey`, `/home/kni/.ssh/id_rsa` or `$HOME/.ssh/id_rsa` (on Prow AWS, via the ssh-bastion step)
+- **Standalone**: `ginkgo --label-filter="operator:nmo" --focus="leased by NMO" ./tests/nmo-operator/...`
+- **Pass criteria**: An SSH key is available (skipped otherwise); the NMO deployment is Ready; the NodeHealthCheck CRD exists (skipped otherwise); the NHC deployment is Ready; every pre-existing NodeHealthCheck CR is deleted and gone; the TestRemediationTemplate and TestRemediation CRDs are Established, the TestRemediationTemplate CR and its ClusterRole/ClusterRoleBinding exist; leftover TestRemediation CRs are deleted; at least 2 eligible worker nodes exist (skipped otherwise); stale NodeMaintenance CRs targeting the selected node are deleted; the NodeMaintenance CR is created and reaches Succeeded phase with the node cordoned (Unschedulable=true), the medik8s.io/drain NoSchedule taint applied, DrainProgress=100 and PendingPods empty; the node lease `node-<name>` exists in medik8s-leases held by node-maintenance with LeaseDurationSeconds 3600; the NodeHealthCheck CR is created with minHealthy 30%, 30s Ready=False/Unknown unhealthy conditions and the TestRemediation template, and reaches Enabled; kubelet is stopped on the node via SSH and the node's Ready condition leaves True; for the whole 63s window the NHC phase stays Enabled, the lease holder stays node-maintenance and no TestRemediation CR exists; the NodeMaintenance CR is deleted and fully removed; NHC reaches Remediating within 63s of the hand-over and the lease holder contains `NodeHealthCheck-nhc-node-lease-test`; kubelet is restarted via SSH and the node becomes Ready again; NHC returns to Enabled within 60s; the node lease is deleted and no lease remains in medik8s-leases; a timeline report entry records when the node went NotReady, when the NodeMaintenance was deleted and when Remediating was observed; on teardown (even after a failed spec) the NodeHealthCheck CR is deleted, the NodeMaintenance CR is deleted, kubelet is restarted when the node is NotReady, the node returns to Ready, uncordoned and free of the maintenance taints, and the TestRemediation fixture (template CR, RBAC, both CRDs) is removed (best-effort, logged if incomplete)
