@@ -22,6 +22,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // discoverCephRBDStorageClass returns the Ceph RBD block storage class name.
@@ -62,6 +63,24 @@ func buildBlockModeSBRC(storageClass string, additionalSpec map[string]interface
 	spec := map[string]interface{}{
 		"sharedStorageClass":      storageClass,
 		"sharedStorageVolumeMode": "Block",
+	}
+
+	// Merge additional spec fields if provided
+	for key, value := range additionalSpec {
+		spec[key] = value
+	}
+
+	return spec
+}
+
+// buildBlockPerNodeSBRC returns an unstructured StorageBasedRemediationConfig spec with the
+// BlockPerNode volume mode: every selected node gets its own private RWO Block probe volume from
+// storageClass instead of one RWX volume shared by all of them. It mirrors buildBlockModeSBRC; the
+// caller merges in the node selector and the timings it needs through additionalSpec.
+func buildBlockPerNodeSBRC(storageClass string, additionalSpec map[string]interface{}) map[string]interface{} {
+	spec := map[string]interface{}{
+		"sharedStorageClass":      storageClass,
+		"sharedStorageVolumeMode": "BlockPerNode",
 	}
 
 	// Merge additional spec fields if provided
@@ -118,9 +137,19 @@ func logNodeStatus(nodeName string) {
 		nodeName, statusIcon, readyStatus, readyReason, bootID, taintInfo)
 }
 
+// nsenterHost runs a command in PID 1's network and mount namespaces, so the files and open
+// descriptors it sees are the host's rather than the pod's own. The host-command pods also set
+// hostPID, so /proc inside them lists the host's processes too.
+const nsenterHost = "nsenter --target 1 --net --mount --"
+
 // nsenterIPTables runs iptables in PID 1's network and mount namespaces, so the rules land on the
 // host rather than inside the pod's own namespaces.
-const nsenterIPTables = "nsenter --target 1 --net --mount -- iptables"
+const nsenterIPTables = nsenterHost + " iptables"
+
+// shadowProbeVolumeSuffix renames a shadow agent's generic ephemeral probe claim. Two pods cannot
+// share one ephemeral volume, and the probe is irrelevant to the host lock in any case: the lock is
+// taken before storage is touched.
+const shadowProbeVolumeSuffix = "-shadow"
 
 // cephRBDRejectMatches are the iptables matches covering every port an RBD client talks to:
 // 3300 (msgr2 monitor), 6789 (msgr1 monitor) and 6800-7300 (OSD/MDS).
@@ -645,6 +674,74 @@ func nodeRestoredAfterRemediation(nodeName string) error {
 	return nil
 }
 
+// deleteVictimRemediation deletes a node's remediation CR and waits for the node to come out of
+// remediation. The delete is a plain one, not a force-removal: the reconciler's finalizer is what
+// uncordons the node and removes the out-of-service taint. Teardown force-removes whatever is left
+// behind. Safe to call twice — the second delete is a NotFound and the node is already restored.
+func deleteVictimRemediation(sbrCR *unstructured.Unstructured, victimNodeName string) {
+	By(fmt.Sprintf("Deleting the StorageBasedRemediation CR for node %q, as NHC would", victimNodeName))
+
+	deleteErr := APIClient.Delete(context.TODO(), sbrCR)
+	if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
+		GinkgoWriter.Printf("Warning: delete StorageBasedRemediation/%s: %v\n",
+			victimNodeName, deleteErr)
+	}
+
+	By(fmt.Sprintf("Waiting for the victim node %q to be schedulable with no %s taint",
+		victimNodeName, sbrparams.OutOfServiceTaintKey))
+
+	Eventually(func() error {
+		return nodeRestoredAfterRemediation(victimNodeName)
+	}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).Should(Succeed(),
+		"Node %q must be uncordoned with no %s taint once its remediation CR is deleted",
+		victimNodeName, sbrparams.OutOfServiceTaintKey)
+}
+
+// agentPodUIDsByNode returns the UID of the SBRC's agent pod on each given node, so a DaemonSet
+// rollout can be asserted on pod identity rather than on readiness alone: an agent that was never
+// replaced is Ready throughout.
+func agentPodUIDsByNode(sbrcName string, nodeNames ...string) (map[string]types.UID, error) {
+	uids := make(map[string]types.UID, len(nodeNames))
+
+	for _, nodeName := range nodeNames {
+		podName, nameErr := agentPodNameByNode(sbrcName, nodeName, true)
+		if nameErr != nil {
+			return nil, nameErr
+		}
+
+		agentPod, pullErr := pod.Pull(APIClient, podName, medik8sparams.OperatorNs)
+		if pullErr != nil {
+			return nil, fmt.Errorf("pull agent pod %s: %w", podName, pullErr)
+		}
+
+		uids[nodeName] = agentPod.Object.UID
+	}
+
+	return uids, nil
+}
+
+// agentPodsReplaced returns nil once every node in before runs a Ready agent pod of the SBRC with a
+// different UID than the one recorded there. Intended as an Eventually body after a change that
+// must roll the agent DaemonSet.
+func agentPodsReplaced(sbrcName string, before map[string]types.UID) error {
+	for nodeName, previous := range before {
+		if readyErr := agentPodReadyOnNode(sbrcName, nodeName); readyErr != nil {
+			return readyErr
+		}
+
+		current, uidErr := agentPodUIDsByNode(sbrcName, nodeName)
+		if uidErr != nil {
+			return uidErr
+		}
+
+		if current[nodeName] == previous {
+			return fmt.Errorf("the agent pod of SBRC %s on node %s was not replaced", sbrcName, nodeName)
+		}
+	}
+
+	return nil
+}
+
 // stalledNodeIDs returns, in ascending order, the node IDs whose heartbeat sequence did not advance
 // between two reads of the region. A node whose slot is missing from the later read counts as
 // stalled too: either way it is not writing.
@@ -690,18 +787,15 @@ type splitBrainBaseline struct {
 	witnessRestarts map[string]int32   // witness node name -> agent container restart count
 }
 
-// splitBrainNodes returns one victim and every other schedulable worker node as a witness. The
-// victim must not host an SBR controller pod, so the fencing reboot does not take the operator down
-// mid-test; witnesses may, since a spurious fence on any worker is exactly what the test looks for.
-// It returns ("", nil) when fewer than MinWorkersForBlockSplitBrain workers are schedulable or none of
-// them can be the victim. The workers are sorted so the victim is chosen deterministically across runs.
-func splitBrainNodes() (string, []string, error) {
-	controllerNodes := controllerPodNodes()
+// schedulableWorkerNodeNames returns the names of the worker nodes that are Ready and uncordoned,
+// in the order the API lists them. NotReady and cordoned workers are excluded so a scheduling
+// failure is never misattributed to the operator under test.
+func schedulableWorkerNodeNames() ([]string, error) {
 	nodeList, listErr := APIClient.CoreV1Interface.Nodes().List(context.TODO(), metav1.ListOptions{
 		LabelSelector: "node-role.kubernetes.io/worker",
 	})
 	if listErr != nil {
-		return "", nil, fmt.Errorf("list worker nodes: %w", listErr)
+		return nil, fmt.Errorf("list worker nodes: %w", listErr)
 	}
 
 	var schedulable []string
@@ -710,6 +804,21 @@ func splitBrainNodes() (string, []string, error) {
 		if isNodeSchedulable(&nodeList.Items[nodeIdx]) {
 			schedulable = append(schedulable, nodeList.Items[nodeIdx].Name)
 		}
+	}
+
+	return schedulable, nil
+}
+
+// splitBrainNodes returns one victim and every other schedulable worker node as a witness. The
+// victim must not host an SBR controller pod, so the fencing reboot does not take the operator down
+// mid-test; witnesses may, since a spurious fence on any worker is exactly what the test looks for.
+// It returns ("", nil) when fewer than MinWorkersForBlockSplitBrain workers are schedulable or none of
+// them can be the victim. The workers are sorted so the victim is chosen deterministically across runs.
+func splitBrainNodes() (string, []string, error) {
+	controllerNodes := controllerPodNodes()
+	schedulable, listErr := schedulableWorkerNodeNames()
+	if listErr != nil {
+		return "", nil, listErr
 	}
 
 	if len(schedulable) < sbrparams.MinWorkersForBlockSplitBrain {
@@ -1014,4 +1123,185 @@ func witnessesUntouched(witnessNodes []string, baseline splitBrainBaseline) erro
 	}
 
 	return nil
+}
+
+// startShadowAgentPod starts a second agent process on nodeName: a pod built from the live agent
+// DaemonSet's own container spec, so it reaches for the same host state mount and the same watchdog
+// device as the agent already running there. That is the whole point — it must lose the host lock.
+//
+// Its generic ephemeral probe claim gets a distinct volume name, because two pods cannot share one;
+// the probe is irrelevant to the lock, which is taken before storage is touched. With readOnlyState
+// the host state directory is mounted read-only, which covers the failure branch of the same rule.
+//
+// It returns as soon as the container is Running and deliberately does not wait for Ready: a
+// conflicted agent is never expected to become Ready, so waiting for it would time out on a passing
+// run.
+//
+//nolint:funlen // Copying one DaemonSet container into a standalone pod is a single operation.
+func startShadowAgentPod(nodeName, sbrcName string, readOnlyState bool) (*pod.Builder, error) {
+	dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrcName
+	agentDS, getErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
+		context.TODO(), dsName, metav1.GetOptions{})
+	if getErr != nil {
+		return nil, fmt.Errorf("get agent DaemonSet %s: %w", dsName, getErr)
+	}
+
+	template := agentDS.Spec.Template.Spec.DeepCopy()
+
+	var agentContainer *corev1.Container
+
+	for containerIdx := range template.Containers {
+		if template.Containers[containerIdx].Name == sbrparams.AgentContainerName {
+			agentContainer = &template.Containers[containerIdx]
+		}
+	}
+
+	if agentContainer == nil {
+		return nil, fmt.Errorf("DaemonSet %s has no %s container", dsName, sbrparams.AgentContainerName)
+	}
+
+	// Rename the ephemeral probe claim and follow the rename into the container's references.
+	for volumeIdx := range template.Volumes {
+		if template.Volumes[volumeIdx].Ephemeral == nil {
+			continue
+		}
+
+		original := template.Volumes[volumeIdx].Name
+		renamed := original + shadowProbeVolumeSuffix
+		template.Volumes[volumeIdx].Name = renamed
+
+		for mountIdx := range agentContainer.VolumeMounts {
+			if agentContainer.VolumeMounts[mountIdx].Name == original {
+				agentContainer.VolumeMounts[mountIdx].Name = renamed
+			}
+		}
+
+		for deviceIdx := range agentContainer.VolumeDevices {
+			if agentContainer.VolumeDevices[deviceIdx].Name == original {
+				agentContainer.VolumeDevices[deviceIdx].Name = renamed
+			}
+		}
+	}
+
+	stateMounted := false
+
+	for mountIdx := range agentContainer.VolumeMounts {
+		if agentContainer.VolumeMounts[mountIdx].MountPath == sbrparams.BlockPerNodeStateHostPath {
+			agentContainer.VolumeMounts[mountIdx].ReadOnly = readOnlyState
+			stateMounted = true
+		}
+	}
+
+	if !stateMounted {
+		return nil, fmt.Errorf("the %s container of DaemonSet %s does not mount %s, so a second "+
+			"process cannot contend for the host lock",
+			sbrparams.AgentContainerName, dsName, sbrparams.BlockPerNodeStateHostPath)
+	}
+
+	podName := sbrparams.ShadowAgentPodPrefix + nodeName
+	deleteHostCommandPod(podName)
+	builder := pod.NewBuilder(APIClient, podName, medik8sparams.OperatorNs, agentContainer.Image).
+		DefineOnNode(nodeName)
+	// The pod carries none of the DaemonSet's labels, so no helper that selects agent pods by label
+	// can mistake this second process for one of the SBRC's own agents.
+	builder.Definition.Spec.Containers = []corev1.Container{*agentContainer}
+	builder.Definition.Spec.Volumes = template.Volumes
+	builder.Definition.Spec.ServiceAccountName = template.ServiceAccountName
+	builder.Definition.Spec.SecurityContext = template.SecurityContext
+	builder.Definition.Spec.Tolerations = template.Tolerations
+	builder.Definition.Spec.PriorityClassName = template.PriorityClassName
+	builder.Definition.Spec.RestartPolicy = template.RestartPolicy
+	builder.Definition.Spec.HostPID = template.HostPID
+	builder.Definition.Spec.HostNetwork = template.HostNetwork
+	builder.Definition.Spec.DNSPolicy = template.DNSPolicy
+	created, createErr := builder.Create()
+	if createErr != nil {
+		return nil, fmt.Errorf("create shadow agent pod %s on node %s: %w", podName, nodeName, createErr)
+	}
+
+	if runErr := created.WaitUntilRunning(medik8sparams.DefaultTimeout); runErr != nil {
+		return created, fmt.Errorf("shadow agent pod %s must reach Running on node %s: %w",
+			podName, nodeName, runErr)
+	}
+
+	return created, nil
+}
+
+// hostStateInspectScript returns a one-shot script printing the host state the lock decides, one
+// key=value line each: the lock file's inode and mtime, the journal's inode, mtime and content
+// hash, and the sorted PIDs holding the lock file and the watchdog device open. A missing journal
+// prints journal_sha256=ABSENT, and the script always exits 0, so two snapshots can always be
+// compared.
+//
+// The holder sets come from fuser in the host namespaces. Not every host ships psmisc, so the
+// script falls back to the equivalent scan of /proc: the pods that run it set hostPID, so their
+// /proc is the host's and an open descriptor resolves to the host path.
+func hostStateInspectScript() string {
+	lockPath := sbrparams.BlockPerNodeStateHostPath + "/" + sbrparams.BlockPerNodeLockFileName
+	journalPath := sbrparams.BlockPerNodeStateHostPath + "/" + sbrparams.BlockPerNodeJournalFileName
+
+	return fmt.Sprintf(`host() { %[1]s "$@"; }
+field() { host stat -c "$1" "$2" 2>/dev/null || echo ABSENT; }
+holders() {
+  pids=$(host fuser "$1" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tr '\n' ' ')
+  if [ -z "$pids" ]; then
+    pids=$(for fd in /proc/[0-9]*/fd/*; do
+             if [ "$(readlink "$fd" 2>/dev/null)" = "$1" ]; then
+               echo "$fd" | cut -d/ -f3
+             fi
+           done | sort -nu | tr '\n' ' ')
+  fi
+  echo "$pids" | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//'
+}
+echo "lock_inode=$(field %%i %[2]s)"
+echo "lock_mtime=$(field %%Y %[2]s)"
+echo "journal_inode=$(field %%i %[3]s)"
+echo "journal_mtime=$(field %%Y %[3]s)"
+journal_sha256=$(host sha256sum %[3]s 2>/dev/null | cut -d' ' -f1)
+[ -n "$journal_sha256" ] || journal_sha256=ABSENT
+echo "journal_sha256=$journal_sha256"
+echo "lock_holders=$(holders %[2]s)"
+echo "watchdog_holders=$(holders %[4]s)"
+exit 0
+`, nsenterHost, lockPath, journalPath, sbrparams.AgentDefaultWatchdogPath)
+}
+
+// hostLockWatchScript returns a script that stats the host lock file every 200ms for duration. It
+// prints SBR_LOCK_GONE the first time the file is missing and SBR_LOCK_INODE_CHANGED the first time
+// its inode changes, always ends with SBR_LOCK_STABLE, and exits non-zero if it ever reported a
+// problem. The lock file must survive a configuration replacement: it is never unlinked while a
+// process may hold it.
+func hostLockWatchScript(duration time.Duration) string {
+	lockPath := sbrparams.BlockPerNodeStateHostPath + "/" + sbrparams.BlockPerNodeLockFileName
+
+	return fmt.Sprintf(`problem=0
+gone=0
+changed=0
+first=""
+samples=0
+end=$(( $(date +%%s) + %[3]d ))
+while [ "$(date +%%s)" -lt "$end" ]; do
+  inode=$(%[1]s stat -c %%i %[2]s 2>/dev/null)
+  if [ -z "$inode" ]; then
+    if [ "$gone" -eq 0 ]; then
+      echo "SBR_LOCK_GONE"
+      gone=1
+      problem=1
+    fi
+  else
+    if [ -z "$first" ]; then
+      first="$inode"
+    fi
+    if [ "$inode" != "$first" ] && [ "$changed" -eq 0 ]; then
+      echo "SBR_LOCK_INODE_CHANGED old=$first new=$inode"
+      changed=1
+      problem=1
+    fi
+    samples=$((samples+1))
+  fi
+  sleep 0.2
+done
+echo "SBR_LOCK_STABLE inode=$first samples=$samples"
+exit $problem
+`, nsenterHost, lockPath, int(duration.Seconds()))
 }

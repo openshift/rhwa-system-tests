@@ -702,6 +702,54 @@ const (
 	// slow node and for the quiet period below, which is served out inside this window.
 	BlockVictimHeartbeatStallTimeout = 5 * time.Minute
 
+	// SBRCBlockPerNodeLockTestName is the SBRC name for the BlockPerNode host-lock regression test
+	// (RHWA-2065).
+	SBRCBlockPerNodeLockTestName = "test-sbrc-bpn-host-lock"
+
+	// BlockPerNodeStateHostPath is the host directory holding the BlockPerNode host journal and the
+	// local-agent lock file. The agent mounts it from the host, independently of its probe volume.
+	BlockPerNodeStateHostPath = "/var/lib/medik8s/state"
+
+	// BlockPerNodeLockFileName is the file the non-blocking exclusive flock is taken on. It decides
+	// which process on a host owns the watchdog and the journal, and is never unlinked while a
+	// process may hold it.
+	BlockPerNodeLockFileName = "sbr-local-agent.lock"
+
+	// BlockPerNodeJournalFileName is the host journal the lock holder writes. It is replaced
+	// atomically, which is why it is a separate file from the lock.
+	BlockPerNodeJournalFileName = "sbr.json"
+
+	// LocalAgentConflictReason is what a second agent process on one host reports once it loses the
+	// host lock: it writes neither the watchdog nor the journal, and keeps reconciling peers.
+	LocalAgentConflictReason = "LocalAgentConflict"
+
+	// ShadowAgentPodPrefix is the name prefix of the second agent process the host-lock test starts
+	// on a node that already runs one. One shadow pod per node, suffixed with the node name.
+	ShadowAgentPodPrefix = "sbr-shadow-agent-"
+
+	// HostLockWatchPodPrefix is the name prefix of the pod that follows the lock file through an
+	// agent rollout.
+	HostLockWatchPodPrefix = "sbr-host-lock-watch-"
+
+	// HostStateInspectPodPrefix is the name prefix of the one-shot pods that snapshot the host lock,
+	// journal and watchdog state.
+	HostStateInspectPodPrefix = "sbr-host-state-"
+
+	// BlockPerNodeConflictTimeout is how long the second agent process gets to report
+	// LocalAgentConflictReason after it starts.
+	BlockPerNodeConflictTimeout = 3 * time.Minute
+
+	// BlockPerNodeQuietCheckDuration is how long the losing agent is observed to prove it stayed
+	// harmless: no reboot, no condition, no request, no restart of the real agent.
+	BlockPerNodeQuietCheckDuration = 2 * time.Minute
+
+	// BlockPerNodeQuietCheckInterval is the poll interval of the harmlessness observation.
+	BlockPerNodeQuietCheckInterval = 10 * time.Second
+
+	// BlockPerNodeRolloutWatchDuration is how long the lock file is watched while the agent
+	// DaemonSet is replaced. It must outlast a full rollout of the agent DaemonSet.
+	BlockPerNodeRolloutWatchDuration = 5 * time.Minute
+
 	// BlockHeartbeatStallQuietPeriod is how far behind the newest heartbeat on the device the
 	// victim's own slot must fall before it counts as stopped: three write cycles, so a single
 	// slow or missed write is not mistaken for a dead node. It stays under the reconciler's

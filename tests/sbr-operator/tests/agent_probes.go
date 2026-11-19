@@ -2,7 +2,6 @@ package tests
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -21,7 +20,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // namedProbe pairs a probe with the slot it occupies, so an assertion message can say which
@@ -106,45 +104,6 @@ func assertNoLivenessOrStartupProbe(container corev1.Container, mode string) {
 		"The agent container must carry no liveness probe (%s)", mode)
 	Expect(container.StartupProbe).To(BeNil(),
 		"The agent container must carry no startup probe (%s)", mode)
-}
-
-// patchSBRCDetectOnlyMode patches detectOnlyMode on the named SBRC and waits until the
-// controller has re-rendered its DaemonSet, returning the re-rendered DaemonSet.
-func patchSBRCDetectOnlyMode(sbrcName, mode string, previousGeneration int64) *appsv1.DaemonSet {
-	dsName := sbrparams.SBRAgentDaemonSetPrefix + sbrcName
-	patchPayload, marshalErr := json.Marshal(map[string]interface{}{
-		"spec": map[string]interface{}{"detectOnlyMode": mode},
-	})
-	Expect(marshalErr).ToNot(HaveOccurred(), "Failed to marshal the detectOnlyMode=%s patch", mode)
-	patchErr := APIClient.Patch(
-		context.TODO(),
-		buildSBRC(sbrcName, map[string]interface{}{}),
-		runtimeclient.RawPatch(types.MergePatchType, patchPayload),
-	)
-	Expect(patchErr).ToNot(HaveOccurred(),
-		"StorageBasedRemediationConfig %q must accept detectOnlyMode=%s", sbrcName, mode)
-
-	var agentDS *appsv1.DaemonSet
-
-	Eventually(func() error {
-		fetched, getErr := APIClient.DaemonSets(medik8sparams.OperatorNs).Get(
-			context.TODO(), dsName, metav1.GetOptions{})
-		if getErr != nil {
-			return fmt.Errorf("DaemonSet %s not found: %w", dsName, getErr)
-		}
-
-		if fetched.Generation <= previousGeneration {
-			return fmt.Errorf("DaemonSet %s generation not advanced (current: %d, pre-patch: %d)",
-				dsName, fetched.Generation, previousGeneration)
-		}
-
-		agentDS = fetched
-
-		return nil
-	}, medik8sparams.DefaultTimeout, sbrparams.DefaultPollInterval).Should(Succeed(),
-		"Controller must re-render DaemonSet %s after detectOnlyMode=%s", dsName, mode)
-
-	return agentDS
 }
 
 var _ = Describe(
@@ -307,8 +266,8 @@ var _ = Describe(
 
 				By("Patching the StorageBasedRemediationConfig into detect-only mode")
 
-				detectOnlyDS := patchSBRCDetectOnlyMode(
-					sbrparams.SBRCProbeShapeTestName, sbrparams.DetectOnlyModeEnabled, agentDS.Generation)
+				detectOnlyDS := patchSBRCSpecField(sbrparams.SBRCProbeShapeTestName,
+					"detectOnlyMode", sbrparams.DetectOnlyModeEnabled, agentDS.Generation)
 				detectOnlyContainer := getAgentContainer(detectOnlyDS)
 
 				By("Asserting detect-only readiness drops the watchdog check and adds no other probe")

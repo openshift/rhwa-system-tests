@@ -688,3 +688,84 @@ make run-tests
 Live validation passed on 2026-10-22 against SBR v5.8.0 with CephFS, including
 same-volume recreation, zero agent restarts during the stability window, and
 complete test cleanup. A before/after comparison still requires a pre-fix build.
+
+### 25. BlockPerNode external behavior — draft (RHWA-1839)
+
+The 28 draft cases use stable identifiers from `RHWA-1839-01` through `RHWA-1839-17E`.
+They check public storage conditions, requested and autonomous reboots, retained request identities, and normal resource deletion.
+The full case document is [rhwa-1839.md](../../docs/TESTCASES/rhwa-1839.md).
+The explicit specs are in [block_per_node_specs.go](tests/block_per_node_specs.go).
+All 28 cases include `feature:block-per-node` and `tier:preview`. They retain `tier:resiliency`.
+Case 03A uses active NHC with `minHealthy: 2`. It waits for A's request before blocking storage on B and C.
+A's storage fault persists across reboot. B and C must receive no request or reboot through the outage and restoration.
+Restore B and C to healthy storage before restoring A. This staged case does not predict the request count for simultaneous failures.
+NHC uses `healthyDelay: 1m`. CR deletion and restriction release must finish within 360s. SBR's cleanup deadline remains 300s.
+Case 06 keeps its target storage fault active across reboot until the CR status and Pod removal assertions finish.
+Jira Task mapping remains deferred under the user instruction.
+
+- **Operators**: SBR and NHC builds with the proposed BlockPerNode API. Record the installed image identities before execution.
+- **Cluster**: Exactly three selected Ready Linux workers. Preserve existing SSH access and the management path.
+- **Storage**: Dynamically provisioned Ceph RBD with RWO Block support. `SBR_RBD_STORAGE_CLASS` selects a class when discovery is ambiguous.
+- **Environment**: Existing native host commands and `WORKLOAD_IMAGE`. No helper image, injector image, `oc debug`, or package installation.
+- **Watchdog**: Hardware watchdog or SBR-loaded `softdog`. Check `/dev/watchdog` and its timeout after agent readiness, before disruption.
+- **Destructive**: Cases can reboot a worker, stop kubelet, block network traffic, or change journal directory flags.
+- **Pass criteria**: Every required external assertion passes. Continuous observations cover the required intervals. Normal cleanup restores the saved Node settings.
+- **Execution limit**: Complete each spec and its helpers before its first live run. Run one disruptive case at a time.
+- **Expected current result**: Missing runtime behavior produces FAIL. These draft entries do not claim a passing live run.
+
+```bash
+export KUBECONFIG="$HOME/.kube/ocpctl-cluster"
+ginkgo -v --procs=1 --timeout=2h --focus='RHWA-1839-06([[:space:]]|$)' ./tests/sbr-operator
+tools/watch/sbr-watch.sh --loop -n 5
+```
+
+All 28 cases explicitly configure one-minute autonomous recovery with a 60s additional allowance.
+Explicit five-minute configuration and omitted-field defaulting are outside this suite.
+Rows 13 and 14, version upgrades, power loss, journal contents, and reboot mechanism attribution remain outside this scope.
+
+### 26. Verify the BlockPerNode Host Lock and LocalAgentConflict ([RHWA-2065](https://issues.redhat.com/browse/RHWA-2065))
+
+In `BlockPerNode` mode a non-blocking exclusive `flock` on
+`/var/lib/medik8s/state/sbr-local-agent.lock` decides which process on a host owns the
+watchdog and writes the host journal. The spec starts a second agent process on a node
+that already runs one — a pod built from the live agent DaemonSet's own container spec —
+and proves all three halves of the rule: the second process loses the lock, it writes
+nothing at all (it appears in neither the lock-holder nor the watchdog-holder PID set and
+does not remove the journal), and it still reconciles another node's remediation request,
+because the peer controller does not depend on the lock. It then replaces the
+configuration under both processes and proves the lock file is never unlinked and never
+changes identity, and repeats the conflict with a read-only state mount so a loser that
+also cannot write its state still fails safe.
+
+The full case document is [rhwa-2065.md](../../docs/TESTCASES/rhwa-2065.md).
+The spec is in [block_per_node_host_lock.go](tests/block_per_node_host_lock.go).
+
+- **Operators**: the first SBR build that accepts `sharedStorageVolumeMode: BlockPerNode`
+  (RHWA-1839, target 5.9.0). `BlockPerNode` does not exist on any current build, so the
+  spec skips at its second precondition and starts running by itself once the operator
+  ships the mode.
+- **Cluster**: at least three schedulable workers — two inside the SBRC's node selector,
+  so the conflicted process is not the only peer, and one outside it as the target of a
+  request nothing can ever accept.
+- **Storage**: a Ceph RBD StorageClass; the BlockPerNode probe is RWO Block, so the same
+  class serves it. `SBR_RBD_STORAGE_CLASS` overrides discovery.
+- **Environment**: `SBR_INJECTOR_IMAGE` for the privileged host-command pods, which need
+  `nsenter`.
+- **Destructive**: no. It cordons the out-of-selector node through the offer and
+  uncordons it again. Nothing reboots when the code is correct — a node reset during
+  teardown means the losing process opened the watchdog, which is the finding.
+- **Pass criteria**: the second process reports `LocalAgentConflict` within
+  `BlockPerNodeConflictTimeout`; the lock-holder and watchdog-holder PID sets are
+  unchanged across the conflict; the losing process does not restart and its peer
+  controller drives the target node's execution record to `Offered`; the conflict node
+  keeps its boot ID, stays Ready, is never `SBRStorageUnhealthy=True` and never
+  self-fences; the lock watcher reports `SBR_LOCK_STABLE` through a full agent rollout
+  with no `SBR_LOCK_GONE` or `SBR_LOCK_INODE_CHANGED`; and exactly one process holds the
+  lock afterwards.
+
+```bash
+export KUBECONFIG=/absolute/path/to/kubeconfig
+ginkgo -v --label-filter="operator:sbr && component:daemonset" \
+    --focus="a second agent process on one host loses the lock" ./tests/sbr-operator/...
+tools/watch/sbr-watch.sh --loop -n 5
+```

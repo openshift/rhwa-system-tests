@@ -15,7 +15,6 @@ import (
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -243,30 +242,6 @@ func createVictimRemediation(victimNodeName string) *unstructured.Unstructured {
 	})
 
 	return sbrCR
-}
-
-// deleteVictimRemediation deletes the victim's remediation CR and waits for the node to come out
-// of remediation. The delete is a plain one, not a force-removal: the reconciler's finalizer is
-// what uncordons the node and removes the out-of-service taint. AfterAll force-removes whatever is
-// left behind. Safe to call twice — the second delete is a NotFound and the node is already
-// restored.
-func deleteVictimRemediation(sbrCR *unstructured.Unstructured, victimNodeName string) {
-	By(fmt.Sprintf("Deleting the StorageBasedRemediation CR for node %q, as NHC would", victimNodeName))
-
-	deleteErr := APIClient.Delete(context.TODO(), sbrCR)
-	if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
-		GinkgoWriter.Printf("Warning: delete StorageBasedRemediation/%s: %v\n",
-			victimNodeName, deleteErr)
-	}
-
-	By(fmt.Sprintf("Waiting for the victim node %q to be schedulable with no %s taint",
-		victimNodeName, sbrparams.OutOfServiceTaintKey))
-
-	Eventually(func() error {
-		return nodeRestoredAfterRemediation(victimNodeName)
-	}, sbrparams.NodeRebootTimeout, sbrparams.NodeRebootPollInterval).Should(Succeed(),
-		"Node %q must be uncordoned with no %s taint once its remediation CR is deleted",
-		victimNodeName, sbrparams.OutOfServiceTaintKey)
 }
 
 // awaitFenceInOwnSlot waits for a peer agent to write the fence message into the slot the victim
