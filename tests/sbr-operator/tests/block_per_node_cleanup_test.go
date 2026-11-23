@@ -9,14 +9,18 @@ import (
 	"time"
 
 	. "github.com/medik8s/system-tests/tests/internal/medik8sinittools"
+	"github.com/medik8s/system-tests/tests/internal/medik8sparams"
+	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrparams"
 	"github.com/medik8s/system-tests/tests/sbr-operator/internal/sbrutils"
 	"github.com/rh-ecosystem-edge/eco-goinfra/pkg/clients"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -134,7 +138,7 @@ func (requestClient bpnReleasedRequestClient) Get(ctx context.Context, _ client.
 	return apierrors.NewNotFound(schema.GroupResource{Resource: "storagebasedremediations"}, "worker-a")
 }
 
-func bpnCleanupRequest() *unstructured.Unstructured {
+func bpnNewPendingSBR() *unstructured.Unstructured {
 	request := &unstructured.Unstructured{}
 	request.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "storage-based-remediation.medik8s.io",
@@ -173,7 +177,8 @@ func TestBPNRequestReleaseSharesOneDeadline(t *testing.T) {
 	APIClient = &clients.Settings{Client: requestClient, CoreV1Interface: bpnCleanupCore{nodes: nodes}}
 	t.Cleanup(func() { APIClient = originalClient })
 	fixture := &bpnFixture{nodes: []*bpnNode{{initial: &corev1.Node{}}}}
-	if err := fixture.releaseRequestWithin(ctx, bpnCleanupRequest()); !errors.Is(err, context.DeadlineExceeded) {
+	if err := fixture.deleteSBRAndWaitForBaselineRestrictionsWithin(
+		ctx, bpnNewPendingSBR()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("release error = %v, want the shared deadline", err)
 	}
 	if !deletionDeadline.Equal(expectedDeadline) || !restrictionDeadline.Equal(expectedDeadline) {
@@ -217,7 +222,7 @@ func TestBPNJournalCleanupRestoresWritesAfterRelease(t *testing.T) {
 	}
 	fixture := &bpnFixture{
 		nodes:         []*bpnNode{{initial: node}},
-		requests:      []*unstructured.Unstructured{bpnCleanupRequest()},
+		requests:      []*unstructured.Unstructured{bpnNewPendingSBR()},
 		journalFaults: []*bpnOwnedJournalFault{{BlockJournalFault: fault, releaseRequestsBeforeRestore: true}},
 	}
 	if !fixture.restoreCleanupFaults(func(_ string, operation func() error) {
@@ -233,14 +238,14 @@ func TestBPNRestorationRejectsEarlierPeerReboot(t *testing.T) {
 	baseline := time.Now().Add(-time.Minute)
 	for _, sampleOffset := range []time.Duration{time.Second, 59 * time.Second} {
 		fixture := &bpnFixture{baseline: baseline}
-		for index := range 3 {
+		for index := range 5 {
 			fixture.nodes = append(fixture.nodes, &bpnNode{
 				initial: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("worker-%d", index)}}, boot: "expected",
 			})
 		}
 		fixture.nodes[0].rebootObservedAt = baseline.Add(30 * time.Second)
-		fixture.samples = []bpnBootSample{{At: baseline.Add(sampleOffset), Node: "worker-1", ID: "unexpected"}}
-		if err := fixture.finalRestoredObservation(); err == nil || !strings.Contains(err.Error(), "worker-1 rebooted") {
+		fixture.samples = []bpnBootSample{{At: baseline.Add(sampleOffset), Node: "worker-4", ID: "unexpected"}}
+		if err := fixture.finalRestoredObservation(); err == nil || !strings.Contains(err.Error(), "worker-4 rebooted") {
 			t.Fatalf("peer reboot before final observation must fail: %v", err)
 		}
 		for _, node := range fixture.nodes {
@@ -330,7 +335,7 @@ func (nodes *bpnPhaseNodes) Update(ctx context.Context, node *corev1.Node,
 	return node.DeepCopy(), nil
 }
 
-func bpnPhaseFixture(t *testing.T) (*bpnFixture, *bpnPhaseNodes) {
+func bpnUseFakeAPIWithTestLabeledNodes(t *testing.T) (*bpnFixture, *bpnPhaseNodes) {
 	t.Helper()
 	fixture := &bpnFixture{name: "owned"}
 	nodes := &bpnPhaseNodes{nodes: map[string]*corev1.Node{}}
@@ -350,12 +355,12 @@ func bpnPhaseFixture(t *testing.T) (*bpnFixture, *bpnPhaseNodes) {
 }
 
 func TestBPNNodeCleanupChecksAllNodesWithinOneDeadline(t *testing.T) {
-	fixture, nodes := bpnPhaseFixture(t)
+	fixture, nodes := bpnUseFakeAPIWithTestLabeledNodes(t)
 	nodes.nodes["worker-0"].UID = "replacement"
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	err := bpnCleanupPollWithin(ctx, fixture.restoreNodes)
+	err := bpnCleanupPollWithin(ctx, fixture.checkAllNodesReadyAndBootIDsMatch)
 	if !bpnIsPermanent(err) || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("changed identity must stop this phase promptly: %v", err)
 	}
@@ -375,7 +380,7 @@ func TestBPNNodeCleanupChecksAllNodesWithinOneDeadline(t *testing.T) {
 }
 
 func TestBPNLabelsRestoreOtherNodesAfterPermanentFailure(t *testing.T) {
-	fixture, nodes := bpnPhaseFixture(t)
+	fixture, nodes := bpnUseFakeAPIWithTestLabeledNodes(t)
 	const key = "tests.medik8s.io/block-per-node"
 	nodes.nodes["worker-0"].UID = "replacement"
 	fixture.nodes[2].initial.Labels = map[string]string{key: "original"}
@@ -464,7 +469,7 @@ func TestBPNFixtureDeletionSharesOnePhase(t *testing.T) {
 			fixture := &bpnFixture{}
 			api := &bpnPhaseFixtures{objects: map[string]*unstructured.Unstructured{}}
 			for index, name := range []string{"nhc", "template", "config"} {
-				object := bpnCleanupRequest()
+				object := bpnNewPendingSBR()
 				object.SetName(name)
 				object.SetUID(types.UID(name))
 				if held && index == 0 {
@@ -506,9 +511,9 @@ func TestBPNFixtureDeletionSharesOnePhase(t *testing.T) {
 }
 
 func TestBPNFixturePhaseWaitsForOwnedOperands(t *testing.T) {
-	claim := bpnOwnershipObject("PersistentVolumeClaim", "probe", "claim", "config")
-	fixture, _ := bpnOwnershipFixture(t, claim)
-	fixture.config = bpnCleanupRequest()
+	claim := bpnNewObjectWithOwnerUID("PersistentVolumeClaim", "probe", "claim", "config")
+	fixture, _ := bpnUseFakeAPIWithOwnedOperands(t, claim)
+	fixture.config = bpnNewPendingSBR()
 	fixture.config.SetName("config")
 	fixture.config.SetUID("config")
 	api := &bpnPhaseFixtures{objects: map[string]*unstructured.Unstructured{"config": fixture.config.DeepCopy()}}
@@ -521,5 +526,213 @@ func TestBPNFixturePhaseWaitsForOwnedOperands(t *testing.T) {
 	}
 	if len(api.objects) != 0 || len(api.deleted) != 1 {
 		t.Fatal("fixture deletion must finish before waiting for its remaining operands")
+	}
+}
+
+func TestBPNRecoveryRequiresReadyOperandsOnEachWorker(t *testing.T) {
+	agent := bpnNewReadyOperandPod(sbrparams.AgentContainerName)
+	reporter := bpnNewReadyOperandPod("sbr-boot-reporter")
+	running := map[string]bool{"current-" + sbrparams.AgentContainerName: true, "current-sbr-boot-reporter": true}
+	for _, test := range []struct {
+		name   string
+		pod    corev1.Pod
+		change func(*corev1.Pod)
+	}{
+		{name: "missing agent", pod: agent, change: func(pod *corev1.Pod) { pod.Spec.Containers = nil }},
+		{name: "missing reporter", pod: reporter, change: func(pod *corev1.Pod) { pod.Spec.Containers = nil }},
+		{name: "unready agent", pod: agent, change: func(pod *corev1.Pod) { pod.Status.ContainerStatuses[0].Ready = false }},
+		{name: "unready reporter", pod: reporter, change: func(pod *corev1.Pod) {
+			pod.Status.Conditions[0].Status = corev1.ConditionFalse
+		}},
+		{name: "terminating agent", pod: agent, change: func(pod *corev1.Pod) {
+			now := metav1.Now()
+			pod.DeletionTimestamp = &now
+		}},
+		{name: "terminating reporter", pod: reporter, change: func(pod *corev1.Pod) {
+			now := metav1.Now()
+			pod.DeletionTimestamp = &now
+		}},
+		{name: "stale agent container", pod: agent, change: func(pod *corev1.Pod) {
+			pod.Status.ContainerStatuses[0].ContainerID = "cri-o://prior-agent"
+		}},
+		{name: "stale reporter container", pod: reporter, change: func(pod *corev1.Pod) {
+			pod.Status.ContainerStatuses[0].ContainerID = "cri-o://prior-reporter"
+		}},
+		{name: "different configuration", pod: agent, change: func(pod *corev1.Pod) { pod.Labels["sbrconfig"] = "other" }},
+		{name: "different worker", pod: reporter, change: func(pod *corev1.Pod) { pod.Spec.NodeName = "worker-0" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pods := []corev1.Pod{*agent.DeepCopy(), *reporter.DeepCopy()}
+			for index := range pods {
+				if pods[index].Name == test.pod.Name {
+					test.change(&pods[index])
+				}
+			}
+			if err := bpnCheckNodeOperands(pods, "owned", "worker-4", running, false); err == nil {
+				t.Fatal("invalid operand status passed recovery")
+			}
+		})
+	}
+	if err := bpnCheckNodeOperands([]corev1.Pod{agent, reporter}, "owned", "worker-4", running, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func bpnNewReadyOperandPod(containerName string) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: containerName, Namespace: medik8sparams.OperatorNs, Labels: map[string]string{"sbrconfig": "owned"},
+		},
+		Spec: corev1.PodSpec{NodeName: "worker-4", Containers: []corev1.Container{{Name: containerName}}},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: containerName, ContainerID: "cri-o://current-" + containerName, Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+}
+
+func TestBPNRecoveryChecksFifthWorkersNodeState(t *testing.T) {
+	fixture, nodes := bpnUseFakeAPIWithTestLabeledNodes(t)
+	for index := range 5 {
+		name := fmt.Sprintf("worker-%d", index)
+		node := bpnNewReadyLinuxWorker(name)
+		node.UID = types.UID(name)
+		node.Status.NodeInfo.BootID = name + "-boot"
+		node.Status.Conditions = append(node.Status.Conditions,
+			corev1.NodeCondition{Type: sbrparams.SBRStorageUnhealthyCondition, Status: corev1.ConditionFalse})
+		nodes.nodes[name] = &node
+		expected := &bpnNode{initial: node.DeepCopy(), boot: node.Status.NodeInfo.BootID}
+		if index < len(fixture.nodes) {
+			fixture.nodes[index] = expected
+		} else {
+			fixture.nodes = append(fixture.nodes, expected)
+		}
+	}
+	fixture.adminAdded = true
+	target := nodes.nodes["worker-0"]
+	target.Spec.Unschedulable = true
+	target.Spec.Taints = bpnAdministratorTaints()
+	check := func() error { return fixture.checkWorkerRecoveryInAPI(t.Context(), corev1.ConditionFalse) }
+	if err := check(); err != nil {
+		t.Fatalf("recovery must preserve administrator restrictions: %v", err)
+	}
+	fifth := nodes.nodes["worker-4"]
+	for _, test := range []struct {
+		name   string
+		change func(*corev1.Node)
+	}{
+		{name: "not ready", change: func(node *corev1.Node) { node.Status.Conditions[0].Status = corev1.ConditionFalse }},
+		{name: "unhealthy storage", change: func(node *corev1.Node) {
+			node.Status.Conditions[1].Status = corev1.ConditionTrue
+		}},
+		{name: "still cordoned", change: func(node *corev1.Node) { node.Spec.Unschedulable = true }},
+		{name: "retained OutOfService", change: func(node *corev1.Node) { node.Spec.Taints = bpnAdministratorTaints()[:1] }},
+		{name: "different boot ID", change: func(node *corev1.Node) { node.Status.NodeInfo.BootID = "unexpected" }},
+		{name: "different UID", change: func(node *corev1.Node) { node.UID = "replacement" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			nodes.nodes[fifth.Name] = fifth.DeepCopy()
+			test.change(nodes.nodes[fifth.Name])
+			if err := check(); err == nil || !strings.Contains(err.Error(), fifth.Name) {
+				t.Fatalf("recovery must report fifth worker failure, got %v", err)
+			}
+		})
+	}
+	nodes.nodes[fifth.Name] = fifth
+	target.Status.Conditions[1].Status = corev1.ConditionTrue
+	if err := fixture.checkWorkerRecoveryInAPI(t.Context(), corev1.ConditionTrue); err != nil {
+		t.Fatalf("partial recovery must allow the intentional target storage failure: %v", err)
+	}
+	target.Spec.Taints = target.Spec.Taints[:1]
+	if err := fixture.checkWorkerRecoveryInAPI(t.Context(), corev1.ConditionTrue); err == nil {
+		t.Fatal("recovery must reject removal of administrator restrictions")
+	}
+}
+
+func TestBPNRecoveryRejectsAPISuccessAfterDeadline(t *testing.T) {
+	node := bpnNewReadyLinuxWorker("worker-a")
+	node.Status.NodeInfo.BootID = "expected"
+	node.Status.Conditions = append(node.Status.Conditions,
+		corev1.NodeCondition{Type: sbrparams.SBRStorageUnhealthyCondition, Status: corev1.ConditionFalse})
+	fixture := &bpnFixture{nodes: []*bpnNode{{initial: node.DeepCopy(), boot: "expected"}}}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	nodes := bpnCleanupNodes{get: func(call context.Context) (*corev1.Node, error) {
+		if observed, _ := call.Deadline(); !observed.Equal(deadline) {
+			t.Errorf("node call deadline = %s, want %s", observed, deadline)
+		}
+		<-call.Done()
+
+		return node.DeepCopy(), nil
+	}}
+	originalClient := APIClient
+	APIClient = &clients.Settings{CoreV1Interface: bpnCleanupCore{nodes: nodes}}
+	t.Cleanup(func() { APIClient = originalClient })
+	if err := fixture.checkWorkerRecoveryWithinPoll(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("recovery accepted late API success: %v", err)
+	}
+}
+
+func TestBPNPartialRecoveryAcceptsRunningTargetAgentWithUnhealthyStorage(t *testing.T) {
+	agent := bpnNewReadyOperandPod(sbrparams.AgentContainerName)
+	reporter := bpnNewReadyOperandPod("sbr-boot-reporter")
+	agent.Status.Conditions[0].Status = corev1.ConditionFalse
+	agent.Status.ContainerStatuses[0].Ready = false
+	running := map[string]bool{
+		agent.Status.ContainerStatuses[0].ContainerID[len("cri-o://"):]:    true,
+		reporter.Status.ContainerStatuses[0].ContainerID[len("cri-o://"):]: true,
+	}
+	pods := []corev1.Pod{agent, reporter}
+	if err := bpnCheckNodeOperands(pods, "owned", "worker-4", running, true); err != nil {
+		t.Fatalf("running target agent must pass partial recovery: %v", err)
+	}
+	if err := bpnCheckNodeOperands(pods, "owned", "worker-4", running, false); err == nil {
+		t.Fatal("unready target agent must fail full recovery")
+	}
+	pods[1].Status.ContainerStatuses[0].Ready = false
+	if err := bpnCheckNodeOperands(pods, "owned", "worker-4", running, true); err == nil {
+		t.Fatal("unready target reporter must fail partial recovery")
+	}
+	pods[1].Status.ContainerStatuses[0].Ready = true
+	for _, id := range []string{"cri-o://prior-agent", ""} {
+		pods[0].Status.ContainerStatuses[0].ContainerID = id
+		if err := bpnCheckNodeOperands(pods, "owned", "worker-4", running, true); err == nil {
+			t.Fatalf("partial recovery accepted a target agent with ID %q", id)
+		}
+	}
+}
+
+func TestBPNRecoveryRequiresNoCurrentRequestsOnSelectedWorkers(t *testing.T) {
+	request := bpnNewPendingSBR()
+	request.SetName("worker-4")
+	request.SetNamespace("another-namespace")
+	unselected := bpnNewPendingSBR()
+	unselected.SetName("unselected-worker")
+	resource := request.GroupVersionKind().GroupVersion().WithResource("storagebasedremediations")
+	api := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{resource: "StorageBasedRemediationList"}, request, unselected)
+	originalClient := APIClient
+	APIClient = &clients.Settings{Interface: api}
+	t.Cleanup(func() { APIClient = originalClient })
+	fixture := &bpnFixture{}
+	for index := range 5 {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("worker-%d", index)}}
+		fixture.nodes = append(fixture.nodes, &bpnNode{initial: node})
+	}
+	err := fixture.checkNoCurrentWorkerRequests(t.Context())
+	if err == nil || !strings.Contains(err.Error(), request.GetName()) {
+		t.Fatalf("recovery must report the remaining request on the fifth worker: %v", err)
+	}
+	if err := api.Resource(resource).Namespace(request.GetNamespace()).Delete(t.Context(),
+		request.GetName(), metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.checkNoCurrentWorkerRequests(t.Context()); err != nil {
+		t.Fatalf("request for an unselected worker must not block recovery: %v", err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -47,12 +48,15 @@ type BlockNetworkFault struct {
 	network      BlockNetwork
 	kind         BlockFaultKind
 	persistent   bool
+	bootUnit     string
 	prepared     bool
 	evidence     BlockFaultEvidence
 	device       string
 	families     []string
 	reachableAPI map[int][]BlockEndpoint
 }
+
+var blockBootServiceName = regexp.MustCompile(`^[A-Za-z0-9_.:-]+(@[A-Za-z0-9_.:-]+)?\.service$`)
 
 // NewBlockNetworkFault validates discovered destinations without changing the host.
 func NewBlockNetworkFault(host BlockHost, network BlockNetwork, kind BlockFaultKind,
@@ -111,6 +115,33 @@ func NewBlockNetworkFault(host BlockHost, network BlockNetwork, kind BlockFaultK
 	}
 
 	return fault, nil
+}
+
+// ValidBlockBootServiceName checks the literal name of an agent-installed boot service.
+func ValidBlockBootServiceName(unit string) bool {
+	return len(unit) <= 255 && unit != "kubelet.service" && unit != "crio.service" &&
+		blockBootServiceName.MatchString(unit)
+}
+
+// SetBootUnitOrdering orders a persistent fault before an agent-installed boot service.
+func (fault *BlockNetworkFault) SetBootUnitOrdering(unit string) error {
+	if fault.prepared {
+		return fmt.Errorf("set boot service ordering before preparing the fault")
+	}
+
+	if unit != "" {
+		if !fault.persistent {
+			return fmt.Errorf("boot service ordering requires a persistent network fault")
+		}
+
+		if !ValidBlockBootServiceName(unit) || unit == fault.evidence.Unit {
+			return fmt.Errorf("invalid boot service name %q", unit)
+		}
+	}
+
+	fault.bootUnit = unit
+
+	return nil
 }
 
 // SetNamespacePIDs updates live namespaces after Pod replacement or reboot.
@@ -194,14 +225,20 @@ func (fault *BlockNetworkFault) Activate(ctx context.Context) error {
 	fault.evidence.ActiveAt = time.Time{}
 	fault.evidence.RestoreDispatchedAt = time.Time{}
 	fault.evidence.RestoredAt = time.Time{}
+	fault.evidence.PersistentOrderingConfirmed = false
 	script := fault.applyScript()
 	if fault.kind == BlockStorageLatency {
 		script = fault.latencyApplyScript()
 	}
 
 	if fault.persistent {
+		before := "crio.service kubelet.service"
+		if fault.bootUnit != "" {
+			before += " " + fault.bootUnit
+		}
+
 		unit := "[Unit]\nDescription=SBR test network rules\nDefaultDependencies=no\nAfter=local-fs.target\n" +
-			"Before=crio.service kubelet.service\n[Service]\nType=oneshot\nRemainAfterExit=yes\n" +
+			"Before=" + before + "\n[Service]\nType=oneshot\nRemainAfterExit=yes\n" +
 			"ExecStart=/bin/sh /var/lib/" + fault.evidence.Unit + ".sh\n[Install]\nWantedBy=multi-user.target\n"
 		script = "set -eu\nprintf '%s' " + blockShellQuote("#!/bin/sh\n"+script) +
 			" > /var/lib/" + fault.evidence.Unit + ".sh\n" +
@@ -209,8 +246,8 @@ func (fault *BlockNetworkFault) Activate(ctx context.Context) error {
 			"systemctl daemon-reload\nsystemctl enable --now " + fault.evidence.Unit + "\n" +
 			"systemctl is-active --quiet " + fault.evidence.Unit + "\n" +
 			"ordering=$(systemctl show " + fault.evidence.Unit + " --property Before --value)\n" +
-			"case \" $ordering \" in *' kubelet.service '*) ;; *) exit 1 ;; esac\n" +
-			"case \" $ordering \" in *' crio.service '*) ;; *) exit 1 ;; esac\n"
+			"for unit in " + before + "; do\n" +
+			"case \" $ordering \" in *\" $unit \"*) ;; *) exit 1 ;; esac\ndone\n"
 	}
 
 	if _, err := fault.host.Run(ctx, blockHostCall, "sudo sh -c "+blockShellQuote(script)); err != nil {

@@ -4,8 +4,11 @@ import "time"
 
 // BlockPerNode parameters define the fixed configuration and observation limits.
 const (
-	BPNWorkers                = 3
-	BPNNHCMinHealthy          = 2
+	BPNPolicyOnTimeout = "OnTimeout"
+	BPNPolicyOnReboot  = "OnReboot"
+	BPNRebootGrace     = 60 * time.Second
+
+	BPNMinWorkers             = 2
 	BPNSBRTimeoutSeconds      = 30
 	BPNMaxConsecutiveFailures = 7
 
@@ -13,6 +16,8 @@ const (
 	BPNEvaluationInterval     = 5 * time.Second
 	BPNTotalOutageGracePeriod = 60 * time.Second
 	BPNRecoveryPeriod         = time.Minute
+	BPNBootUnitTimeout        = 4 * time.Minute
+	BPNBootUnitStartAllowance = 30 * time.Second
 	BPNNHCUnhealthyDuration   = 30 * time.Second
 	BPNWatchdogMaxTimeout     = 120 * time.Second
 
@@ -35,11 +40,12 @@ const (
 	BPNWorkloadGone    = 300 * time.Second
 	BPNRelease         = 300 * time.Second
 	BPNNHCHealthyDelay = 60 * time.Second
-	BPNLatency         = 20 * time.Second
-	BPNBriefRecovery   = 20 * time.Second
 	BPNRecoveryPart    = 40 * time.Second
 	BPNRecoveryBreak   = 20 * time.Second
 	BPNRearmSettle     = 60 * time.Second
 	BPNSysRqSettle     = 2 * time.Second
 	BPNSysRqPanicDelay = 180 * time.Second
+
+	BPNInterruptedRecoveryPeriod = 180 * time.Second
+	BPNInterruptedRecoveryPart   = 110 * time.Second
 )

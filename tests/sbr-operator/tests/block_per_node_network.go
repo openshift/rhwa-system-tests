@@ -69,7 +69,7 @@ func bpnUniqueEndpoints(endpoints []sbrutils.BlockEndpoint) []sbrutils.BlockEndp
 	return result
 }
 
-func (test *bpnFixture) hostAPIEndpoints(node *bpnNode) ([]sbrutils.BlockEndpoint, error) {
+func (test *bpnFixture) resolveNodeKubeconfigAPIEndpoints(node *bpnNode) ([]sbrutils.BlockEndpoint, error) {
 	command := "sudo sh -c " + bpnQuote("set -eu\n"+
 		"for file in /etc/kubernetes/kubeconfig /var/lib/kubelet/kubeconfig; do\n"+
 		"if test -r \"$file\"; then awk '$1 == \"server:\" { print $2 }' \"$file\"; fi\ndone")
@@ -119,7 +119,7 @@ func (test *bpnFixture) hostAPIEndpoints(node *bpnNode) ([]sbrutils.BlockEndpoin
 	return bpnUniqueEndpoints(result), nil
 }
 
-func (test *bpnFixture) prerequisite(err error, reason string) {
+func (test *bpnFixture) skipOrFailOnPrerequisiteError(err error, reason string) {
 	GinkgoHelper()
 	if err == nil {
 		return
@@ -127,10 +127,10 @@ func (test *bpnFixture) prerequisite(err error, reason string) {
 	if !test.disrupted {
 		Skip("BLOCKED: " + reason + ": " + err.Error())
 	}
-	Fail(bpnFaultFailure(reason + ": " + err.Error()))
+	Fail(bpnInconclusiveMessage(reason + ": " + err.Error()))
 }
 
-func bpnFaultFailure(message string) string {
+func bpnInconclusiveMessage(message string) string {
 	return "INCONCLUSIVE: " + message
 }
 
@@ -206,28 +206,28 @@ func (test *bpnFixture) apiEndpoints(ctx context.Context) ([]sbrutils.BlockEndpo
 	return endpoints, nil
 }
 
-func (test *bpnFixture) discoverNetwork() {
+func (test *bpnFixture) discoverAndCacheFaultEndpoints() {
 	if len(test.networks) > 0 {
 		return
 	}
 	var endpoints []sbrutils.BlockEndpoint
-	Expect(test.api(func(ctx context.Context) error {
+	Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		var err error
 		endpoints, err = test.apiEndpoints(ctx)
 
 		return err
 	})).To(Succeed(), "The runner must discover every configured API endpoint")
 	storage, err := test.cephEndpoints()
-	test.prerequisite(err, "authoritative Ceph monitor and OSD endpoints are required")
+	test.skipOrFailOnPrerequisiteError(err, "authoritative Ceph monitor and OSD endpoints are required")
 	for _, node := range test.nodes {
 		management, hostErr := node.host.Run(test.ctx, sbrparams.BPNHostCall, "printf '%s\\n' \"$SSH_CONNECTION\"")
-		test.prerequisite(hostErr, "the runner must retain its SSH management address")
+		test.skipOrFailOnPrerequisiteError(hostErr, "the runner must retain its SSH management address")
 		parts := strings.Fields(management)
 		if len(parts) != 4 {
-			test.prerequisite(fmt.Errorf("SSH_CONNECTION is unavailable"), "management path")
+			test.skipOrFailOnPrerequisiteError(fmt.Errorf("SSH_CONNECTION is unavailable"), "management path")
 		}
-		hostAPI, hostAPIErr := test.hostAPIEndpoints(node)
-		test.prerequisite(hostAPIErr, "host kubeconfig API endpoints must be discoverable")
+		hostAPI, hostAPIErr := test.resolveNodeKubeconfigAPIEndpoints(node)
+		test.skipOrFailOnPrerequisiteError(hostAPIErr, "host kubeconfig API endpoints must be discoverable")
 		network := sbrutils.BlockNetwork{
 			API:     bpnUniqueEndpoints(append(append([]sbrutils.BlockEndpoint{}, endpoints...), hostAPI...)),
 			Storage: storage, Management: []string{parts[0]},
@@ -253,7 +253,7 @@ func (test *bpnFixture) cephCSIConfig() (string, []string, error) {
 	className, _, _ := unstructured.NestedString(test.config.Object, "spec", "sharedStorageClass")
 	var storageNamespace string
 	var monitors []string
-	err := test.api(func(ctx context.Context) error {
+	err := test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		class, getErr := APIClient.StorageV1Interface.StorageClasses().Get(ctx, className, metav1.GetOptions{})
 		if getErr != nil {
 			return getErr
@@ -299,7 +299,7 @@ func (test *bpnFixture) cephEndpoints() ([]sbrutils.BlockEndpoint, error) {
 		return nil, err
 	}
 	var pods *corev1.PodList
-	err = test.api(func(ctx context.Context) error {
+	err = test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		var listErr error
 		pods, listErr = APIClient.CoreV1Interface.Pods(storageNamespace).List(ctx, metav1.ListOptions{})
 
@@ -382,11 +382,11 @@ func (test *bpnFixture) cephMapsFromPod(pod *corev1.Pod, container, namespace st
 	return nil, fmt.Errorf("existing Pod %s/%s did not return valid Ceph maps", pod.Namespace, pod.Name)
 }
 
-func (test *bpnFixture) namespacePIDs(index int) []int {
+func (test *bpnFixture) requireHostAndSBRNetNSPIDs(index int) []int {
 	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNFaultReady)
 	defer cancel()
 	pids, err := test.currentNamespacePIDs(ctx, index, true)
-	test.prerequisite(err, "native CRI access must identify every SBR network namespace")
+	test.skipOrFailOnPrerequisiteError(err, "native CRI access must identify every SBR network namespace")
 
 	return pids
 }
@@ -478,15 +478,15 @@ func (test *bpnFixture) currentNamespacePIDs(ctx context.Context, index int, req
 	return result, nil
 }
 
-func (test *bpnFixture) prepareFault(
+func (test *bpnFixture) prepareAndTrackNetworkFault(
 	index int, kind sbrutils.BlockFaultKind, persistent bool,
 ) *sbrutils.BlockNetworkFault {
 	GinkgoHelper()
-	test.discoverNetwork()
+	test.discoverAndCacheFaultEndpoints()
 	network := test.networks[index]
 	if kind == sbrutils.BlockSingletonIsolation {
 		var clusterNodes *corev1.NodeList
-		Expect(test.api(func(ctx context.Context) error {
+		Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 			var err error
 			clusterNodes, err = APIClient.CoreV1Interface.Nodes().List(ctx, metav1.ListOptions{})
 
@@ -506,10 +506,13 @@ func (test *bpnFixture) prepareFault(
 		}
 	}
 
-	network.NamespacePIDs = test.namespacePIDs(index)
+	network.NamespacePIDs = test.requireHostAndSBRNetNSPIDs(index)
 	fault, err := sbrutils.NewBlockNetworkFault(test.nodes[index].host, network, kind,
 		fmt.Sprintf("%s-%d-%d", test.name, index, len(test.faults)), persistent)
-	test.prerequisite(err, "native fault preparation")
+	test.skipOrFailOnPrerequisiteError(err, "native fault preparation")
+	if persistent && test.bootUnit != "" {
+		Expect(fault.SetBootUnitOrdering(test.bootUnit)).To(Succeed(), "The fault must start before the boot service")
+	}
 	test.faults = append(test.faults, fault)
 	if test.faultNodes == nil {
 		test.faultNodes = map[*sbrutils.BlockNetworkFault]int{}
@@ -520,22 +523,43 @@ func (test *bpnFixture) prepareFault(
 	err = fault.Prepare(ctx)
 	var prerequisite *sbrutils.BlockPrerequisiteError
 	if errors.As(err, &prerequisite) {
-		test.prerequisite(err, "native fault preparation")
+		test.skipOrFailOnPrerequisiteError(err, "native fault preparation")
 	}
 	Expect(err).NotTo(HaveOccurred(), "Native fault preparation must finish")
 
 	return fault
 }
 
-func (test *bpnFixture) activate(fault *sbrutils.BlockNetworkFault) {
-	test.activateFault(fault, "INCONCLUSIVE: ")
+func (test *bpnFixture) applyAndConfirmNetworkFault(fault *sbrutils.BlockNetworkFault) {
+	test.applyAndConfirmNetworkFaultWithFailurePrefix(fault, "INCONCLUSIVE: ")
 }
 
-func (test *bpnFixture) activateFault(fault *sbrutils.BlockNetworkFault, failurePrefix string) {
+func (test *bpnFixture) applyAndConfirmNetworkFaultWithFailurePrefix(
+	fault *sbrutils.BlockNetworkFault, failurePrefix string,
+) {
 	GinkgoHelper()
-	test.disrupted = true
 	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNFaultReady)
 	defer cancel()
+	test.applyAndRecordNetworkFault(ctx, fault, failurePrefix)
+	if fault.Kind() == sbrutils.BlockStorageLoss || fault.Kind() == sbrutils.BlockStorageTimeout {
+		Expect(test.probeAPIFromNodeNamespaces(ctx, test.faultNodes[fault])).To(Succeed(),
+			"Storage faults must preserve API transport")
+	}
+}
+
+func (test *bpnFixture) applyAndConfirmStorageLossDuringAPILoss(storage, api *sbrutils.BlockNetworkFault) {
+	GinkgoHelper()
+	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNFaultReady)
+	defer cancel()
+	test.applyAndRecordNetworkFault(ctx, storage, "INCONCLUSIVE: ")
+	Expect(api.Confirm(ctx)).To(Succeed(), "Target API transport must remain blocked after storage loss")
+}
+
+func (test *bpnFixture) applyAndRecordNetworkFault(
+	ctx context.Context, fault *sbrutils.BlockNetworkFault, failurePrefix string,
+) {
+	GinkgoHelper()
+	test.disrupted = true
 	Expect(fault.Activate(ctx)).To(Succeed(), failurePrefix+"the owned fault must be installed")
 	Eventually(func() error { return fault.Confirm(ctx) }, sbrparams.BPNFaultReady, sbrparams.BPNPoll).
 		Should(Succeed(), failurePrefix+"the intended fault must be confirmed")
@@ -546,14 +570,10 @@ func (test *bpnFixture) activateFault(fault *sbrutils.BlockNetworkFault, failure
 		}
 		test.healthFaults[test.faultNodes[fault]] = fault.Evidence()
 	}
-	if fault.Kind() == sbrutils.BlockStorageLoss || fault.Kind() == sbrutils.BlockStorageTimeout {
-		Expect(test.liveAPI(ctx, test.faultNodes[fault])).To(Succeed(), "Storage faults must preserve API transport")
-	}
-
 	AddReportEntry("bpn-fault-active", fault.Evidence())
 }
 
-func (test *bpnFixture) restoreFault(fault *sbrutils.BlockNetworkFault) {
+func (test *bpnFixture) removeNetworkFault(fault *sbrutils.BlockNetworkFault) {
 	GinkgoHelper()
 	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNFaultReady)
 	defer cancel()
@@ -565,36 +585,40 @@ func (test *bpnFixture) restoreFault(fault *sbrutils.BlockNetworkFault) {
 	AddReportEntry("bpn-fault-restored", fault.Evidence())
 }
 
-func (test *bpnFixture) restoreFaults() {
+func (test *bpnFixture) removeTrackedNetworkFaults() {
 	for _, fault := range test.faults {
-		test.restoreFault(fault)
+		test.removeNetworkFault(fault)
 	}
 }
 
-func (test *bpnFixture) combined() (*sbrutils.BlockNetworkFault, *sbrutils.BlockNetworkFault, time.Time) {
-	storage := test.prepareFault(0, sbrutils.BlockStorageLoss, true)
-	api := test.prepareFault(0, sbrutils.BlockAPILoss, true)
-	test.activate(storage)
-	test.requireUnhealthy(0)
-	test.finalBoots(0)
-	test.activate(api)
+func (test *bpnFixture) applyStorageLossThenAPILoss() (
+	*sbrutils.BlockNetworkFault, *sbrutils.BlockNetworkFault, time.Time,
+) {
+	storage := test.prepareAndTrackNetworkFault(0, sbrutils.BlockStorageLoss, true)
+	api := test.prepareAndTrackNetworkFault(0, sbrutils.BlockAPILoss, true)
+	test.applyAndConfirmNetworkFault(storage)
+	test.waitForStorageUnhealthy(0)
+	test.assertCurrentHostBootIDsMatch(0)
+	test.applyAndConfirmNetworkFault(api)
 
 	return storage, api, time.Now()
 }
 
-func (test *bpnFixture) checkFaultAfterReboot(faults ...*sbrutils.BlockNetworkFault) {
+func (test *bpnFixture) assertNetworkFaultsPersistAfterReboot(faults ...*sbrutils.BlockNetworkFault) {
 	for _, fault := range faults {
 		index := test.faultNodes[fault]
 		ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNFaultReady)
 		pids, err := test.currentNamespacePIDs(ctx, index, false)
-		Expect(err).NotTo(HaveOccurred(), bpnFaultFailure("live SBR network namespaces must be identifiable after reboot"))
+		Expect(err).NotTo(HaveOccurred(),
+			bpnInconclusiveMessage("live SBR network namespaces must be identifiable after reboot"))
 		fault.SetNamespacePIDs(pids)
-		Expect(fault.Confirm(ctx)).To(Succeed(), bpnFaultFailure("persistent rules must remain effective after reboot"))
+		Expect(fault.Confirm(ctx)).To(Succeed(),
+			bpnInconclusiveMessage("persistent rules must remain effective after reboot"))
 		cancel()
 	}
 }
 
-func (test *bpnFixture) liveAPI(ctx context.Context, index int) error {
+func (test *bpnFixture) probeAPIFromNodeNamespaces(ctx context.Context, index int) error {
 	pids, err := test.currentNamespacePIDs(ctx, index, false)
 	if err != nil {
 		return err
@@ -630,10 +654,10 @@ func bpnJournalMountMatches(mount corev1.VolumeMount, volumes []corev1.Volume) b
 	return false
 }
 
-func (test *bpnFixture) requireJournalMount(index int, agent *corev1.Pod) {
+func (test *bpnFixture) assertAgentSharesHostJournalDirectory(index int, agent *corev1.Pod) {
 	GinkgoHelper()
 	_, commandErr := test.nodes[index].host.Run(test.ctx, sbrparams.BPNHostCall, "command -v stat >/dev/null")
-	test.prerequisite(commandErr, "native stat must check the mounted journal directory")
+	test.skipOrFailOnPrerequisiteError(commandErr, "native stat must check the mounted journal directory")
 	containerID := ""
 	for _, status := range agent.Status.ContainerStatuses {
 		if status.Name == sbrparams.AgentContainerName {
@@ -643,7 +667,7 @@ func (test *bpnFixture) requireJournalMount(index int, agent *corev1.Pod) {
 	Expect(containerID).NotTo(BeEmpty(), "The Ready agent must expose its actual container identity")
 	output, err := test.nodes[index].host.Run(test.ctx, sbrparams.BPNHostCall,
 		"sudo crictl inspect "+bpnQuote(containerID))
-	test.prerequisite(err, "native CRI inspection must identify the agent mount namespace")
+	test.skipOrFailOnPrerequisiteError(err, "native CRI inspection must identify the agent mount namespace")
 	var inspection struct {
 		Info struct {
 			PID int `json:"pid"`
@@ -660,10 +684,10 @@ func (test *bpnFixture) requireJournalMount(index int, agent *corev1.Pod) {
 	Expect(identities[0]).To(Equal(identities[1]), "The agent and host must use the same state directory")
 }
 
-func (test *bpnFixture) journal(index int) *bpnOwnedJournalFault {
+func (test *bpnFixture) blockJournalWrites(index int) *bpnOwnedJournalFault {
 	GinkgoHelper()
 	var pods *corev1.PodList
-	Expect(test.api(func(ctx context.Context) error {
+	Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		var err error
 		pods, err = APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).List(ctx,
 			metav1.ListOptions{
@@ -691,22 +715,22 @@ func (test *bpnFixture) journal(index int) *bpnOwnedJournalFault {
 		}
 	}
 	Expect(agent).NotTo(BeNil(), "A Ready agent must mount the host state directory as its journal backing directory")
-	test.requireJournalMount(index, agent)
+	test.assertAgentSharesHostJournalDirectory(index, agent)
 	fault, err := sbrutils.NewBlockJournalFault(test.nodes[index].host, test.name+"-"+strconv.Itoa(index))
-	test.prerequisite(err, "journal access fault")
+	test.skipOrFailOnPrerequisiteError(err, "journal access fault")
 	owned := &bpnOwnedJournalFault{BlockJournalFault: fault}
 	test.journalFaults = append(test.journalFaults, owned)
 	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNFaultReady)
 	defer cancel()
-	test.prerequisite(fault.Prepare(ctx), "native immutable-directory support")
+	test.skipOrFailOnPrerequisiteError(fault.Prepare(ctx), "native immutable-directory support")
 	// The helper tests a disposable file before any remediation trigger.
-	test.prerequisite(fault.Activate(ctx), "effective immutable-directory fault")
+	test.skipOrFailOnPrerequisiteError(fault.Activate(ctx), "effective immutable-directory fault")
 	test.disrupted = true
 
 	return owned
 }
 
-func (test *bpnFixture) restoreJournal(fault *bpnOwnedJournalFault) {
+func (test *bpnFixture) restoreJournalDirectoryFlags(fault *bpnOwnedJournalFault) {
 	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNFaultReady)
 	defer cancel()
 	Expect(fault.Restore(ctx)).To(Succeed(), "The test must restore the original state-directory flags")

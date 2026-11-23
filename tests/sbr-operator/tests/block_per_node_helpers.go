@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (test *bpnFixture) targetAgent(ctx context.Context) (*corev1.Pod, error) {
+func (test *bpnFixture) findTargetAgentPod(ctx context.Context) (*corev1.Pod, error) {
 	pods, err := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).List(ctx,
 		metav1.ListOptions{
 			LabelSelector: "sbrconfig=" + test.name,
@@ -43,121 +44,45 @@ func (test *bpnFixture) targetAgent(ctx context.Context) (*corev1.Pod, error) {
 	return nil, fmt.Errorf("target agent Pod is absent")
 }
 
-func (test *bpnFixture) restartAgent() {
-	GinkgoHelper()
-	var original *corev1.Pod
-	Expect(test.api(func(ctx context.Context) error {
-		var err error
-		original, err = test.targetAgent(ctx)
-
-		return err
-	})).To(Succeed())
-	test.deleteAgent(original)
-	test.waitAgentReplacement(original)
-}
-
-func (test *bpnFixture) deleteAgent(original *corev1.Pod) {
+func (test *bpnFixture) deleteAgentPodByUID(original *corev1.Pod) {
 	uid := original.UID
-	Expect(test.api(func(ctx context.Context) error {
+	Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		return APIClient.Delete(ctx, original, client.Preconditions{UID: &uid})
 	})).To(Succeed())
 }
 
-func (test *bpnFixture) waitAgentReplacement(original *corev1.Pod) {
+func (test *bpnFixture) waitForReadyReplacementAndHealthyStorage(original *corev1.Pod) {
 	uid := original.UID
-	test.eventually(sbrparams.BPNAgentReady, "A new Ready agent must replace the Pod", func(ctx context.Context) error {
-		pod, err := test.targetAgent(ctx)
-		if err != nil {
-			return err
-		}
-		if pod.UID == uid || !bpnPodReady(pod) {
-			return fmt.Errorf("a different Ready agent UID is required")
-		}
-		old, err := APIClient.CoreV1Interface.Pods(original.Namespace).Get(ctx, original.Name, metav1.GetOptions{})
-		if err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-		if err == nil && old.UID == uid {
-			return fmt.Errorf("original agent Pod still exists")
-		}
-		node, err := test.getNode(ctx, 0)
-		if err != nil {
-			return err
-		}
-		if bpnHealth(node) != corev1.ConditionFalse {
-			return fmt.Errorf("replacement must restore False storage health")
-		}
-
-		return test.checkBoots(test.baseline)
-	})
-	test.finalBoots()
-}
-
-func (test *bpnFixture) requireAgentRunning(rebootObservedAt time.Time) {
-	var last error
-	timeout := sbrparams.BPNAgentReady
-	if !rebootObservedAt.IsZero() {
-		timeout = time.Until(rebootObservedAt.Add(sbrparams.BPNAgentReady))
-	}
-	if timeout <= 0 {
-		timeout = time.Nanosecond
-	}
-	err := wait.PollUntilContextTimeout(test.ctx, sbrparams.BPNPoll, timeout, true,
-		func(ctx context.Context) (bool, error) {
-			last = test.api(func(call context.Context) error {
-				pod, err := test.targetAgent(call)
-				if err != nil {
-					return err
-				}
-
-				return bpnRunningAgent(pod)
-			})
-
-			if bpnIsPermanent(last) {
-				return false, last
+	test.waitForAPICheck(sbrparams.BPNAgentReady, "A new Ready agent must replace the Pod",
+		func(ctx context.Context) error {
+			pod, err := test.findTargetAgentPod(ctx)
+			if err != nil {
+				return err
+			}
+			if pod.UID == uid || !bpnPodReady(pod) {
+				return fmt.Errorf("a different Ready agent UID is required")
+			}
+			old, err := APIClient.CoreV1Interface.Pods(original.Namespace).Get(ctx, original.Name, metav1.GetOptions{})
+			if err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+			if err == nil && old.UID == uid {
+				return fmt.Errorf("original agent Pod still exists")
+			}
+			node, err := test.getNode(ctx, 0)
+			if err != nil {
+				return err
+			}
+			if bpnStorageUnhealthyStatus(node) != corev1.ConditionFalse {
+				return fmt.Errorf("replacement must restore False storage health")
 			}
 
-			return last == nil, nil
+			return test.checkRecordedBootIDsUnchanged(test.baseline)
 		})
-	if err != nil && !rebootObservedAt.IsZero() {
-		csiBlocked := false
-		checkErr := test.api(func(ctx context.Context) error {
-			var checkErr error
-			csiBlocked, checkErr = test.agentAttachmentBlocked(ctx)
-
-			return checkErr
-		})
-		Expect(checkErr).To(Succeed(), "The target agent must expose its startup result through the API")
-		if csiBlocked {
-			Fail(fmt.Sprintf("INCONCLUSIVE: CSI attachment prevented the target agent from starting: %v", last))
-		}
-	}
-	Expect(err).NotTo(HaveOccurred(), "The target agent must run before a valid request")
+	test.assertCurrentHostBootIDsMatch()
 }
 
-func (test *bpnFixture) agentAttachmentBlocked(ctx context.Context) (bool, error) {
-	pod, err := test.targetAgent(ctx)
-	if err != nil {
-		return false, err
-	}
-	if pod.Status.Phase != corev1.PodPending {
-		return false, nil
-	}
-	events, err := APIClient.CoreV1Interface.Events(pod.Namespace).List(ctx,
-		metav1.ListOptions{FieldSelector: "involvedObject.uid=" + string(pod.UID)})
-	if err != nil {
-		return false, err
-	}
-	for _, event := range events.Items {
-		if event.Reason == "FailedAttachVolume" {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-func (test *bpnFixture) healthyUntilDeadline(start, deadline time.Time) time.Time {
+func (test *bpnFixture) waitForHealthyStorageAndAPIByDeadline(start, deadline time.Time) time.Time {
 	GinkgoHelper()
 	var confirmed time.Time
 	remaining := time.Until(deadline)
@@ -167,13 +92,13 @@ func (test *bpnFixture) healthyUntilDeadline(start, deadline time.Time) time.Tim
 	ctx, cancel := context.WithDeadline(test.ctx, deadline)
 	defer cancel()
 	err := wait.PollUntilContextTimeout(ctx, sbrparams.BPNPoll, remaining, true, func(call context.Context) (bool, error) {
-		if err := test.liveAPI(call, 0); err != nil {
+		if err := test.probeAPIFromNodeNamespaces(call, 0); err != nil {
 			return false, nil
 		}
 		freshFalse := false
 		for _, sample := range test.nodes[0].recorder.Snapshot().Observations {
 			fresh := sample.UID == test.nodes[0].initial.UID && !sample.At.Before(start)
-			if fresh && bpnHealth(sample.Object) == corev1.ConditionFalse {
+			if fresh && bpnStorageUnhealthyStatus(sample.Object) == corev1.ConditionFalse {
 				freshFalse = true
 			}
 		}
@@ -191,79 +116,71 @@ func (test *bpnFixture) healthyUntilDeadline(start, deadline time.Time) time.Tim
 	return confirmed
 }
 
-func (test *bpnFixture) healthyContinuous(duration time.Duration) {
-	from := time.Now()
-	check := func() error {
-		ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNAPICall)
-		defer cancel()
-		if err := test.liveAPI(ctx, 0); err != nil {
-			return err
-		}
-		if err := test.healthHistory(corev1.ConditionFalse, from, time.Now(), 0); err != nil {
-			return err
-		}
-
-		return test.checkBoots(from)
-	}
-	Consistently(check, duration, sbrparams.BPNPoll).Should(Succeed(), "Keep storage and API access healthy")
-	test.coverage(from, time.Now(), false)
-	Expect(check()).To(Succeed(), "Replayed events must preserve continuous healthy recovery")
-	test.finalBoots()
-}
-
-func (test *bpnFixture) holdHealthyUntil(from, deadline time.Time) {
+func (test *bpnFixture) checkStorageHealthAndAPIAccessUntil(from, deadline time.Time) {
 	ctx, cancel := context.WithDeadline(test.ctx, deadline)
 	defer cancel()
 	ticker := time.NewTicker(sbrparams.BPNPoll)
 	defer ticker.Stop()
+	recoveryErr := errors.New("worker recovery has not been checked")
 	for {
-		if err := test.healthHistory(corev1.ConditionFalse, from, time.Now(), 0); err != nil {
+		if err := test.checkRecordedNodeStorageHealth(corev1.ConditionFalse, from, time.Now(), 0); err != nil {
 			Fail("INCONCLUSIVE: the short recovery interval was not continuously healthy: " + err.Error())
+		}
+		if time.Until(deadline) > sbrparams.BPNPoll {
+			if err := test.probeAPIFromNodeNamespaces(ctx, 0); err != nil {
+				Fail("INCONCLUSIVE: API transport did not remain reachable during the short recovery interval: " + err.Error())
+			}
+		}
+		if recoveryErr != nil && ctx.Err() == nil {
+			recoveryErr = test.checkWorkerRecoveryWithinPoll(ctx)
+			if bpnIsPermanent(recoveryErr) {
+				Fail(recoveryErr.Error())
+			}
 		}
 		if time.Until(deadline) <= sbrparams.BPNPoll {
 			test.waitUntil(deadline)
 
-			return
-		}
-		if err := test.liveAPI(ctx, 0); err != nil {
-			Fail("INCONCLUSIVE: API transport did not remain reachable during the short recovery interval: " + err.Error())
+			break
 		}
 		select {
 		case <-ticker.C:
 		case <-ctx.Done():
-			return
 		}
 	}
+	Expect(recoveryErr).To(Succeed(), "All workers must recover within the fixed recovery window")
+	Expect(test.checkRecordedNodeStorageHealth(corev1.ConditionFalse, from, deadline, 0)).To(Succeed(),
+		"Storage health must remain False through the fixed recovery window")
 }
 
-func (test *bpnFixture) readyNodes() {
-	test.eventually(sbrparams.BPNNodeReady, "Nodes must be Ready with matching boot IDs", func(ctx context.Context) error {
-		for index, node := range test.nodes {
-			current, err := test.getNode(ctx, index)
-			if err != nil {
-				return err
-			}
-			ready := false
-			for _, condition := range current.Status.Conditions {
-				if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
-					ready = true
+func (test *bpnFixture) waitForReadyNodesWithExpectedBootIDs() {
+	test.waitForAPICheck(sbrparams.BPNNodeReady, "Nodes must be Ready with matching boot IDs",
+		func(ctx context.Context) error {
+			for index, node := range test.nodes {
+				current, err := test.getNode(ctx, index)
+				if err != nil {
+					return err
+				}
+				ready := false
+				for _, condition := range current.Status.Conditions {
+					if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+						ready = true
+					}
+				}
+				if !ready {
+					return fmt.Errorf("node %s is not Ready", node.initial.Name)
+				}
+				if current.Status.NodeInfo.BootID != node.boot {
+					return fmt.Errorf("node %s API boot ID must match actual host boot ID", node.initial.Name)
 				}
 			}
-			if !ready {
-				return fmt.Errorf("node %s is not Ready", node.initial.Name)
-			}
-			if current.Status.NodeInfo.BootID != node.boot {
-				return fmt.Errorf("node %s API boot ID must match actual host boot ID", node.initial.Name)
-			}
-		}
 
-		return nil
-	})
+			return nil
+		})
 }
 
-func (test *bpnFixture) peerContinuity(from, through time.Time) {
+func (test *bpnFixture) assertPeerAgentsKeepRunningWithoutRestart(from, through time.Time) {
 	GinkgoHelper()
-	test.coverage(from, through, true)
+	test.waitForCompleteAPIHistory(from, through, true)
 	snapshot := test.podRecorder.Snapshot()
 	for _, node := range test.nodes[1:] {
 		Expect(bpnPeerAgentInterval(snapshot.Observations, test.name, node.initial.Name, from, through)).To(Succeed())
@@ -369,7 +286,12 @@ func bpnPodGoneBefore(observations []helpers.RecorderObservation[*corev1.Pod], o
 	return false
 }
 
-func (test *bpnFixture) healthHistory(status corev1.ConditionStatus, from, through time.Time, indices ...int) error {
+func (test *bpnFixture) checkRecordedNodeStorageHealth(
+	status corev1.ConditionStatus, from, through time.Time, indices ...int,
+) error {
+	if len(indices) == 0 {
+		indices = test.workerIndices()
+	}
 	for _, index := range indices {
 		node := test.nodes[index]
 		err := bpnHealthInterval(node.recorder.Snapshot().Observations, node.initial.UID, status, from, through)
@@ -394,14 +316,14 @@ func bpnHealthInterval(observations []helpers.RecorderObservation[*corev1.Node],
 
 			continue
 		}
-		if baseline == nil || bpnHealth(baseline) != status {
+		if baseline == nil || bpnStorageUnhealthyStatus(baseline) != status {
 			return fmt.Errorf("the interval needs a %s storage baseline", status)
 		}
-		if bpnHealth(sample.Object) != status {
-			return fmt.Errorf("storage health became %s at %s", bpnHealth(sample.Object), sample.At)
+		if bpnStorageUnhealthyStatus(sample.Object) != status {
+			return fmt.Errorf("storage health became %s at %s", bpnStorageUnhealthyStatus(sample.Object), sample.At)
 		}
 	}
-	if baseline == nil || bpnHealth(baseline) != status {
+	if baseline == nil || bpnStorageUnhealthyStatus(baseline) != status {
 		return fmt.Errorf("the interval needs a %s storage baseline", status)
 	}
 

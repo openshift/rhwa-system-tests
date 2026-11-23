@@ -76,7 +76,7 @@ func (requestClient *bpnUncertainRequestClient) Delete(_ context.Context, object
 }
 
 func TestBPNJournalCleanupResolvesUnknownRequestUID(t *testing.T) {
-	request := bpnCleanupRequest()
+	request := bpnNewPendingSBR()
 	request.SetUID("")
 	request.SetAnnotations(map[string]string{bpnRequestIntentAnnotation: "creation-intent"})
 	persisted := request.DeepCopy()
@@ -85,7 +85,7 @@ func TestBPNJournalCleanupResolvesUnknownRequestUID(t *testing.T) {
 	originalClient := APIClient
 	APIClient = &clients.Settings{Client: requestClient}
 	t.Cleanup(func() { APIClient = originalClient })
-	fixture, host := bpnPendingJournalCase(t, request)
+	fixture, host := bpnNewActiveJournalFaultFixture(t, request)
 	fixture.restoreCleanupFaults(func(_ string, operation func() error) {
 		if err := operation(); err != nil {
 			t.Error(err)
@@ -96,7 +96,9 @@ func TestBPNJournalCleanupResolvesUnknownRequestUID(t *testing.T) {
 	}
 }
 
-func bpnPendingJournalCase(t *testing.T, requests ...*unstructured.Unstructured) (*bpnFixture, *bpnJournalCleanupHost) {
+func bpnNewActiveJournalFaultFixture(
+	t *testing.T, requests ...*unstructured.Unstructured,
+) (*bpnFixture, *bpnJournalCleanupHost) {
 	t.Helper()
 	host := &bpnJournalCleanupHost{}
 	fault, err := sbrutils.NewBlockJournalFault(host, "uncertain-request-test")
@@ -118,8 +120,8 @@ func bpnPendingJournalCase(t *testing.T, requests ...*unstructured.Unstructured)
 }
 
 func TestBPNRequestIntentPrecedesDispatchAndSurvivesLostResponse(t *testing.T) {
-	fixture, host := bpnPendingJournalCase(t)
-	request := bpnCleanupRequest()
+	fixture, host := bpnNewActiveJournalFaultFixture(t)
+	request := bpnNewPendingSBR()
 	request.SetUID("")
 	var createEnteredAt time.Time
 	requestClient := &bpnUncertainRequestClient{
@@ -139,7 +141,7 @@ func TestBPNRequestIntentPrecedesDispatchAndSurvivesLostResponse(t *testing.T) {
 	originalClient := APIClient
 	APIClient = &clients.Settings{Client: requestClient}
 	t.Cleanup(func() { APIClient = originalClient })
-	dispatchedAt, err := fixture.createRequest(request)
+	dispatchedAt, err := fixture.createAndTrackSBRCR(request)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("creation must retain its lost response error: %v", err)
 	}
@@ -161,7 +163,7 @@ func TestBPNRequestIntentPrecedesDispatchAndSurvivesLostResponse(t *testing.T) {
 func TestBPNUnresolvedRequestKeepsJournalWritesBlocked(t *testing.T) {
 	for _, failure := range []string{"not-found", "foreign-owner", "api-error", "missing-marker", "missing-uid"} {
 		t.Run(failure, func(t *testing.T) {
-			request := bpnCleanupRequest()
+			request := bpnNewPendingSBR()
 			request.SetUID("")
 			request.SetAnnotations(map[string]string{bpnRequestIntentAnnotation: "creation-intent"})
 			persisted := request.DeepCopy()
@@ -182,7 +184,7 @@ func TestBPNUnresolvedRequestKeepsJournalWritesBlocked(t *testing.T) {
 			originalClient := APIClient
 			APIClient = &clients.Settings{Client: requestClient}
 			t.Cleanup(func() { APIClient = originalClient })
-			fixture, host := bpnPendingJournalCase(t, request)
+			fixture, host := bpnNewActiveJournalFaultFixture(t, request)
 			var failures []error
 			if fixture.restoreCleanupFaults(func(_ string, operation func() error) {
 				if err := operation(); err != nil {
@@ -208,7 +210,8 @@ func TestBPNRejectedCreationDoesNotLeaveUncertainIntent(t *testing.T) {
 	APIClient = &clients.Settings{Client: requestClient}
 	t.Cleanup(func() { APIClient = originalClient })
 	fixture := &bpnFixture{ctx: t.Context()}
-	if _, err := fixture.createRequest(bpnCleanupRequest()); !apierrors.IsForbidden(err) || len(fixture.requests) != 0 {
+	if _, err := fixture.createAndTrackSBRCR(
+		bpnNewPendingSBR()); !apierrors.IsForbidden(err) || len(fixture.requests) != 0 {
 		t.Fatalf("a definitive API rejection must remove the unresolved intent: %v", err)
 	}
 }

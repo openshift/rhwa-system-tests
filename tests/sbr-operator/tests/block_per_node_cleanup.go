@@ -25,40 +25,112 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/rest"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (test *bpnFixture) createWorkload() {
+func (test *bpnFixture) createNamespaceAndWaitForPinnedWorkloadPod() {
 	GinkgoHelper()
-	image, err := test.workloadImage()
-	test.prerequisite(err, "the existing workload image digest must resolve before Pod creation")
-	test.namespace = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: test.name + "-"}}
-	Expect(test.api(func(ctx context.Context) error { return APIClient.Create(ctx, test.namespace) })).To(Succeed())
-	config := rest.CopyConfig(APIClient.Config)
-	config.Timeout = sbrparams.BPNAPICall
-	boundedClient, err := client.New(config, client.Options{})
-	Expect(err).NotTo(HaveOccurred())
-	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNWorkloadReady)
-	defer cancel()
-	name, err := helpers.CreateWorkloadPod(ctx, boundedClient, test.nodes[0].initial.Name, test.namespace.Name, image,
-		"workload-", sbrparams.BPNWorkloadReady, sbrparams.BPNPoll)
-	if name != "" {
-		test.workload = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: test.namespace.Name}}
-	}
-	Expect(err).NotTo(HaveOccurred(), "The ordinary pinned workload Pod must become Running and Ready")
-	Expect(test.api(func(ctx context.Context) error {
-		return APIClient.Get(ctx, client.ObjectKeyFromObject(test.workload), test.workload)
-	})).To(Succeed())
-	Expect(test.workload.UID).NotTo(BeEmpty())
-	Expect(bpnPodReady(test.workload)).To(BeTrue(), "The ordinary pinned workload Pod must be Ready")
-	for _, toleration := range test.workload.Spec.Tolerations {
-		Expect(toleration.Key).NotTo(Equal("node.kubernetes.io/out-of-service"))
-	}
-	AddReportEntry("bpn-workload", map[string]interface{}{"name": name, "uid": test.workload.UID, "image": image})
+	test.createWorkloadPod(false)
+	test.waitForAPICheck(sbrparams.BPNWorkloadReady, "The original pinned Pod must become Running and Ready",
+		func(ctx context.Context) error {
+			current, err := test.getWorkloadPod(ctx)
+			if err != nil {
+				return err
+			}
+			if current.Status.Phase != corev1.PodRunning || !bpnPodReady(current) {
+				return fmt.Errorf("the pinned Pod is not Running and Ready")
+			}
+			test.workload = current
+
+			return nil
+		})
+	Expect(test.workload.Spec.NodeName).To(Equal(test.nodes[0].initial.Name))
 }
 
-func (test *bpnFixture) workloadImage() (string, error) {
+func (test *bpnFixture) createWorkloadPod(useScheduler bool) {
+	GinkgoHelper()
+	image, err := test.resolvePinnedWorkloadImage()
+	test.skipOrFailOnPrerequisiteError(err, "the existing workload image digest must resolve before Pod creation")
+	if test.namespace == nil {
+		test.namespace = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: test.name + "-"}}
+		Expect(test.callAPIWithNodeIdentityChecks(
+			func(ctx context.Context) error { return APIClient.Create(ctx, test.namespace) },
+		)).To(Succeed())
+	}
+	test.workload = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workload-", Namespace: test.namespace.Name},
+		Spec: corev1.PodSpec{
+			NodeName:   test.nodes[0].initial.Name,
+			Containers: []corev1.Container{{Name: "workload", Image: image, Command: []string{"sleep", "infinity"}}},
+			Tolerations: []corev1.Toleration{
+				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute},
+				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute},
+			},
+		},
+	}
+	if useScheduler {
+		test.workload.Spec.NodeName = ""
+		test.workload.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchFields: []corev1.NodeSelectorRequirement{{
+					Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{test.nodes[0].initial.Name},
+				}}}},
+			},
+		}}
+	}
+	Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
+		return APIClient.Create(ctx, test.workload)
+	})).To(Succeed())
+	Expect(test.workload.UID).NotTo(BeEmpty())
+	oos := corev1.Taint{Key: sbrparams.OutOfServiceTaintKey, Value: "nodeshutdown", Effect: corev1.TaintEffectNoExecute}
+	for _, toleration := range test.workload.Spec.Tolerations {
+		Expect(toleration.ToleratesTaint(klog.Background(), &oos, false)).To(BeFalse(),
+			"The pinned Pod must be eligible for OutOfService eviction")
+	}
+	AddReportEntry("bpn-workload", map[string]interface{}{
+		"name": test.workload.Name, "uid": test.workload.UID, "image": image,
+	})
+}
+
+func (test *bpnFixture) getWorkloadPod(ctx context.Context) (*corev1.Pod, error) {
+	current := &corev1.Pod{}
+	if err := APIClient.Get(ctx, client.ObjectKeyFromObject(test.workload), current); err != nil {
+		return nil, err
+	}
+	if current.UID != test.workload.UID {
+		return nil, bpnPermanentError{fmt.Errorf("the workload Pod UID changed")}
+	}
+
+	return current, nil
+}
+
+func (test *bpnFixture) waitForOriginalWorkloadEviction(evidence bpnCleanupEvidence) {
+	GinkgoHelper()
+	Expect(test.workload).NotTo(BeNil(), "The case must create a pinned workload before remediation")
+	Expect(test.workload.UID).NotTo(BeEmpty(), "The test must retain the original workload UID")
+	deadline := evidence.startedAt.Add(sbrparams.BPNWorkloadGone)
+	test.waitForAPICheck(bpnReplayWait(deadline), "OutOfService must remove the original pinned Pod UID",
+		func(_ context.Context) error {
+			for _, sample := range test.podRecorder.Snapshot().Observations {
+				if sample.UID != test.workload.UID || sample.EventType != watch.Deleted {
+					continue
+				}
+				if sample.At.Before(evidence.startedAt) || sample.At.After(deadline) {
+					return bpnPermanentError{
+						fmt.Errorf("pod UID %s was deleted outside the OutOfService eviction interval", sample.UID),
+					}
+				}
+
+				return nil
+			}
+
+			return fmt.Errorf("pod UID %s has no recorded Delete event", test.workload.UID)
+		})
+}
+
+func (test *bpnFixture) resolvePinnedWorkloadImage() (string, error) {
 	image := medik8sparams.WorkloadImage
 	if at := strings.LastIndex(image, "@"); at >= 0 {
 		if !bpnValidImageDigest(image[at+1:]) {
@@ -106,38 +178,43 @@ func bpnValidImageDigest(value string) bool {
 	return err == nil
 }
 
-func (test *bpnFixture) releaseRequest(request *unstructured.Unstructured) {
+func (test *bpnFixture) deleteSBRAndWaitForBaselineRestrictions(request *unstructured.Unstructured) {
 	GinkgoHelper()
 	ctx, cancel := context.WithTimeout(test.ctx, sbrparams.BPNRelease)
 	defer cancel()
-	Expect(test.releaseRequestWithin(ctx, request)).To(Succeed(),
+	Expect(test.deleteSBRAndWaitForBaselineRestrictionsWithin(ctx, request)).To(Succeed(),
 		"Normal CR deletion and restriction release must finish within one deadline")
 	test.quietSince = time.Now()
 }
 
-func (test *bpnFixture) waitNHCRelease(request *unstructured.Unstructured, healthyAt time.Time) {
+func (test *bpnFixture) waitForNHCToDeleteSBRAndRestoreBaselineRestrictions(
+	request *unstructured.Unstructured, healthyAt time.Time,
+) {
 	GinkgoHelper()
 	releaseBy := healthyAt.Add(sbrparams.BPNNHCHealthyDelay + sbrparams.BPNRelease)
-	test.eventually(time.Until(releaseBy), "NHC must delete and release within 360s", func(ctx context.Context) error {
-		_, err := test.requestCurrent(ctx, request)
-		if apierrors.IsNotFound(err) {
-			return test.checkRestoredRestrictions(ctx)
-		}
-		if err != nil {
-			return err
-		}
+	test.waitForAPICheck(time.Until(releaseBy), "NHC must delete and release within 360s",
+		func(ctx context.Context) error {
+			_, err := test.getAndCheckSBRCR(ctx, request)
+			if apierrors.IsNotFound(err) {
+				return test.checkRestoredRestrictions(ctx)
+			}
+			if err != nil {
+				return err
+			}
 
-		return fmt.Errorf("NHC request remains")
-	})
+			return fmt.Errorf("NHC request remains")
+		})
 	test.markRequestReleased(request.GetUID())
 	test.quietSince = time.Now()
 }
 
-func (test *bpnFixture) releaseRequestWithin(ctx context.Context, request *unstructured.Unstructured) error {
+func (test *bpnFixture) deleteSBRAndWaitForBaselineRestrictionsWithin(
+	ctx context.Context, request *unstructured.Unstructured,
+) error {
 	if err := test.resolveRequestIntent(ctx, request); err != nil {
 		return err
 	}
-	if err := test.deleteRequest(ctx, request); err != nil {
+	if err := test.deleteSBRByUIDAndWait(ctx, request); err != nil {
 		return err
 	}
 	var last error
@@ -182,10 +259,11 @@ func (test *bpnFixture) resolveRequestIntent(ctx context.Context, request *unstr
 	return nil
 }
 
-func (test *bpnFixture) requireRestrictionsReleased() {
-	test.eventually(sbrparams.BPNRelease, "Normal deletion must release restrictions", func(ctx context.Context) error {
-		return test.checkRestoredRestrictions(ctx)
-	})
+func (test *bpnFixture) waitForNodeRestrictionsToMatchBaseline() {
+	test.waitForAPICheck(sbrparams.BPNRelease, "Normal deletion must release restrictions",
+		func(ctx context.Context) error {
+			return test.checkRestoredRestrictions(ctx)
+		})
 }
 
 func bpnHasTaint(node *corev1.Node, key, value string, effect corev1.TaintEffect) bool {
@@ -198,12 +276,17 @@ func bpnHasTaint(node *corev1.Node, key, value string, effect corev1.TaintEffect
 	return false
 }
 
-func (test *bpnFixture) retainPod() {
-	Expect(test.api(func(ctx context.Context) error { return APIClient.Delete(ctx, test.workload) })).To(Succeed())
-	test.eventually(sbrparams.BPNFaultReady, "The original Pod must remain terminating with its finalizer", test.heldPod)
+func (test *bpnFixture) deleteWorkloadPodAndWaitForFinalizerHold() {
+	Expect(test.callAPIWithNodeIdentityChecks(
+		func(ctx context.Context) error { return APIClient.Delete(ctx, test.workload) },
+	)).To(Succeed())
+	test.waitForAPICheck(
+		sbrparams.BPNFaultReady, "The original Pod must remain terminating with its finalizer",
+		test.checkWorkloadPodTerminatingWithFinalizer,
+	)
 }
 
-func (test *bpnFixture) heldPod(ctx context.Context) error {
+func (test *bpnFixture) checkWorkloadPodTerminatingWithFinalizer(ctx context.Context) error {
 	current := &corev1.Pod{}
 	if err := APIClient.Get(ctx, client.ObjectKeyFromObject(test.workload), current); err != nil {
 		return err
@@ -220,8 +303,8 @@ func (test *bpnFixture) heldPod(ctx context.Context) error {
 	return fmt.Errorf("the test workload finalizer disappeared")
 }
 
-func (test *bpnFixture) setAdministratorFixtures(add bool) error {
-	return test.api(func(ctx context.Context) error {
+func (test *bpnFixture) setAdministratorCordonAndTaints(add bool) error {
+	return test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		node, err := test.getNode(ctx, 0)
 		if err != nil {
 			return err
@@ -275,27 +358,35 @@ func bpnOwnedAdministratorTaint(taint corev1.Taint, initial *corev1.Node) bool {
 }
 
 func (test *bpnFixture) checkRestoredRestrictions(ctx context.Context) error {
-	for index, node := range test.nodes {
-		current, err := test.cleanupNode(ctx, index)
+	for index := range test.nodes {
+		current, err := test.getNodeForCleanup(ctx, index)
 		if err != nil {
 			return err
 		}
-		expected := node.initial.DeepCopy()
-		if index == 0 && test.adminAdded {
-			expected.Spec.Unschedulable = true
-			for _, fixture := range bpnAdministratorTaints() {
-				if !bpnHasTaint(expected, fixture.Key, fixture.Value, fixture.Effect) {
-					expected.Spec.Taints = append(expected.Spec.Taints, fixture)
-				}
-			}
-		}
-		sameTaints := bpnSameTaints(current.Spec.Taints, expected.Spec.Taints)
-		if current.Spec.Unschedulable != expected.Spec.Unschedulable || !sameTaints {
-			return fmt.Errorf("node %s must retain its original cordon and every original taint", current.Name)
+		if err := test.checkNodeRestrictions(index, current); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+func (test *bpnFixture) checkNodeRestrictions(index int, current *corev1.Node) error {
+	expected := test.nodes[index].initial.DeepCopy()
+	if index == 0 && test.adminAdded {
+		expected.Spec.Unschedulable = true
+		for _, fixture := range bpnAdministratorTaints() {
+			if !bpnHasTaint(expected, fixture.Key, fixture.Value, fixture.Effect) {
+				expected.Spec.Taints = append(expected.Spec.Taints, fixture)
+			}
+		}
+	}
+	if current.Spec.Unschedulable != expected.Spec.Unschedulable ||
+		!bpnSameTaints(current.Spec.Taints, expected.Spec.Taints) {
+		return fmt.Errorf("node %s must match the expected cordon and taints", current.Name)
+	}
+
+	return bpnCheckClearedRejoin(current)
 }
 
 func bpnSameTaints(current, expected []corev1.Taint) bool {
@@ -348,7 +439,7 @@ func (guard bpnRequestClient) Delete(ctx context.Context, object client.Object, 
 	return bpnCleanupAPI(ctx, func(call context.Context) error { return guard.Client.Delete(call, object, options...) })
 }
 
-func (test *bpnFixture) deleteRequest(ctx context.Context, request *unstructured.Unstructured) error {
+func (test *bpnFixture) deleteSBRByUIDAndWait(ctx context.Context, request *unstructured.Unstructured) error {
 	if _, released := test.released[request.GetUID()]; released {
 		return nil
 	}
@@ -403,7 +494,7 @@ func bpnCleanupPollWithin(ctx context.Context, operation func(context.Context) e
 	return nil
 }
 
-func (test *bpnFixture) cleanupNode(ctx context.Context, index int) (*corev1.Node, error) {
+func (test *bpnFixture) getNodeForCleanup(ctx context.Context, index int) (*corev1.Node, error) {
 	var node *corev1.Node
 	err := bpnCleanupAPI(ctx, func(call context.Context) error {
 		var err error
@@ -436,7 +527,7 @@ func (test *bpnFixture) cleanup() {
 		if !completed {
 			bpnRecoveryFailed = true
 		}
-		test.finishCleanup(check)
+		test.stopObserversCloseSSHAndReportEvidence(check)
 		AddReportEntry("bpn-cleanup", failures)
 		if len(failures) > 0 {
 			Fail("Cleanup failed. Stop later disruptive cases: " + strings.Join(failures, " | "))
@@ -448,17 +539,32 @@ func (test *bpnFixture) cleanup() {
 		return
 	}
 	if test.prepared {
-		check("restore storage health", test.restoreStorageHealth)
+		check("restore storage health", test.waitForHealthyStorageOnAllNodes)
 		check("Nodes Ready", func() error {
-			return bpnCleanupPoll(sbrparams.BPNNodeReady, test.restoreNodes)
+			return bpnCleanupPoll(sbrparams.BPNNodeReady, test.checkAllNodesReadyAndBootIDsMatch)
 		})
 	}
 	requestsReleased := test.releaseCleanupRequests(check)
+	fixturesCanBeRemoved := requestsReleased
 	if test.adminAdded {
-		check("remove administrator fixtures", func() error { return test.setAdministratorFixtures(false) })
+		check("remove administrator fixtures", func() error { return test.setAdministratorCordonAndTaints(false) })
 	}
-	check("remove test workload", test.removeWorkload)
-	if requestsReleased {
+	if test.prepared && requestsReleased {
+		workersRecovered := false
+		check("complete worker recovery before removing SBR fixtures", func() error {
+			err := bpnCleanupPoll(sbrparams.BPNAgentReady, func(ctx context.Context) error {
+				return test.checkWorkerRecovery(ctx, corev1.ConditionFalse)
+			})
+			workersRecovered = err == nil
+
+			return err
+		})
+		if test.bootUnit != "" {
+			fixturesCanBeRemoved = workersRecovered
+		}
+	}
+	check("remove test workload", test.removeWorkloadFinalizerAndWaitForPodDeletion)
+	if fixturesCanBeRemoved {
 		test.removeCleanupFixtures(check)
 	}
 	if test.prepared && len(failures) == 0 {
@@ -542,7 +648,7 @@ func (test *bpnFixture) removeCleanupFixtures(check func(string, func() error)) 
 	if test.config != nil && test.config.GetUID() != "" {
 		captured := false
 		check("record configuration ownership", func() error {
-			err := test.configurationOwners(owners)
+			err := test.recordSBRConfigAndOperandUIDs(owners)
 			captured = err == nil
 
 			return err
@@ -561,6 +667,9 @@ func (test *bpnFixture) removeCleanupFixtures(check func(string, func() error)) 
 		return err
 	})
 	if removed {
+		if test.bootUnit != "" && test.config != nil && test.config.GetUID() != "" {
+			check("remove or disable the agent-managed boot unit", test.waitForBootUnitRemoval)
+		}
 		check("restore worker labels", func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), sbrparams.BPNRelease)
 			defer cancel()
@@ -572,16 +681,24 @@ func (test *bpnFixture) removeCleanupFixtures(check func(string, func() error)) 
 }
 
 func (test *bpnFixture) removeCleanupRequest(request *unstructured.Unstructured) error {
-	if !test.nhcRequests[request.GetUID()] {
+	var pauseRequests []string
+	if test.nhc != nil {
+		var err error
+		pauseRequests, _, err = unstructured.NestedStringSlice(test.nhc.Object, "spec", "pauseRequests")
+		if err != nil {
+			return err
+		}
+	}
+	if !test.nhcRequests[request.GetUID()] || len(pauseRequests) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), sbrparams.BPNRelease)
 		defer cancel()
 
-		return test.releaseRequestWithin(ctx, request)
+		return test.deleteSBRAndWaitForBaselineRestrictionsWithin(ctx, request)
 	}
 
 	return bpnCleanupPoll(sbrparams.BPNNHCHealthyDelay+sbrparams.BPNRelease, func(ctx context.Context) error {
 		err := bpnCleanupAPI(ctx, func(call context.Context) error {
-			_, err := test.requestCurrent(call, request)
+			_, err := test.getAndCheckSBRCR(call, request)
 
 			return err
 		})
@@ -637,15 +754,15 @@ func (settings *bpnHostSettings) restore() error {
 	return nil
 }
 
-func (test *bpnFixture) restoreStorageHealth() error {
+func (test *bpnFixture) waitForHealthyStorageOnAllNodes() error {
 	return bpnCleanupPoll(sbrparams.BPNHealthChange, func(ctx context.Context) error {
 		for index := range test.nodes {
-			node, err := test.cleanupNode(ctx, index)
+			node, err := test.getNodeForCleanup(ctx, index)
 			if err != nil {
 				return err
 			}
-			if bpnHealth(node) != corev1.ConditionFalse {
-				return fmt.Errorf("node %s storage health is %s", node.Name, bpnHealth(node))
+			if bpnStorageUnhealthyStatus(node) != corev1.ConditionFalse {
+				return fmt.Errorf("node %s storage health is %s", node.Name, bpnStorageUnhealthyStatus(node))
 			}
 		}
 
@@ -653,10 +770,10 @@ func (test *bpnFixture) restoreStorageHealth() error {
 	})
 }
 
-func (test *bpnFixture) restoreNodes(ctx context.Context) error {
+func (test *bpnFixture) checkAllNodesReadyAndBootIDsMatch(ctx context.Context) error {
 	var failures []error
 	for index := range test.nodes {
-		if err := test.restoreNode(ctx, index); err != nil {
+		if err := test.checkNodeReadyAndBootIDsMatch(ctx, index); err != nil {
 			failures = append(failures, fmt.Errorf("node %s: %w", test.nodes[index].initial.Name, err))
 		}
 	}
@@ -664,9 +781,9 @@ func (test *bpnFixture) restoreNodes(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func (test *bpnFixture) restoreNode(ctx context.Context, index int) error {
+func (test *bpnFixture) checkNodeReadyAndBootIDsMatch(ctx context.Context, index int) error {
 	node := test.nodes[index]
-	current, err := test.cleanupNode(ctx, index)
+	current, err := test.getNodeForCleanup(ctx, index)
 	if err != nil {
 		return err
 	}
@@ -684,7 +801,7 @@ func (test *bpnFixture) restoreNode(ctx context.Context, index int) error {
 	return nil
 }
 
-func (test *bpnFixture) removeWorkload() error {
+func (test *bpnFixture) removeWorkloadFinalizerAndWaitForPodDeletion() error {
 	if test.workload == nil {
 		return nil
 	}
@@ -748,7 +865,7 @@ func (test *bpnFixture) deleteFixtures(ctx context.Context, owners map[types.UID
 			}
 		}
 		if len(owners) > 0 {
-			if err := test.configurationGone(call, owners); err != nil {
+			if err := test.checkNoOwnedSBRConfigOperands(call, owners); err != nil {
 				pending = append(pending, err)
 			}
 		}
@@ -796,9 +913,9 @@ func (test *bpnFixture) deleteFixture(ctx context.Context, object *unstructured.
 	return fmt.Errorf("normal deletion of %s %s remains pending", object.GetKind(), object.GetName())
 }
 
-func (test *bpnFixture) configurationOwners(owners map[types.UID]bool) error {
+func (test *bpnFixture) recordSBRConfigAndOperandUIDs(owners map[types.UID]bool) error {
 	owners[test.config.GetUID()] = true
-	_, err := test.configurationOperands(context.Background(), owners)
+	_, err := test.listOwnedSBRConfigOperandsAndRecordUIDs(context.Background(), owners)
 
 	return err
 }
@@ -813,8 +930,8 @@ func bpnOwnedBy(references []metav1.OwnerReference, owners map[types.UID]bool) b
 	return false
 }
 
-func (test *bpnFixture) configurationGone(ctx context.Context, owners map[types.UID]bool) error {
-	remaining, err := test.configurationOperands(ctx, owners)
+func (test *bpnFixture) checkNoOwnedSBRConfigOperands(ctx context.Context, owners map[types.UID]bool) error {
+	remaining, err := test.listOwnedSBRConfigOperandsAndRecordUIDs(ctx, owners)
 	if err != nil {
 		return err
 	}
@@ -825,7 +942,9 @@ func (test *bpnFixture) configurationGone(ctx context.Context, owners map[types.
 	return nil
 }
 
-func (test *bpnFixture) configurationOperands(ctx context.Context, owners map[types.UID]bool) ([]string, error) {
+func (test *bpnFixture) listOwnedSBRConfigOperandsAndRecordUIDs(
+	ctx context.Context, owners map[types.UID]bool,
+) ([]string, error) {
 	var remaining []string
 	var firstError error
 	for _, resource := range []string{"daemonsets", "pods", "persistentvolumeclaims"} {
@@ -893,7 +1012,7 @@ func (test *bpnFixture) restoreWorkerLabels(ctx context.Context) error {
 }
 
 func (test *bpnFixture) restoreWorkerLabel(ctx context.Context, index int) error {
-	node, err := test.cleanupNode(ctx, index)
+	node, err := test.getNodeForCleanup(ctx, index)
 	if err != nil {
 		return err
 	}
@@ -919,7 +1038,7 @@ func (test *bpnFixture) restoreWorkerLabel(ctx context.Context, index int) error
 	if err != nil {
 		return err
 	}
-	node, err = test.cleanupNode(ctx, index)
+	node, err = test.getNodeForCleanup(ctx, index)
 	if err != nil {
 		return err
 	}
@@ -1026,7 +1145,7 @@ func (test *bpnFixture) checkFinalRestoration(from time.Time) error {
 	if err := test.checkRestorationBoots(); err != nil {
 		return err
 	}
-	if err := test.noRestrictions(from); err != nil {
+	if err := test.checkNoSBRsOrRestrictionChanges(from); err != nil {
 		return err
 	}
 
@@ -1034,7 +1153,7 @@ func (test *bpnFixture) checkFinalRestoration(from time.Time) error {
 }
 
 func (test *bpnFixture) checkRestorationBoots() error {
-	if err := test.checkBoots(test.baseline, 1, 2); err != nil {
+	if err := test.checkRecordedBootIDsUnchanged(test.baseline, test.peerIndices()...); err != nil {
 		return err
 	}
 	from := test.baseline
@@ -1042,10 +1161,10 @@ func (test *bpnFixture) checkRestorationBoots() error {
 		from = test.nodes[0].rebootObservedAt
 	}
 
-	return test.checkBoots(from, 0)
+	return test.checkRecordedBootIDsUnchanged(from, 0)
 }
 
-func (test *bpnFixture) finishCleanup(check func(string, func() error)) {
+func (test *bpnFixture) stopObserversCloseSSHAndReportEvidence(check func(string, func() error)) {
 	if test.samplingCancel != nil {
 		test.samplingCancel()
 		if test.samplingDone != nil {
@@ -1086,9 +1205,11 @@ func (test *bpnFixture) finishCleanup(check func(string, func() error)) {
 	AddReportEntry("bpn-host-boot-samples", samples, ReportEntryVisibilityNever)
 }
 
-func (test *bpnFixture) holdWorkloadWithFinalizer() {
+func (test *bpnFixture) addWorkloadHoldFinalizer() {
 	test.workload.Finalizers = append(test.workload.Finalizers, "tests.medik8s.io/hold-workload")
-	Expect(test.api(func(ctx context.Context) error { return APIClient.Update(ctx, test.workload) })).To(Succeed())
+	Expect(test.callAPIWithNodeIdentityChecks(
+		func(ctx context.Context) error { return APIClient.Update(ctx, test.workload) },
+	)).To(Succeed())
 }
 
 type bpnOwnedJournalFault struct {

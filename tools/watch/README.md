@@ -17,7 +17,7 @@ for the person running the test, not for the test itself.
 | Script | Watches | Written for |
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
-| [`sbr-watch.sh`](sbr-watch.sh) | Full Node UIDs and boot IDs, storage conditions, cordons, exact taint values, SBR request conditions and cleanup times, and namespace Pods | [`rhwa-1839`](../../docs/TESTCASES/rhwa-1839.md) — draft BlockPerNode cases |
+| [`sbr-watch.sh`](sbr-watch.sh) | Full Node UIDs and boot IDs, storage and rejoin conditions, cordons, rejoin ownership, exact taint values, SBR request conditions and cleanup times, and namespace Pods | [`rhwa-1839`](../../docs/TESTCASES/rhwa-1839.md) — draft BlockPerNode cases |
 
 ## `snr-watch.sh`
 
@@ -71,7 +71,7 @@ Set `SBR_WATCH_NS` to select another namespace. The default is `openshift-worklo
 
 | Block | Shows |
 |---|---|
-| Nodes | Name, full UID, Ready, cordon, full API boot ID, `SBRStorageUnhealthy`, and taint key/value/effect |
+| Nodes | Name, full UID, Ready, cordon, full API boot ID, `SBRStorageUnhealthy`, `SBRRejoinPending`, `sbr.medik8s.io/rejoin-cordon`, and taint key/value/effect |
 | SBR requests | Namespace/name, full UID, target, all conditions, cleanup phase, start, and deadline |
 | Agent and reporter Pods | All namespace Pods with full UIDs, Nodes, phases, container readiness, and restart counts |
 

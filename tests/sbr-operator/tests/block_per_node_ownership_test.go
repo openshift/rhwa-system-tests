@@ -24,15 +24,15 @@ import (
 
 func TestBPNConfigurationOwnershipRetainsProbeClaims(t *testing.T) {
 	objects := []*unstructured.Unstructured{
-		bpnOwnershipObject("DaemonSet", "agent", "set", "config"),
-		bpnOwnershipObject("Pod", "agent-a", "pod-a", "set"),
-		bpnOwnershipObject("Pod", "agent-b", "pod-b", "set"),
-		bpnOwnershipObject("PersistentVolumeClaim", "probe-a", "claim-a", "pod-a"),
-		bpnOwnershipObject("PersistentVolumeClaim", "probe-b", "claim-b", "pod-b"),
+		bpnNewObjectWithOwnerUID("DaemonSet", "agent", "set", "config"),
+		bpnNewObjectWithOwnerUID("Pod", "agent-a", "pod-a", "set"),
+		bpnNewObjectWithOwnerUID("Pod", "agent-b", "pod-b", "set"),
+		bpnNewObjectWithOwnerUID("PersistentVolumeClaim", "probe-a", "claim-a", "pod-a"),
+		bpnNewObjectWithOwnerUID("PersistentVolumeClaim", "probe-b", "claim-b", "pod-b"),
 	}
-	testCase, fakeClient := bpnOwnershipFixture(t, objects...)
+	testCase, fakeClient := bpnUseFakeAPIWithOwnedOperands(t, objects...)
 	owners := map[types.UID]bool{}
-	if err := testCase.configurationOwners(owners); err != nil {
+	if err := testCase.recordSBRConfigAndOperandUIDs(owners); err != nil {
 		t.Fatal(err)
 	}
 	for _, object := range objects {
@@ -58,16 +58,16 @@ func TestBPNConfigurationOwnershipRetainsProbeClaims(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	remaining, err := testCase.configurationOperands(context.Background(), owners)
+	remaining, err := testCase.listOwnedSBRConfigOperandsAndRecordUIDs(context.Background(), owners)
 	if err != nil || len(remaining) != 2 {
 		t.Fatalf("remaining probe claims = %v, error = %v", remaining, err)
 	}
 }
 
 func TestBPNConfigurationOwnershipIncludesDeletedAgentHistory(t *testing.T) {
-	set := bpnOwnershipObject("DaemonSet", "agent", "set", "config")
-	claim := bpnOwnershipObject("PersistentVolumeClaim", "old-probe", "claim", "old-pod")
-	testCase, _ := bpnOwnershipFixture(t, set, claim)
+	set := bpnNewObjectWithOwnerUID("DaemonSet", "agent", "set", "config")
+	claim := bpnNewObjectWithOwnerUID("PersistentVolumeClaim", "old-probe", "claim", "old-pod")
+	testCase, _ := bpnUseFakeAPIWithOwnedOperands(t, set, claim)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: "old-agent", Namespace: medik8sparams.OperatorNs, UID: "old-pod",
 		OwnerReferences: []metav1.OwnerReference{{UID: "set"}},
@@ -88,7 +88,7 @@ func TestBPNConfigurationOwnershipIncludesDeletedAgentHistory(t *testing.T) {
 	t.Cleanup(recorder.Stop)
 	testCase.podRecorder = recorder
 	owners := map[types.UID]bool{}
-	if err := testCase.configurationOwners(owners); err != nil {
+	if err := testCase.recordSBRConfigAndOperandUIDs(owners); err != nil {
 		t.Fatal(err)
 	}
 	if !owners[pod.UID] || !owners[claim.GetUID()] {
@@ -98,16 +98,16 @@ func TestBPNConfigurationOwnershipIncludesDeletedAgentHistory(t *testing.T) {
 
 func TestBPNConfigurationOwnershipPreservesUnownedReplacements(t *testing.T) {
 	objects := []*unstructured.Unstructured{
-		bpnOwnershipObject("DaemonSet", "agent", "new-set", "foreign-config"),
-		bpnOwnershipObject("Pod", "agent-a", "new-pod", "new-set"),
-		bpnOwnershipObject("PersistentVolumeClaim", "probe-a", "new-claim", "new-pod"),
+		bpnNewObjectWithOwnerUID("DaemonSet", "agent", "new-set", "foreign-config"),
+		bpnNewObjectWithOwnerUID("Pod", "agent-a", "new-pod", "new-set"),
+		bpnNewObjectWithOwnerUID("PersistentVolumeClaim", "probe-a", "new-claim", "new-pod"),
 	}
 	for _, object := range objects {
 		object.SetLabels(map[string]string{"sbrconfig": "test-config"})
 	}
-	testCase, fakeClient := bpnOwnershipFixture(t, objects...)
+	testCase, fakeClient := bpnUseFakeAPIWithOwnedOperands(t, objects...)
 	owners := map[types.UID]bool{"config": true, "old-set": true, "old-pod": true, "old-claim": true}
-	if err := testCase.configurationGone(context.Background(), owners); err != nil {
+	if err := testCase.checkNoOwnedSBRConfigOperands(context.Background(), owners); err != nil {
 		t.Fatal(err)
 	}
 	for _, object := range objects {
@@ -123,15 +123,15 @@ func TestBPNConfigurationOwnershipPreservesUnownedReplacements(t *testing.T) {
 }
 
 func TestBPNConfigurationOwnershipScansAfterListFailure(t *testing.T) {
-	pod := bpnOwnershipObject("Pod", "reporter", "pod", "config")
-	claim := bpnOwnershipObject("PersistentVolumeClaim", "probe", "claim", "pod")
-	testCase, fakeClient := bpnOwnershipFixture(t, pod, claim)
+	pod := bpnNewObjectWithOwnerUID("Pod", "reporter", "pod", "config")
+	claim := bpnNewObjectWithOwnerUID("PersistentVolumeClaim", "probe", "claim", "pod")
+	testCase, fakeClient := bpnUseFakeAPIWithOwnedOperands(t, pod, claim)
 	listFailure := errors.New("daemonset list unavailable")
 	fakeClient.PrependReactor("list", "daemonsets", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, listFailure
 	})
 	owners := map[types.UID]bool{}
-	if err := testCase.configurationOwners(owners); !errors.Is(err, listFailure) {
+	if err := testCase.recordSBRConfigAndOperandUIDs(owners); !errors.Is(err, listFailure) {
 		t.Fatalf("cleanup must retain the list failure: %v", err)
 	}
 	if !owners[pod.GetUID()] || !owners[claim.GetUID()] {
@@ -143,7 +143,7 @@ func TestBPNConfigurationOwnershipScansAfterListFailure(t *testing.T) {
 }
 
 func TestBPNConfigurationOwnershipFailurePreservesFixtures(t *testing.T) {
-	testCase, fakeClient := bpnOwnershipFixture(t)
+	testCase, fakeClient := bpnUseFakeAPIWithOwnedOperands(t)
 	listFailure := errors.New("configuration ownership unavailable")
 	fakeClient.PrependReactor("list", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, listFailure
@@ -170,7 +170,7 @@ func TestBPNConfigurationOwnershipFailurePreservesFixtures(t *testing.T) {
 	}
 }
 
-func bpnOwnershipObject(kind, name string, uid, owner types.UID) *unstructured.Unstructured {
+func bpnNewObjectWithOwnerUID(kind, name string, uid, owner types.UID) *unstructured.Unstructured {
 	object := &unstructured.Unstructured{}
 	object.SetAPIVersion("v1")
 	if kind == "DaemonSet" {
@@ -185,7 +185,7 @@ func bpnOwnershipObject(kind, name string, uid, owner types.UID) *unstructured.U
 	return object
 }
 
-func bpnOwnershipFixture(t *testing.T,
+func bpnUseFakeAPIWithOwnedOperands(t *testing.T,
 	objects ...*unstructured.Unstructured,
 ) (*bpnFixture, *dynamicfake.FakeDynamicClient) {
 	t.Helper()

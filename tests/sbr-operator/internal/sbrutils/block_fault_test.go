@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +114,85 @@ func TestBlockFaultRestorationIsIdempotentAndActivationStartsNewCycle(t *testing
 	evidence := fault.Evidence()
 	if !evidence.ActiveAt.IsZero() || !evidence.RestoredAt.IsZero() || !evidence.DispatchedAt.After(firstActivation) {
 		t.Fatalf("a new fault cycle must not reuse prior confirmation times: %+v", evidence)
+	}
+}
+
+func TestBlockFaultBootUnitOrdering(t *testing.T) {
+	const bootUnit = "sbr-pre-kubelet@worker-0.service"
+	const defaultOrdering = "crio.service kubelet.service"
+	for _, scenario := range []struct {
+		name, unit, ordering string
+		wantError            bool
+	}{
+		{name: "default", ordering: defaultOrdering},
+		{name: "boot-unit", unit: bootUnit, ordering: bootUnit + " " + defaultOrdering},
+		{name: "missing-boot-unit", unit: bootUnit, ordering: defaultOrdering + " extra-" + bootUnit, wantError: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			host := &blockTestHost{}
+			fault, err := NewBlockNetworkFault(host, blockTestNetwork(), BlockAPILoss, "boot-order", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := fault.SetBootUnitOrdering(scenario.unit); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := fault.Prepare(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+
+			unitPath := filepath.Join(t.TempDir(), fault.Evidence().Unit)
+			host.run = func(command string) (string, error) {
+				command = strings.ReplaceAll(command, "/etc/systemd/system/"+fault.Evidence().Unit, unitPath)
+				command = strings.ReplaceAll(command, "/var/lib/"+fault.Evidence().Unit, unitPath)
+				output, err := exec.CommandContext(t.Context(), "sh", "-c", `ordering=$1
+sudo() { shift 2; eval "$1"; }
+systemctl() { if [ "$1" = show ]; then printf '%s\n' "$ordering"; fi; }
+`+command, "sh", scenario.ordering).CombinedOutput()
+
+				return string(output), err
+			}
+			if err := fault.Activate(t.Context()); (err != nil) != scenario.wantError {
+				t.Fatalf("activation error = %v, want error %t", err, scenario.wantError)
+			}
+
+			if fault.Evidence().PersistentOrderingConfirmed == scenario.wantError {
+				t.Fatalf("confirmation = %t, want %t", fault.Evidence().PersistentOrderingConfirmed, !scenario.wantError)
+			}
+
+			wantBefore := "Before=" + defaultOrdering
+			if scenario.unit != "" {
+				wantBefore += " " + scenario.unit
+			}
+
+			if !strings.Contains(host.commands[len(host.commands)-1], wantBefore+"\n") {
+				t.Fatalf("fault service must declare %q", wantBefore)
+			}
+		})
+	}
+}
+
+func TestBlockFaultRejectsInvalidBootUnitOrdering(t *testing.T) {
+	host := &blockTestHost{}
+	fault, err := NewBlockNetworkFault(host, blockTestNetwork(), BlockStorageLoss, "unsafe-order", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, unit := range []string{
+		"sbr-boot.timer", "sbr-boot@.service", "sbr boot.service", "sbr-boot.service\nAfter=network.service",
+		"crio.service", "kubelet.service", strings.Repeat("s", 248) + ".service",
+		"sbr-boot$(touch file).service", "/etc/systemd/system/sbr-boot.service", fault.Evidence().Unit,
+	} {
+		if err := fault.SetBootUnitOrdering(unit); err == nil {
+			t.Errorf("accepted invalid boot service name %q", unit)
+		}
+	}
+
+	if len(host.commands) != 0 {
+		t.Fatal("validating the boot service name must not modify the host")
 	}
 }
 

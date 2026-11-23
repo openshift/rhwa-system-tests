@@ -17,7 +17,9 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func bpnHealthTestCase(t *testing.T, currentStatus corev1.ConditionStatus) (*bpnFixture, time.Time, *fake.Clientset) {
+func bpnStartHealthRecorderAndUseFakeNodeAPI(
+	t *testing.T, currentStatus corev1.ConditionStatus,
+) (*bpnFixture, time.Time, *fake.Clientset) {
 	t.Helper()
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-a", UID: "worker-original"},
@@ -49,7 +51,7 @@ func bpnHealthTestCase(t *testing.T, currentStatus corev1.ConditionStatus) (*bpn
 }
 
 func TestBPNUnhealthyRejectsLateObservedState(t *testing.T) {
-	caseRun, observedAt, api := bpnHealthTestCase(t, corev1.ConditionTrue)
+	caseRun, observedAt, api := bpnStartHealthRecorderAndUseFakeNodeAPI(t, corev1.ConditionTrue)
 	active := observedAt.Add(-sbrparams.BPNHealthChange - time.Minute)
 	caseRun.healthFaults[0] = sbrutils.BlockFaultEvidence{DispatchedAt: active.Add(-time.Second), ActiveAt: active}
 	if _, err := caseRun.waitUnhealthy(0, nil); err == nil {
@@ -61,7 +63,7 @@ func TestBPNUnhealthyRejectsLateObservedState(t *testing.T) {
 }
 
 func TestBPNUnhealthyRequiresCurrentTrueState(t *testing.T) {
-	caseRun, observedAt, _ := bpnHealthTestCase(t, corev1.ConditionFalse)
+	caseRun, observedAt, _ := bpnStartHealthRecorderAndUseFakeNodeAPI(t, corev1.ConditionFalse)
 	caseRun.healthFaults[0] = sbrutils.BlockFaultEvidence{
 		DispatchedAt: observedAt.Add(-time.Second), ActiveAt: observedAt,
 	}
@@ -72,7 +74,7 @@ func TestBPNUnhealthyRequiresCurrentTrueState(t *testing.T) {
 }
 
 func TestBPNUnhealthyPreservesEvidenceAfterLaterFaultPreparation(t *testing.T) {
-	caseRun, observedAt, _ := bpnHealthTestCase(t, corev1.ConditionTrue)
+	caseRun, observedAt, _ := bpnStartHealthRecorderAndUseFakeNodeAPI(t, corev1.ConditionTrue)
 	deadline := observedAt.Add(time.Millisecond)
 	active := deadline.Add(-sbrparams.BPNHealthChange)
 	caseRun.healthFaults[0] = sbrutils.BlockFaultEvidence{DispatchedAt: active.Add(-time.Second), ActiveAt: active}
@@ -85,7 +87,7 @@ func TestBPNUnhealthyPreservesEvidenceAfterLaterFaultPreparation(t *testing.T) {
 	}
 }
 
-func bpnHealthSample(observedAt time.Time) helpers.RecorderObservation[*corev1.Node] {
+func bpnUnhealthyNodeModifiedObservation(observedAt time.Time) helpers.RecorderObservation[*corev1.Node] {
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-a", UID: "worker-original"},
 		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
@@ -101,7 +103,7 @@ func bpnHealthSample(observedAt time.Time) helpers.RecorderObservation[*corev1.N
 func TestBPNUnhealthyUsesEachNodesFaultDeadline(t *testing.T) {
 	start := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	observedAt := start.Add(sbrparams.BPNHealthChange + time.Second)
-	samples := []helpers.RecorderObservation[*corev1.Node]{bpnHealthSample(observedAt)}
+	samples := []helpers.RecorderObservation[*corev1.Node]{bpnUnhealthyNodeModifiedObservation(observedAt)}
 	first := sbrutils.BlockFaultEvidence{DispatchedAt: start.Add(-time.Second), ActiveAt: start}
 	second := sbrutils.BlockFaultEvidence{
 		DispatchedAt: start.Add(time.Minute - time.Second), ActiveAt: start.Add(time.Minute),
@@ -118,14 +120,14 @@ func TestBPNUnhealthyUsesEachNodesFaultDeadline(t *testing.T) {
 func TestBPNUnhealthyUsesFirstObservationFromCurrentFaultCycle(t *testing.T) {
 	start := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	fault := sbrutils.BlockFaultEvidence{DispatchedAt: start, ActiveAt: start.Add(time.Second)}
-	first := bpnHealthSample(start.Add(time.Millisecond))
-	later := bpnHealthSample(start.Add(2 * sbrparams.BPNHealthChange))
+	first := bpnUnhealthyNodeModifiedObservation(start.Add(time.Millisecond))
+	later := bpnUnhealthyNodeModifiedObservation(start.Add(2 * sbrparams.BPNHealthChange))
 	if received, err := bpnUnhealthyEvidenceFrom(
 		[]helpers.RecorderObservation[*corev1.Node]{later, first}, "worker-original", fault); err != nil ||
 		!received.Equal(first.At) {
 		t.Fatalf("confirmation must preserve the first current-cycle observation: received=%s, err=%v", received, err)
 	}
-	stale := bpnHealthSample(start.Add(-time.Millisecond))
+	stale := bpnUnhealthyNodeModifiedObservation(start.Add(-time.Millisecond))
 	if _, err := bpnUnhealthyEvidenceFrom(
 		[]helpers.RecorderObservation[*corev1.Node]{stale}, "worker-original", fault); err == nil {
 		t.Fatal("a previous fault cycle must not satisfy a repeated activation")
@@ -137,7 +139,7 @@ func TestBPNUnhealthyRejectsUnrelatedAndDeletedEvidence(t *testing.T) {
 	fault := sbrutils.BlockFaultEvidence{DispatchedAt: start, ActiveAt: start.Add(time.Second)}
 	for _, invalid := range []string{"replacement UID", "deleted Node", "missing object", "healthy condition"} {
 		t.Run(invalid, func(t *testing.T) {
-			sample := bpnHealthSample(start.Add(time.Second))
+			sample := bpnUnhealthyNodeModifiedObservation(start.Add(time.Second))
 			switch invalid {
 			case "replacement UID":
 				sample.UID = "replacement"
@@ -157,7 +159,7 @@ func TestBPNUnhealthyRejectsUnrelatedAndDeletedEvidence(t *testing.T) {
 }
 
 func TestBPNUnhealthyChecksNegativeEvidenceBeforeHealth(t *testing.T) {
-	caseRun, observedAt, api := bpnHealthTestCase(t, corev1.ConditionTrue)
+	caseRun, observedAt, api := bpnStartHealthRecorderAndUseFakeNodeAPI(t, corev1.ConditionTrue)
 	caseRun.healthFaults[0] = sbrutils.BlockFaultEvidence{
 		DispatchedAt: observedAt.Add(-time.Second), ActiveAt: observedAt,
 	}

@@ -92,7 +92,7 @@ func TestBPNRunningAgentNeedsContainerStatus(t *testing.T) {
 
 func TestBPNPeerAgentIntervalIgnoresReporterPods(t *testing.T) {
 	start := time.Unix(100, 0)
-	agent := bpnPeerAgentFixture()
+	agent := bpnNewRunningPeerAgentPod()
 	baseline := helpers.RecorderObservation[*corev1.Pod]{At: start, UID: agent.UID, Object: agent, EventType: watch.Added}
 	reporter := agent.DeepCopy()
 	reporter.Name, reporter.UID = "reporter", "reporter"
@@ -110,7 +110,7 @@ func TestBPNPeerAgentIntervalIgnoresReporterPods(t *testing.T) {
 	}
 }
 
-func bpnPeerAgentFixture() *corev1.Pod {
+func bpnNewRunningPeerAgentPod() *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "agent", Namespace: "openshift-workload-availability", UID: "agent",
@@ -127,7 +127,7 @@ func TestBPNPeerAgentIntervalRejectsAgentChanges(t *testing.T) {
 	start := time.Unix(100, 0)
 	for _, change := range []string{"replacement", "deleted", "restart", "stopped"} {
 		t.Run(change, func(t *testing.T) {
-			agent := bpnPeerAgentFixture()
+			agent := bpnNewRunningPeerAgentPod()
 			changed := agent.DeepCopy()
 			event := watch.Modified
 			switch change {
@@ -153,7 +153,7 @@ func TestBPNPeerAgentIntervalRejectsAgentChanges(t *testing.T) {
 
 func TestBPNPeerAgentBaselineUsesPresentPods(t *testing.T) {
 	start := time.Unix(100, 0)
-	agent := bpnPeerAgentFixture()
+	agent := bpnNewRunningPeerAgentPod()
 	replacement := agent.DeepCopy()
 	replacement.Name, replacement.UID = "replacement", "replacement"
 	sample := func(pod *corev1.Pod, seconds int, event watch.EventType) helpers.RecorderObservation[*corev1.Pod] {

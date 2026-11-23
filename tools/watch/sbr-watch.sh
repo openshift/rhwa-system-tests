@@ -60,16 +60,16 @@ fi
 
 nodes() {
 	local records
-	if ! records=$(oc get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.spec.unschedulable}{"|"}{.status.nodeInfo.bootID}{"|"}{.status.conditions[?(@.type=="SBRStorageUnhealthy")].status}{"|"}{range .spec.taints[*]}{.key}{"="}{.value}{":"}{.effect}{","}{end}{"\n"}{end}' 2>&1); then
+	if ! records=$(oc get nodes --request-timeout=10s -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.spec.unschedulable}{"|"}{.status.nodeInfo.bootID}{"|"}{.status.conditions[?(@.type=="SBRStorageUnhealthy")].status}{"|"}{.status.conditions[?(@.type=="SBRRejoinPending")].status}{"|"}{.metadata.annotations.sbr\.medik8s\.io/rejoin-cordon}{"|"}{range .spec.taints[*]}{.key}{"="}{.value}{":"}{.effect}{","}{end}{"\n"}{end}' 2>&1); then
 		printf '  <Node read failed: %s>\n' "$records"
 
 		return
 	fi
 	printf '%s\n' "$records" | awk -F '|' '
-		BEGIN { print "  NAME | UID | READY | CORDON | FULL BOOT ID | STORAGE UNHEALTHY | TAINTS" }
-		NF >= 6 {
-			for (column = 1; column <= 7; column++) if ($column == "") $column = "<unset>"
-			printf "  %s | %s | %s | %s | %s | %s | %s\n", $1, $2, $3, $4, $5, $6, $7
+		BEGIN { print "  NAME | UID | READY | CORDON | FULL BOOT ID | STORAGE UNHEALTHY | REJOIN PENDING | REJOIN OWNER | TAINTS" }
+		NF >= 8 {
+			for (column = 1; column <= 9; column++) if ($column == "") $column = "<unset>"
+			printf "  %s | %s | %s | %s | %s | %s | %s | %s | %s\n", $1, $2, $3, $4, $5, $6, $7, $8, $9
 			seen++
 		}
 		END { if (!seen) print "  <no Nodes>" }

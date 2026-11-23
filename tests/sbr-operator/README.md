@@ -691,27 +691,67 @@ complete test cleanup. A before/after comparison still requires a pre-fix build.
 
 ### 25. BlockPerNode external behavior — draft (RHWA-1839)
 
-The 28 draft cases use stable identifiers from `RHWA-1839-01` through `RHWA-1839-17E`.
-They check public storage conditions, requested and autonomous reboots, retained request identities, and normal resource deletion.
-The full case document is [rhwa-1839.md](../../docs/TESTCASES/rhwa-1839.md).
-The explicit specs are in [block_per_node_specs.go](tests/block_per_node_specs.go).
-All 28 cases include `feature:block-per-node` and `tier:preview`. They retain `tier:resiliency`.
-Case 03A uses active NHC with `minHealthy: 2`. It waits for A's request before blocking storage on B and C.
-A's storage fault persists across reboot. B and C must receive no request or reboot through the outage and restoration.
-Restore B and C to healthy storage before restoring A. This staged case does not predict the request count for simultaneous failures.
-NHC uses `healthyDelay: 1m`. CR deletion and restriction release must finish within 360s. SBR's cleanup deadline remains 300s.
-Case 06 keeps its target storage fault active across reboot until the CR status and Pod removal assertions finish.
-Jira Task mapping remains deferred under the user instruction.
+The twenty-two draft cases check externally observable BlockPerNode behavior.
+The complete steps and expected results are in [rhwa-1839.md](../../docs/TESTCASES/rhwa-1839.md).
+The specs are in [block_per_node_specs.go](tests/block_per_node_specs.go) and the associated BlockPerNode spec files.
+All cases retain `feature:block-per-node`, `tier:preview`, and `tier:resiliency`.
 
-- **Operators**: SBR and NHC builds with the proposed BlockPerNode API. Record the installed image identities before execution.
-- **Cluster**: Exactly three selected Ready Linux workers. Preserve existing SSH access and the management path.
-- **Storage**: Dynamically provisioned Ceph RBD with RWO Block support. `SBR_RBD_STORAGE_CLASS` selects a class when discovery is ambiguous.
-- **Environment**: Existing native host commands and `WORKLOAD_IMAGE`. No helper image, injector image, `oc debug`, or package installation.
-- **Watchdog**: Hardware watchdog or SBR-loaded `softdog`. Check `/dev/watchdog` and its timeout after agent readiness, before disruption.
-- **Destructive**: Cases can reboot a worker, stop kubelet, block network traffic, or change journal directory flags.
-- **Pass criteria**: Every required external assertion passes. Continuous observations cover the required intervals. Normal cleanup restores the saved Node settings.
-- **Execution limit**: Complete each spec and its helpers before its first live run. Run one disruptive case at a time.
-- **Expected current result**: Missing runtime behavior produces FAIL. These draft entries do not claim a passing live run.
+| ID | Scenario and required result |
+|---|---|
+| 02 | API loss on one worker, then all workers - No reboot or remediation |
+| 03 | Broad storage failure - NHC remediates only the original target |
+| 04 | Combined outage with OnTimeout - Reboot and OOS at grace expiry |
+| 05 | Single-worker network isolation - Healthy storage prevents reboot |
+| 06 | Target storage failure - NHC remediation and workload evacuation |
+| 07 | SysRq kernel panic - Unhealthy reporting, NHC remediation, and recovery |
+| 08 | Agent Pod replacement - The host does not reboot |
+| 09 | Kubelet stops - Healthy storage prevents remediation |
+| 10 | Peer storage timeouts - Peers remain running and reconcile the target |
+| 11 | Worker partition with API access - No reboot or remediation |
+| 15A | A retained Pod during CR deletion - SBR releases its restrictions |
+| 15B | Pre-existing administrator restrictions - SBR preserves their values |
+| 16A | Target journal writes fail - A permitted reboot still completes |
+| 16C | Peer journal writes fail - Peers still reconcile the target |
+| 17B | Requested and autonomous attempts - Separate limits and request identities |
+| 17E | API interruption during storage recovery - A later autonomous reboot is permitted |
+| 17F | Storage interruption during recovery - Another autonomous reboot remains blocked |
+| 18 | OnReboot without boot evidence - OOS waits for matching evidence |
+| 19 | Runner-created CRs - No offer, reboot, or scheduling restriction |
+| 20 | Watcher storage reads fail - Healthy workers remain available |
+| 21 | Autonomous reboot without a CR - The local agent releases the rejoin cordon |
+| 22 | NHC claims a rejoin cordon - The peer releases it while storage remains failed |
+
+Use every detected worker. Require at least two Ready, schedulable Linux workers outside the control plane.
+Sort workers by Node name. Index zero is the target. Every other worker is a peer.
+Case 03 selects all workers with NHC `minHealthy: N-1`. Target-only policies allow other cases to keep peer faults active.
+Every positive remediation request must originate from NHC. Only case 19 creates remediation CRs directly.
+Singleton numeric groups have no alphabet suffix. Groups 15, 16, and 17 retain their distinct suffixes.
+
+Ordinary workload Pods must disappear after OOS, including OnTimeout cases. Replacement workload readiness is outside scope.
+Cases 15A and 15B deliberately retain a finalizer-held Pod to check cleanup and restriction ownership.
+Check policy success at OOS independently of boot evidence and cleanup completion.
+Recovery requires Ready Nodes, expected API/host boot IDs, healthy storage, and Ready agents and reporters on every worker.
+Check normal CR deletion and baseline cordons and taints before configuration deletion.
+Require the rejoin ownership annotation to disappear and `SBRRejoinPending` to clear.
+During intentional continued storage failure, require the target agent to run and the reporter to be Ready before continuing.
+
+Cases 04, 07, 18, and 20 use one target per watcher group and require concurrent RWX raw Block access.
+Case 20 requires a native device-scoped read fault. Pod network isolation cannot establish a kernel RBD read failure.
+All faults use existing host facilities and preserve management access. No helper image or package installation is permitted.
+The tests use the existing `WORKLOAD_IMAGE`. `SBR_RBD_STORAGE_CLASS` resolves an ambiguous RBD class selection.
+
+Cases 04, 21, and 22 enable the optional boot unit. Other cases explicitly disable it.
+Set `SBR_BOOT_UNIT_NAME` to the actual agent-installed service name. Missing input skips enabled cases before disruption.
+Case 04 checks bounded kubelet startup while the API remains unavailable.
+Cases 21 and 22 restore API access during the boot-unit window and require successful publication of the cordon and ownership.
+Case 21 checks local release without a CR. Case 22 checks transfer to the peer and release after CR deletion.
+A scheduler-managed Pod checks exclusion while the target remains cordoned. Existing pinned Pods continue to check evacuation.
+The tests do not install the service manually or infer successful installation from accepted configuration fields.
+
+Case 17F configures three-minute autonomous recovery. Other autonomous cases configure one minute.
+Probe deadline boundaries and exact post-decision recovery ordering belong in component tests when the proposed feature exists.
+The test document records that pending coverage. It does not claim completed component tests or live validation.
+Jira Task mapping remains deferred under the existing user instruction.
 
 ```bash
 export KUBECONFIG="$HOME/.kube/ocpctl-cluster"
@@ -719,6 +759,5 @@ ginkgo -v --procs=1 --timeout=2h --focus='RHWA-1839-06([[:space:]]|$)' ./tests/s
 tools/watch/sbr-watch.sh --loop -n 5
 ```
 
-All 28 cases explicitly configure one-minute autonomous recovery with a 60s additional allowance.
-Explicit five-minute configuration and omitted-field defaulting are outside this suite.
-Rows 13 and 14, version upgrades, power loss, journal contents, and reboot mechanism attribution remain outside this scope.
+Run one disruptive case at a time. These draft cases require the proposed SBR feature and do not claim a passing live run.
+Version upgrades, power loss, journal contents, workload recovery, and reboot mechanism attribution remain outside scope.

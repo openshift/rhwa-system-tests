@@ -2,14 +2,93 @@ package tests
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
 )
+
+func TestBPNWorkerTopologyUsesAllWorkers(t *testing.T) {
+	for _, scenario := range []struct {
+		count int
+		peers []int
+	}{
+		{count: 0},
+		{count: 1},
+		{count: 2, peers: []int{1}},
+		{count: 5, peers: []int{1, 2, 3, 4}},
+	} {
+		t.Run(fmt.Sprintf("%d workers", scenario.count), func(t *testing.T) {
+			workers := make([]corev1.Node, 0, scenario.count)
+			for number := scenario.count; number > 0; number-- {
+				workers = append(workers, bpnNewReadyLinuxWorker(fmt.Sprintf("worker-%d", number)))
+			}
+			nodes, err := bpnValidateAndSortWorkerNodes(workers)
+			if scenario.count < 2 {
+				if err == nil || len(nodes) != 0 {
+					t.Fatalf("worker validation must fail for %d workers", scenario.count)
+				}
+
+				return
+			}
+			if err != nil || len(nodes) != scenario.count {
+				t.Fatalf("worker validation got %d Nodes and error %v, want %d Nodes", len(nodes), err, scenario.count)
+			}
+			for index, node := range nodes {
+				if name := fmt.Sprintf("worker-%d", index+1); node.initial.Name != name {
+					t.Fatalf("worker %d = %s, want %s", index, node.initial.Name, name)
+				}
+			}
+			fixture := &bpnFixture{nodes: nodes}
+			if peers := fixture.peerIndices(); !slices.Equal(peers, scenario.peers) {
+				t.Fatalf("peer indices = %v, want %v", peers, scenario.peers)
+			}
+		})
+	}
+}
+
+func TestBPNWorkerTopologyRejectsIneligibleWorkers(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		change func(*corev1.Node)
+	}{
+		{"NotReady", func(node *corev1.Node) { node.Status.Conditions[0].Status = corev1.ConditionFalse }},
+		{"cordoned", func(node *corev1.Node) { node.Spec.Unschedulable = true }},
+		{"non-Linux", func(node *corev1.Node) { node.Status.NodeInfo.OperatingSystem = "windows" }},
+		{"control plane", func(node *corev1.Node) { node.Labels["node-role.kubernetes.io/control-plane"] = "" }},
+		{"master", func(node *corev1.Node) { node.Labels["node-role.kubernetes.io/master"] = "" }},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			workers := []corev1.Node{
+				bpnNewReadyLinuxWorker("worker-1"), bpnNewReadyLinuxWorker("worker-2"), bpnNewReadyLinuxWorker("worker-3"),
+				bpnNewReadyLinuxWorker("invalid-worker"),
+			}
+			scenario.change(&workers[3])
+			nodes, err := bpnValidateAndSortWorkerNodes(workers)
+			if err == nil || !strings.Contains(err.Error(), "invalid-worker") || len(nodes) != 0 {
+				t.Fatalf("worker validation must reject the entire topology and name the ineligible worker: %v", err)
+			}
+		})
+	}
+}
+
+func bpnNewReadyLinuxWorker(name string) corev1.Node {
+	return corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"node-role.kubernetes.io/worker": ""}},
+		Status: corev1.NodeStatus{
+			NodeInfo:   corev1.NodeSystemInfo{OperatingSystem: "linux"},
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+}
 
 func TestBPNReadFixedSpecDurations(t *testing.T) {
 	gomega.RegisterTestingT(t)
@@ -52,10 +131,10 @@ func TestBPNReadFixedSpecDurations(t *testing.T) {
 			})
 			fixture := &bpnFixture{ctx: context.Background(), cleaning: true}
 			err := gomega.InterceptGomegaFailure(func() {
-				fixture.readFixedSpec(object, map[string]interface{}{testCase.field: testCase.expected}, resource)
+				fixture.readAndAssertStoredSpec(object, map[string]interface{}{testCase.field: testCase.expected}, resource)
 			})
 			if (err != nil) != testCase.wantFail {
-				t.Fatalf("readFixedSpec failure = %v, want failure = %t", err, testCase.wantFail)
+				t.Fatalf("readAndAssertStoredSpec failure = %v, want failure = %t", err, testCase.wantFail)
 			}
 		})
 	}

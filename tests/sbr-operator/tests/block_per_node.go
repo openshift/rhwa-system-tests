@@ -49,6 +49,11 @@ type bpnBootSample struct {
 
 type bpnFixture struct {
 	caseID                string
+	recoveryPeriod        time.Duration
+	bootUnit              string
+	watcherGroupSize      int64
+	oosTaintPolicy        string
+	nhcUnhealthyDuration  time.Duration
 	ctx                   context.Context
 	nodes                 []*bpnNode
 	name                  string
@@ -91,15 +96,16 @@ func newBPNFixture(caseID string) *bpnFixture {
 		Skip("BLOCKED: an earlier case did not restore the cluster")
 	}
 	test := &bpnFixture{
-		ctx: context.Background(), caseID: caseID,
-		name: "sbr-bpn-" + strings.ToLower(strings.TrimPrefix(caseID, "RHWA-1839-")),
+		ctx: context.Background(), caseID: caseID, recoveryPeriod: sbrparams.BPNRecoveryPeriod,
+		nhcUnhealthyDuration: sbrparams.BPNNHCUnhealthyDuration,
+		name:                 "sbr-bpn-" + strings.ToLower(strings.TrimPrefix(caseID, "RHWA-1839-")),
 	}
 	DeferCleanup(test.cleanup)
 
 	return test
 }
 
-func (test *bpnFixture) api(operation func(context.Context) error) error {
+func (test *bpnFixture) callAPIWithNodeIdentityChecks(operation func(context.Context) error) error {
 	if !test.cleaning {
 		if err := test.checkNodeIdentities(); err != nil {
 			return err
@@ -120,25 +126,27 @@ func (test *bpnFixture) api(operation func(context.Context) error) error {
 	return nil
 }
 
-func (test *bpnFixture) eventually(timeout time.Duration, reason string, operation func(context.Context) error) {
+func (test *bpnFixture) waitForAPICheck(timeout time.Duration, reason string, operation func(context.Context) error) {
 	GinkgoHelper()
-	Eventually(func() error { return bpnRetryResult(test.api(operation)) }, timeout, sbrparams.BPNPoll).
+	Eventually(func() error {
+		return bpnRetryResult(test.callAPIWithNodeIdentityChecks(operation))
+	}, timeout, sbrparams.BPNPoll).
 		Should(Succeed(), reason)
 }
 
-func (test *bpnFixture) prepare() {
+func (test *bpnFixture) prepareNodesAndCreateSBRConfig() {
 	GinkgoHelper()
-	test.prepareNodes()
+	test.selectWorkersAndPrepareHostAccess()
 	storageClass, err := sbrutils.DiscoverRBDStorageClass(test.ctx, APIClient, sbrparams.SBRRBDStorageClass)
 	if err != nil {
 		Skip(fmt.Sprintf("BLOCKED: RBD storage: %v", err))
 	}
 
-	test.startObservation()
-	test.startBootSampling()
+	test.startNodeSBRAndPodRecorders()
+	test.startHostBootIDSampling()
 	test.labelsAdded = true
 	for _, node := range test.nodes {
-		Expect(test.api(func(ctx context.Context) error {
+		Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 			current, getErr := APIClient.CoreV1Interface.Nodes().Get(ctx, node.initial.Name, metav1.GetOptions{})
 			if getErr != nil {
 				return getErr
@@ -161,20 +169,37 @@ func (test *bpnFixture) prepare() {
 		"sharedStorageVolumeMode": "BlockPerNode", "sharedStorageClass": storageClass,
 		"ioTimeout": "15s", "sbrTimeoutSeconds": int64(sbrparams.BPNSBRTimeoutSeconds),
 		"maxConsecutiveFailures": int64(sbrparams.BPNMaxConsecutiveFailures),
-		"totalOutageGracePeriod": "60s", "autonomousRebootRecoveryPeriod": sbrparams.BPNRecoveryPeriod.String(),
+		"totalOutageGracePeriod": "60s", "autonomousRebootRecoveryPeriod": test.recoveryPeriod.String(),
 		"detectOnlyMode": "Disabled", "watchdogPath": sbrparams.AgentDefaultWatchdogPath,
+		"bootUnitEnabled": test.bootUnit != "",
 	})
+	if test.bootUnit != "" {
+		timeout := sbrparams.BPNBootUnitTimeout.String()
+		Expect(unstructured.SetNestedField(test.config.Object, timeout, "spec", "bootUnitTimeout")).
+			To(Succeed(), "The test must set the boot unit timeout")
+	}
+	if test.watcherGroupSize > 0 {
+		Expect(unstructured.SetNestedField(test.config.Object, test.watcherGroupSize, "spec", "watcherGroupSize")).
+			To(Succeed(), "The test must set the watcher group size")
+	}
+	if test.oosTaintPolicy != "" {
+		Expect(unstructured.SetNestedField(test.config.Object, test.oosTaintPolicy, "spec", "oosTaintPolicy")).
+			To(Succeed(), "The test must set the requested OutOfService policy")
+	}
 	expectedConfigSpec, _, err := unstructured.NestedMap(test.config.Object, "spec")
 	Expect(err).NotTo(HaveOccurred())
-	Expect(test.api(func(ctx context.Context) error { return APIClient.Create(ctx, test.config) })).To(Succeed(),
+	Expect(test.callAPIWithNodeIdentityChecks(
+		func(ctx context.Context) error { return APIClient.Create(ctx, test.config) },
+	)).To(Succeed(),
 		"BlockPerNode configuration must accept the proposed API")
-	test.config = test.readFixedSpec(test.config, expectedConfigSpec, bpnResource("storagebasedremediationconfigs"))
+	test.config = test.readAndAssertStoredSpec(
+		test.config, expectedConfigSpec, bpnResource("storagebasedremediationconfigs"))
 }
 
-func (test *bpnFixture) prepareNodes() {
+func (test *bpnFixture) selectWorkersAndPrepareHostAccess() {
 	GinkgoHelper()
 	var nodeList *corev1.NodeList
-	Expect(test.api(func(ctx context.Context) error {
+	Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		var err error
 		nodeList, err = APIClient.CoreV1Interface.Nodes().List(ctx, metav1.ListOptions{
 			LabelSelector: "node-role.kubernetes.io/worker",
@@ -182,27 +207,12 @@ func (test *bpnFixture) prepareNodes() {
 
 		return err
 	})).To(Succeed(), "The runner must list worker Nodes")
-	for nodeIndex := range nodeList.Items {
-		node := &nodeList.Items[nodeIndex]
-		_, controlPlane := node.Labels["node-role.kubernetes.io/control-plane"]
-		_, master := node.Labels["node-role.kubernetes.io/master"]
-		if !controlPlane && !master && node.Status.NodeInfo.OperatingSystem == "linux" && isNodeSchedulable(node) {
-			test.nodes = append(test.nodes, &bpnNode{initial: node.DeepCopy()})
-		}
-	}
-
-	if len(test.nodes) < sbrparams.BPNWorkers {
-		Skip(fmt.Sprintf("BLOCKED: %s needs three Ready Linux workers, found %d", test.caseID, len(test.nodes)))
-	}
-
-	sort.Slice(test.nodes, func(left, right int) bool {
-		return test.nodes[left].initial.Name < test.nodes[right].initial.Name
-	})
-	test.nodes = test.nodes[:sbrparams.BPNWorkers]
-	test.checkConflicts()
+	workers, err := bpnValidateAndSortWorkerNodes(nodeList.Items)
+	Expect(err).NotTo(HaveOccurred(), "%s requires a valid worker topology", test.caseID)
+	test.nodes = workers
+	test.skipIfRemediationConflicts()
 	test.recordOperatorImages()
 	for _, node := range test.nodes {
-		var err error
 		node.host, err = helpers.PrepareNodeAccess(test.ctx, APIClient, node.initial.Name,
 			node.initial.UID, sbrparams.BPNObserverStart)
 		if err != nil {
@@ -217,10 +227,44 @@ func (test *bpnFixture) prepareNodes() {
 	}
 }
 
+func bpnValidateAndSortWorkerNodes(workers []corev1.Node) ([]*bpnNode, error) {
+	if len(workers) < sbrparams.BPNMinWorkers {
+		return nil, fmt.Errorf("the test needs at least %d worker Nodes, found %d", sbrparams.BPNMinWorkers, len(workers))
+	}
+	nodes := make([]*bpnNode, 0, len(workers))
+	for nodeIndex := range workers {
+		node := &workers[nodeIndex]
+		_, controlPlane := node.Labels["node-role.kubernetes.io/control-plane"]
+		_, master := node.Labels["node-role.kubernetes.io/master"]
+		if controlPlane || master || node.Status.NodeInfo.OperatingSystem != "linux" || !isNodeSchedulable(node) {
+			return nil, fmt.Errorf("worker Node %q must be a Ready, schedulable Linux Node outside the control plane", node.Name)
+		}
+		nodes = append(nodes, &bpnNode{initial: node.DeepCopy()})
+	}
+	sort.Slice(nodes, func(left, right int) bool {
+		return nodes[left].initial.Name < nodes[right].initial.Name
+	})
+
+	return nodes, nil
+}
+
+func (test *bpnFixture) workerIndices() []int {
+	indices := make([]int, len(test.nodes))
+	for nodeIndex := range indices {
+		indices[nodeIndex] = nodeIndex
+	}
+
+	return indices
+}
+
+func (test *bpnFixture) peerIndices() []int {
+	return test.workerIndices()[1:]
+}
+
 func (test *bpnFixture) recordOperatorImages() {
 	GinkgoHelper()
 	var pods *corev1.PodList
-	Expect(test.api(func(ctx context.Context) error {
+	Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		var err error
 		pods, err = APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).List(ctx, metav1.ListOptions{})
 
@@ -245,12 +289,12 @@ func (test *bpnFixture) recordOperatorImages() {
 	AddReportEntry("bpn-existing-operator-images", images, ReportEntryVisibilityNever)
 }
 
-func (test *bpnFixture) readFixedSpec(object *unstructured.Unstructured, expected map[string]interface{},
+func (test *bpnFixture) readAndAssertStoredSpec(object *unstructured.Unstructured, expected map[string]interface{},
 	resource dynamic.ResourceInterface,
 ) *unstructured.Unstructured {
 	GinkgoHelper()
 	var stored *unstructured.Unstructured
-	Expect(test.api(func(ctx context.Context) error {
+	Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		var err error
 		stored, err = resource.Get(ctx, object.GetName(), metav1.GetOptions{})
 
@@ -262,7 +306,7 @@ func (test *bpnFixture) readFixedSpec(object *unstructured.Unstructured, expecte
 		Expect(err).NotTo(HaveOccurred())
 		Expect(found).To(BeTrue(), "%s must preserve spec.%s", object.GetKind(), field)
 		switch field {
-		case "ioTimeout", "totalOutageGracePeriod", "autonomousRebootRecoveryPeriod", "healthyDelay":
+		case "ioTimeout", "totalOutageGracePeriod", "autonomousRebootRecoveryPeriod", "healthyDelay", "bootUnitTimeout":
 			actualText, actualIsString := actual.(string)
 			Expect(actualIsString).To(BeTrue(), "%s spec.%s must be a duration string", object.GetKind(), field)
 			expectedText, expectedIsString := value.(string)
@@ -278,14 +322,14 @@ func (test *bpnFixture) readFixedSpec(object *unstructured.Unstructured, expecte
 	return stored
 }
 
-func (test *bpnFixture) checkConflicts() {
+func (test *bpnFixture) skipIfRemediationConflicts() {
 	for _, resource := range []struct{ group, version, resource string }{
 		{sbrparams.CRDGroup, sbrparams.CRDVersion, "storagebasedremediationconfigs"},
 		{"self-node-remediation.medik8s.io", "v1alpha1", "selfnoderemediationconfigs"},
 		{"remediation.medik8s.io", "v1alpha1", "nodehealthchecks"},
 	} {
 		var existing *unstructured.UnstructuredList
-		Expect(test.api(func(ctx context.Context) error {
+		Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 			var err error
 			existing, err = APIClient.Resource(schema.GroupVersionResource{
 				Group: resource.group, Version: resource.version,
@@ -309,7 +353,7 @@ func (test *bpnFixture) checkConflicts() {
 	}
 
 	var requests *unstructured.UnstructuredList
-	Expect(test.api(func(ctx context.Context) error {
+	Expect(test.callAPIWithNodeIdentityChecks(func(ctx context.Context) error {
 		var err error
 		requests, err = APIClient.Resource(schema.GroupVersionResource{
 			Group: sbrparams.CRDGroup, Version: sbrparams.CRDVersion, Resource: "storagebasedremediations",
@@ -327,7 +371,7 @@ func (test *bpnFixture) checkConflicts() {
 	}
 }
 
-func (test *bpnFixture) checkWatchdog(node *bpnNode) {
+func (test *bpnFixture) requireWatchdogDeviceAndTimeout(node *bpnNode) {
 	GinkgoHelper()
 	output, err := node.host.Run(test.ctx, sbrparams.BPNHostCall,
 		"sudo sh -c 'test -c /dev/watchdog && cat /sys/class/watchdog/watchdog0/timeout'")
@@ -385,29 +429,48 @@ func (test *bpnFixture) policySelectsWorkers(object *unstructured.Unstructured) 
 	return false
 }
 
-func (test *bpnFixture) createPolicy(paused bool) {
+const bpnNHCPauseRequest = "sbr-block-test"
+
+func (test *bpnFixture) createNHCAndSBRTemplate(paused, targetOnly bool) {
+	GinkgoHelper()
+	selector := map[string]interface{}{"tests.medik8s.io/block-per-node": test.name}
+	minHealthy := int64(len(test.nodes) - 1)
+	if targetOnly {
+		hostname := test.nodes[0].initial.Labels[corev1.LabelHostname]
+		Expect(hostname).NotTo(BeEmpty(), "The target must have a hostname label for the NHC selector")
+		for _, peer := range test.nodes[1:] {
+			Expect(peer.initial.Labels[corev1.LabelHostname]).NotTo(Equal(hostname),
+				"The NHC selector must exclude peer Node %s", peer.initial.Name)
+		}
+		selector[corev1.LabelHostname] = hostname
+		minHealthy = 0
+	}
 	test.template = buildSBRUnstructured("StorageBasedRemediationTemplate", test.name,
 		map[string]interface{}{"template": map[string]interface{}{"spec": map[string]interface{}{}}})
-	Expect(test.api(func(ctx context.Context) error { return APIClient.Create(ctx, test.template) })).To(Succeed())
+	Expect(test.callAPIWithNodeIdentityChecks(
+		func(ctx context.Context) error { return APIClient.Create(ctx, test.template) },
+	)).To(Succeed())
 	test.nhc = buildNHC(test.name)
-	_ = unstructured.SetNestedField(test.nhc.Object, int64(2), "spec", "minHealthy")
+	_ = unstructured.SetNestedField(test.nhc.Object, minHealthy, "spec", "minHealthy")
 	_ = unstructured.SetNestedField(test.nhc.Object, sbrparams.BPNNHCHealthyDelay.String(), "spec", "healthyDelay")
 	_ = unstructured.SetNestedField(test.nhc.Object, map[string]interface{}{
-		"matchLabels": map[string]interface{}{"tests.medik8s.io/block-per-node": test.name},
+		"matchLabels": selector,
 	}, "spec", "selector")
 	_ = unstructured.SetNestedField(test.nhc.Object, []interface{}{map[string]interface{}{
-		"type": sbrparams.SBRStorageUnhealthyCondition, "status": "True", "duration": "30s",
+		"type": sbrparams.SBRStorageUnhealthyCondition, "status": "True", "duration": test.nhcUnhealthyDuration.String(),
 	}}, "spec", "unhealthyConditions")
 	_ = unstructured.SetNestedField(test.nhc.Object, test.name, "spec", "remediationTemplate", "name")
 	if paused {
-		_ = unstructured.SetNestedStringSlice(test.nhc.Object, []string{"sbr-block-test"}, "spec", "pauseRequests")
+		_ = unstructured.SetNestedStringSlice(test.nhc.Object, []string{bpnNHCPauseRequest}, "spec", "pauseRequests")
 	}
 
 	expectedSpec, _, err := unstructured.NestedMap(test.nhc.Object, "spec")
 	Expect(err).NotTo(HaveOccurred())
-	Expect(test.api(func(ctx context.Context) error { return APIClient.Create(ctx, test.nhc) })).To(Succeed(),
+	Expect(test.callAPIWithNodeIdentityChecks(
+		func(ctx context.Context) error { return APIClient.Create(ctx, test.nhc) },
+	)).To(Succeed(),
 		"NHC must accept the fixed storage-only policy")
-	test.nhc = test.readFixedSpec(test.nhc, expectedSpec, APIClient.Resource(schema.GroupVersionResource{
+	test.nhc = test.readAndAssertStoredSpec(test.nhc, expectedSpec, APIClient.Resource(schema.GroupVersionResource{
 		Group: sbrparams.NHCAPIGroup, Version: sbrparams.NHCAPIVersion, Resource: "nodehealthchecks",
 	}))
 	pauseRequests, _, err := unstructured.NestedStringSlice(test.nhc.Object, "spec", "pauseRequests")
@@ -415,7 +478,8 @@ func (test *bpnFixture) createPolicy(paused bool) {
 	if !paused {
 		Expect(pauseRequests).To(BeEmpty(), "The active NHC policy must have no pause requests")
 	} else {
-		Expect(pauseRequests).To(Equal([]string{"sbr-block-test"}), "The NHC policy must keep exactly the test pause request")
+		Expect(pauseRequests).To(Equal([]string{bpnNHCPauseRequest}),
+			"The NHC policy must keep exactly the test pause request")
 	}
 	for _, field := range []string{"stormCooldownDuration", "escalatingRemediations", "maxUnhealthy"} {
 		_, found, readErr := unstructured.NestedFieldNoCopy(test.nhc.Object, "spec", field)
@@ -424,34 +488,95 @@ func (test *bpnFixture) createPolicy(paused bool) {
 	}
 }
 
-func (test *bpnFixture) componentsReady(ctx context.Context) error {
+func (test *bpnFixture) checkAgentAndReporterReadiness(ctx context.Context) error {
+	return test.checkAgentAndReporterState(ctx, nil, false)
+}
+
+func (test *bpnFixture) checkAgentAndReporterState(
+	ctx context.Context, runningTargetContainers map[string]bool, targetStorageUnhealthy bool,
+) error {
 	pods, err := APIClient.CoreV1Interface.Pods(medik8sparams.OperatorNs).List(ctx,
 		metav1.ListOptions{LabelSelector: "sbrconfig=" + test.name})
 	if err != nil {
 		return err
 	}
-	for _, node := range test.nodes {
-		agent, reporter := false, false
-		for _, pod := range pods.Items {
-			if pod.Spec.NodeName != node.initial.Name || !bpnPodReady(&pod) {
-				continue
-			}
-			for _, container := range pod.Spec.Containers {
-				if strings.Contains(container.Name, "reporter") {
-					reporter = true
-				}
-				if container.Name == sbrparams.AgentContainerName {
-					agent = true
-				}
-			}
+	for index, node := range test.nodes {
+		var runningContainers map[string]bool
+		if index == 0 {
+			runningContainers = runningTargetContainers
 		}
-		if !agent || !reporter {
-			return fmt.Errorf("node %s requires Ready agent and reporter, agent=%t reporter=%t",
-				node.initial.Name, agent, reporter)
+		storageUnhealthy := index == 0 && targetStorageUnhealthy
+		if err := bpnCheckNodeOperands(
+			pods.Items, test.name, node.initial.Name, runningContainers, storageUnhealthy,
+		); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+func bpnCheckNodeOperands(
+	pods []corev1.Pod, configName, nodeName string, runningContainers map[string]bool, storageUnhealthy bool,
+) error {
+	agent, reporter := false, false
+	for index := range pods {
+		pod := &pods[index]
+		if !bpnSelectedPod(pod, configName, nodeName) {
+			continue
+		}
+		allowUnreadyAgent := storageUnhealthy && bpnSelectedAgentPod(pod, configName, nodeName)
+		if !bpnOperandPodMatchesExpectedState(pod, runningContainers, allowUnreadyAgent) {
+			continue
+		}
+		for _, container := range pod.Spec.Containers {
+			if strings.Contains(container.Name, "reporter") {
+				reporter = true
+			}
+			if container.Name == sbrparams.AgentContainerName {
+				agent = true
+			}
+		}
+	}
+	if !agent || !reporter {
+		agentState := "Ready"
+		if storageUnhealthy {
+			agentState = "Running"
+		}
+
+		return fmt.Errorf("node %s requires a %s agent and Ready reporter, agent=%t reporter=%t",
+			nodeName, agentState, agent, reporter)
+	}
+
+	return nil
+}
+
+func bpnOperandPodMatchesExpectedState(
+	pod *corev1.Pod, runningContainers map[string]bool, allowUnreadyAgent bool,
+) bool {
+	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	if !allowUnreadyAgent && !bpnPodReady(pod) {
+		return false
+	}
+	for _, container := range pod.Spec.Containers {
+		ready := false
+		readyRequired := !allowUnreadyAgent || container.Name != sbrparams.AgentContainerName
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.Name == container.Name && (!readyRequired || status.Ready) && status.State.Running != nil {
+				_, id, _ := strings.Cut(status.ContainerID, "://")
+				ready = runningContainers == nil || runningContainers[id]
+
+				break
+			}
+		}
+		if !ready {
+			return false
+		}
+	}
+
+	return true
 }
 
 func bpnPodReady(pod *corev1.Pod) bool {
@@ -489,24 +614,79 @@ func (test *bpnFixture) getNode(ctx context.Context, index int) (*corev1.Node, e
 	return node, err
 }
 
-func (test *bpnFixture) createActivePolicy() {
-	test.createPolicy(false)
+func (test *bpnFixture) createActiveNHCAndSBRTemplate() {
+	test.createNHCAndSBRTemplate(false, false)
 }
 
-func (test *bpnFixture) createPausedPolicy() {
-	test.createPolicy(true)
+func (test *bpnFixture) createPausedNHCAndSBRTemplate() {
+	test.createNHCAndSBRTemplate(true, false)
 }
 
-func (test *bpnFixture) requireComponentsReady() {
-	test.eventually(sbrparams.BPNAgentReady, "Each selected Node must run an agent and reporter", test.componentsReady)
-	test.requireHealth(corev1.ConditionFalse)
+func (test *bpnFixture) createActiveTargetOnlyNHCAndSBRTemplate() {
+	test.createNHCAndSBRTemplate(false, true)
+}
+
+func (test *bpnFixture) setNHCRequestCreationPaused(paused bool) {
+	GinkgoHelper()
+	test.waitForAPICheck(sbrparams.BPNFaultReady, "NHC must reconcile the requested pause state",
+		func(ctx context.Context) error { return test.reconcileNHCPause(ctx, paused) })
+}
+
+func (test *bpnFixture) reconcileNHCPause(ctx context.Context, paused bool) error {
+	resource := APIClient.Resource(schema.GroupVersionResource{
+		Group: sbrparams.NHCAPIGroup, Version: sbrparams.NHCAPIVersion, Resource: "nodehealthchecks",
+	})
+	current, err := resource.Get(ctx, test.nhc.GetName(), metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if current.GetUID() != test.nhc.GetUID() {
+		return bpnPermanentError{fmt.Errorf("the test NHC UID changed")}
+	}
+	requests, _, err := unstructured.NestedStringSlice(current.Object, "spec", "pauseRequests")
+	if err != nil {
+		return err
+	}
+	if len(requests) > 1 || (len(requests) == 1 && requests[0] != bpnNHCPauseRequest) {
+		return bpnPermanentError{fmt.Errorf("the test NHC has an external pause request")}
+	}
+	if paused != (len(requests) == 1) {
+		unstructured.RemoveNestedField(current.Object, "spec", "pauseRequests")
+		if paused {
+			err := unstructured.SetNestedStringSlice(
+				current.Object, []string{bpnNHCPauseRequest}, "spec", "pauseRequests")
+			if err != nil {
+				return err
+			}
+		}
+		current, err = resource.Update(ctx, current, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	test.nhc = current
+	phase, _, err := unstructured.NestedString(current.Object, "status", "phase")
+	if err != nil {
+		return err
+	}
+	if (paused && phase == "Paused") || (!paused && (phase == "Enabled" || phase == "Remediating")) {
+		return nil
+	}
+
+	return fmt.Errorf("NHC phase %q has not reached the requested pause state", phase)
+}
+
+func (test *bpnFixture) waitForAgentReporterAndStorageReadiness() {
+	test.waitForAPICheck(
+		sbrparams.BPNAgentReady, "Each selected Node must run an agent and reporter", test.checkAgentAndReporterReadiness)
+	test.waitForHealthyStorage()
 	// The agent can create /dev/watchdog by loading softdog during startup.
 	for _, node := range test.nodes {
-		test.checkWatchdog(node)
+		test.requireWatchdogDeviceAndTimeout(node)
 	}
 }
 
-func (test *bpnFixture) establishBaseline(duration time.Duration) {
+func (test *bpnFixture) observeAndRecordHealthyBaseline(duration time.Duration) {
 	GinkgoHelper()
 	test.baseline = time.Now()
 	test.quietSince = test.baseline
