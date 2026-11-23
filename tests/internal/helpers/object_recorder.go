@@ -6,7 +6,10 @@ import (
 	"sync"
 	"time"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -21,11 +24,39 @@ type RecorderConfig[T runtime.Object] struct {
 	Watch func(ctx context.Context, resourceVersion string) (watch.Interface, error)
 	// RetryInterval is how long to back off after a failed list or watch before trying again.
 	RetryInterval time.Duration
-	// StartTimeout is how long StartObjectRecorder keeps retrying the first list before giving up.
+	// StartTimeout bounds retries until the initial List and Watch succeed.
 	// Zero means a single attempt.
 	StartTimeout time.Duration
+	// APICallTimeout bounds a List or the establishment of a Watch. The Watch lifetime is separate.
+	APICallTimeout time.Duration
 	// Logf, if set, receives progress and watch-interruption messages.
 	Logf func(format string, args ...any)
+}
+
+// RecorderObservation contains one object version and the time that the recorder received it.
+type RecorderObservation[T runtime.Object] struct {
+	At              time.Time
+	Object          T
+	UID             types.UID
+	ResourceVersion string
+	EventType       watch.EventType
+}
+
+// RecorderGap identifies an interval with unavailable watch history.
+type RecorderGap struct {
+	StartedAt time.Time
+	EndedAt   time.Time
+	Reason    string
+}
+
+// RecorderSnapshot contains copied observations and the current watch coverage state.
+type RecorderSnapshot[T runtime.Object] struct {
+	Observations []RecorderObservation[T]
+	Gaps         []RecorderGap
+	ReadyAt      time.Time
+	PendingSince time.Time
+	Watching     bool
+	StoppedAt    time.Time
 }
 
 // ObjectRecorder keeps, in the background, every version of one object seen by a list+watch, so
@@ -35,33 +66,63 @@ type RecorderConfig[T runtime.Object] struct {
 // appear and disappear between two polls, and a check that starts after the disruption can miss it
 // entirely. Start a recorder before the disruption and ask it afterwards what it saw.
 //
-// The recorder only records; it never asserts. Its accessors return Eventually bodies so Gomega
-// still runs on the spec's goroutine. Versions that come and go while the watch is being
-// re-established are not seen; each interruption is kept in WatchErrors.
+// The recorder resumes disconnected watches from their last resource version. Expired history
+// remains a gap after a relist. Negative assertions must check Coverage as well as observed values.
 type ObjectRecorder[T runtime.Object] struct {
-	cfg       RecorderConfig[T]
-	mu        sync.Mutex
-	seen      []T
-	exists    bool
-	watchErrs []string
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	cfg             RecorderConfig[T]
+	mu              sync.Mutex
+	seen            []T
+	exists          bool
+	watchErrs       []string
+	observations    []RecorderObservation[T]
+	gaps            []RecorderGap
+	readyAt         time.Time
+	pendingSince    time.Time
+	watching        bool
+	resourceVersion string
+	lastProgressAt  time.Time
+	stoppedAt       time.Time
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 }
 
-// StartObjectRecorder lists the object and then follows it in the background. It returns only after
-// a list succeeded, so everything from the moment it returns is covered; a failed first list is
-// retried until cfg.StartTimeout. Stop it with Stop.
+// StartObjectRecorder returns after List and Watch succeed. Stop cancels the lifetime Watch.
 func StartObjectRecorder[T runtime.Object](cfg RecorderConfig[T]) (*ObjectRecorder[T], error) {
+	if cfg.List == nil || cfg.Watch == nil {
+		return nil, fmt.Errorf("%s: List and Watch are required", cfg.Description)
+	}
+	if cfg.APICallTimeout <= 0 {
+		cfg.APICallTimeout = 10 * time.Second
+	}
+	if cfg.RetryInterval <= 0 {
+		cfg.RetryInterval = time.Second
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	rec := &ObjectRecorder[T]{cfg: cfg, cancel: cancel}
 	deadline := time.Now().Add(cfg.StartTimeout)
+	var resourceVersion string
 
 	for {
-		resourceVersion, seedErr := rec.seed(ctx)
-		if seedErr == nil {
+		var startErr error
+		if resourceVersion == "" {
+			resourceVersion, startErr = rec.seed(ctx, rec.startCallTimeout(deadline))
+		}
+
+		var watcher watch.Interface
+		if startErr == nil {
+			watcher, startErr = rec.openWatch(ctx, resourceVersion, rec.startCallTimeout(deadline))
+		}
+		if startErr == nil {
+			rec.mu.Lock()
+			rec.readyAt = time.Now()
+			rec.lastProgressAt = rec.readyAt
+			rec.watching = true
+			rec.resourceVersion = resourceVersion
+			rec.mu.Unlock()
 			rec.wg.Add(1)
 
-			go rec.follow(ctx, resourceVersion)
+			go rec.follow(ctx, watcher)
 
 			rec.logf("Recording %s\n", cfg.Description)
 
@@ -71,12 +132,74 @@ func StartObjectRecorder[T runtime.Object](cfg RecorderConfig[T]) (*ObjectRecord
 		if !time.Now().Before(deadline) {
 			cancel()
 
-			return nil, fmt.Errorf("%s: initial list did not succeed within %s: %w",
-				cfg.Description, cfg.StartTimeout, seedErr)
+			return nil, fmt.Errorf("%s: initial List and Watch did not succeed within %s: %w",
+				cfg.Description, cfg.StartTimeout, startErr)
 		}
 
-		rec.recordWatchErr(ctx, fmt.Errorf("initial list: %w", seedErr))
+		if k8serrors.IsResourceExpired(startErr) || k8serrors.IsGone(startErr) {
+			resourceVersion = ""
+		}
+		retryCtx, stopRetry := context.WithDeadline(ctx, deadline)
+		rec.recordWatchErr(retryCtx, startErr)
+		stopRetry()
 	}
+}
+
+func (r *ObjectRecorder[T]) startCallTimeout(deadline time.Time) time.Duration {
+	if r.cfg.StartTimeout > 0 {
+		return min(r.cfg.APICallTimeout, max(time.Nanosecond, time.Until(deadline)))
+	}
+
+	return r.cfg.APICallTimeout
+}
+
+// Snapshot returns independent copies of the recorded objects and watch coverage state.
+func (r *ObjectRecorder[T]) Snapshot() RecorderSnapshot[T] {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	snapshot := RecorderSnapshot[T]{
+		Gaps:         append([]RecorderGap(nil), r.gaps...),
+		ReadyAt:      r.readyAt,
+		PendingSince: r.pendingSince,
+		Watching:     r.watching,
+		StoppedAt:    r.stoppedAt,
+		Observations: make([]RecorderObservation[T], len(r.observations)),
+	}
+	for index, observation := range r.observations {
+		snapshot.Observations[index] = observation
+		copied, ok := observation.Object.DeepCopyObject().(T)
+		if !ok {
+			panic("recorded object copy changed its type")
+		}
+		snapshot.Observations[index].Object = copied
+	}
+
+	return snapshot
+}
+
+// Coverage rejects intervals with unavailable history or a reconnect that has not reached a bookmark.
+func (r *ObjectRecorder[T]) Coverage(start, end time.Time) error {
+	snapshot := r.Snapshot()
+	if start.Before(snapshot.ReadyAt) || snapshot.ReadyAt.IsZero() {
+		return fmt.Errorf("%s: interval starts before Watch readiness", r.cfg.Description)
+	}
+	if end.Before(start) {
+		return fmt.Errorf("%s: interval ends before it starts", r.cfg.Description)
+	}
+	if end.After(time.Now()) || (!snapshot.StoppedAt.IsZero() && end.After(snapshot.StoppedAt)) {
+		return fmt.Errorf("%s: interval ends after observation", r.cfg.Description)
+	}
+	if !snapshot.PendingSince.IsZero() && !snapshot.PendingSince.After(end) {
+		return fmt.Errorf("%s: Watch replay remains pending since %s", r.cfg.Description, snapshot.PendingSince)
+	}
+	for _, gap := range snapshot.Gaps {
+		if !gap.StartedAt.After(end) && !gap.EndedAt.Before(start) {
+			return fmt.Errorf("%s: unavailable Watch history: %s", r.cfg.Description, gap.Reason)
+		}
+	}
+
+	return nil
 }
 
 // Stop ends the background watch and waits for it to finish.
@@ -85,6 +208,9 @@ func (r *ObjectRecorder[T]) Stop() {
 	r.wg.Wait()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.stoppedAt.IsZero() {
+		r.stoppedAt = time.Now()
+	}
 
 	r.logf("Stopped recording %s: %d versions observed, %d watch interruptions\n",
 		r.cfg.Description, len(r.seen), len(r.watchErrs))
@@ -169,49 +295,127 @@ func (r *ObjectRecorder[T]) Gone() func() error {
 	}
 }
 
-// follow keeps a watch alive for the lifetime of ctx. Whenever the watch ends (closed connection,
-// expired resourceVersion, error event) it re-lists, which also recovers state that changed while
-// no watch was established, and watches again from the new list.
-func (r *ObjectRecorder[T]) follow(ctx context.Context, resourceVersion string) {
+func (r *ObjectRecorder[T]) follow(ctx context.Context, watcher watch.Interface) {
 	defer r.wg.Done()
+	defer func() {
+		r.mu.Lock()
+		r.watching = false
+		r.mu.Unlock()
+	}()
 
 	for ctx.Err() == nil {
-		if resourceVersion == "" {
-			var seedErr error
+		watchErr := r.drain(ctx, watcher)
+		watcher.Stop()
+		if ctx.Err() != nil {
+			return
+		}
 
-			resourceVersion, seedErr = r.seed(ctx)
-			if seedErr != nil {
-				r.recordWatchErr(ctx, fmt.Errorf("list: %w", seedErr))
+		r.mu.Lock()
+		r.watching = false
+		if r.pendingSince.IsZero() {
+			r.pendingSince = r.lastProgressAt
+		}
+		r.mu.Unlock()
+		r.recordWatchErr(ctx, watchErr)
+
+		for ctx.Err() == nil {
+			if k8serrors.IsResourceExpired(watchErr) || k8serrors.IsGone(watchErr) {
+				if seedErr := r.reseedAfterGap(ctx, watchErr); seedErr != nil {
+					r.recordWatchErr(ctx, seedErr)
+
+					continue
+				}
+			}
+
+			r.mu.Lock()
+			resourceVersion := r.resourceVersion
+			r.mu.Unlock()
+			var openErr error
+			watcher, openErr = r.openWatch(ctx, resourceVersion, r.cfg.APICallTimeout)
+			if openErr != nil {
+				watchErr = openErr
+				r.recordWatchErr(ctx, openErr)
 
 				continue
 			}
+
+			r.mu.Lock()
+			r.watching = true
+			r.mu.Unlock()
+
+			break
 		}
-
-		watcher, openErr := r.cfg.Watch(ctx, resourceVersion)
-		resourceVersion = ""
-
-		if openErr != nil {
-			r.recordWatchErr(ctx, fmt.Errorf("watch: %w", openErr))
-
-			continue
-		}
-
-		r.drain(ctx, watcher)
-		watcher.Stop()
 	}
 }
 
-// drain records watch events until the watch ends, reports an error, or ctx is cancelled.
-func (r *ObjectRecorder[T]) drain(ctx context.Context, watcher watch.Interface) {
+func (r *ObjectRecorder[T]) openWatch(
+	ctx context.Context, resourceVersion string, timeout time.Duration,
+) (watch.Interface, error) {
+	type result struct {
+		watcher watch.Interface
+		err     error
+	}
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	opened := make(chan result)
+	go func() {
+		watcher, err := r.cfg.Watch(watchCtx, resourceVersion)
+		select {
+		case opened <- result{watcher: watcher, err: err}:
+		case <-watchCtx.Done():
+			if watcher != nil {
+				watcher.Stop()
+			}
+		}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		cancel()
+
+		return nil, ctx.Err()
+	case <-timer.C:
+		cancel()
+
+		return nil, fmt.Errorf("%s: Watch establishment exceeded %s", r.cfg.Description, timeout)
+	case response := <-opened:
+		if response.err != nil {
+			cancel()
+
+			return nil, response.err
+		}
+		if response.watcher == nil {
+			cancel()
+
+			return nil, fmt.Errorf("%s: Watch returned no stream", r.cfg.Description)
+		}
+
+		return &recorderWatch{Interface: response.watcher, cancel: cancel}, nil
+	}
+}
+
+type recorderWatch struct {
+	watch.Interface
+	cancel context.CancelFunc
+}
+
+func (w *recorderWatch) Stop() {
+	w.cancel()
+	w.Interface.Stop()
+}
+
+func (r *ObjectRecorder[T]) drain(ctx context.Context, watcher watch.Interface) error {
 	for {
 		var event watch.Event
 
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case received, open := <-watcher.ResultChan():
 			if !open {
-				return
+				return fmt.Errorf("%s: Watch stream closed", r.cfg.Description)
 			}
 
 			event = received
@@ -219,39 +423,95 @@ func (r *ObjectRecorder[T]) drain(ctx context.Context, watcher watch.Interface) 
 
 		switch event.Type {
 		case watch.Added, watch.Modified:
-			r.record(event.Object, true)
+			r.record(event.Object, true, event.Type)
 		case watch.Deleted:
-			r.record(event.Object, false)
+			r.record(event.Object, false, event.Type)
 		case watch.Error:
-			r.recordWatchErr(ctx, fmt.Errorf("watch event: %v", event.Object))
-
-			return
+			return k8serrors.FromObject(event.Object)
 		case watch.Bookmark:
+			if accessor, err := meta.Accessor(event.Object); err == nil && accessor.GetResourceVersion() != "" {
+				r.mu.Lock()
+				r.resourceVersion = accessor.GetResourceVersion()
+				r.pendingSince = time.Time{}
+				r.lastProgressAt = time.Now()
+				r.mu.Unlock()
+			}
 		default:
 		}
 	}
 }
 
 // seed lists the object, records what the list returned, and returns the list's resourceVersion.
-func (r *ObjectRecorder[T]) seed(ctx context.Context) (string, error) {
-	items, resourceVersion, err := r.cfg.List(ctx)
+func (r *ObjectRecorder[T]) seed(ctx context.Context, timeout time.Duration) (string, error) {
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	type result struct {
+		items           []T
+		resourceVersion string
+		err             error
+	}
+
+	listed := make(chan result, 1)
+	go func() {
+		items, resourceVersion, err := r.cfg.List(callCtx)
+		listed <- result{items: items, resourceVersion: resourceVersion, err: err}
+	}()
+	var response result
+	select {
+	case <-callCtx.Done():
+		return "", callCtx.Err()
+	case response = <-listed:
+		if response.err != nil {
+			return "", response.err
+		}
+	}
+	if response.resourceVersion == "" {
+		return "", fmt.Errorf("%s: List returned an empty resourceVersion", r.cfg.Description)
+	}
+
+	for _, item := range response.items {
+		r.record(item, true, watch.Added)
+	}
+	r.mu.Lock()
+	r.exists = len(response.items) > 0
+	r.resourceVersion = response.resourceVersion
+	r.lastProgressAt = time.Now()
+	r.mu.Unlock()
+
+	return response.resourceVersion, nil
+}
+
+func (r *ObjectRecorder[T]) reseedAfterGap(ctx context.Context, reason error) error {
+	r.mu.Lock()
+	startedAt := r.pendingSince
+	r.mu.Unlock()
+	_, err := r.seed(ctx, r.cfg.APICallTimeout)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	endedAt := time.Now()
+	r.gaps = append(r.gaps, RecorderGap{StartedAt: startedAt, EndedAt: endedAt, Reason: reason.Error()})
+	r.pendingSince = endedAt
+	r.mu.Unlock()
 
-	r.seen = append(r.seen, items...)
-	r.exists = len(items) > 0
-
-	return resourceVersion, nil
+	return nil
 }
 
 // record appends one watched version and whether the object still exists after it.
-func (r *ObjectRecorder[T]) record(obj runtime.Object, exists bool) {
+func (r *ObjectRecorder[T]) record(obj runtime.Object, exists bool, eventType watch.EventType) {
 	typed, ok := obj.(T)
 	if !ok {
+		return
+	}
+	copied, ok := typed.DeepCopyObject().(T)
+	if !ok {
+		return
+	}
+	typed = copied
+	accessor, err := meta.Accessor(typed)
+	if err != nil {
 		return
 	}
 
@@ -260,6 +520,15 @@ func (r *ObjectRecorder[T]) record(obj runtime.Object, exists bool) {
 
 	r.seen = append(r.seen, typed)
 	r.exists = exists
+	if accessor.GetResourceVersion() != "" {
+		r.resourceVersion = accessor.GetResourceVersion()
+	}
+	observedAt := time.Now()
+	r.lastProgressAt = observedAt
+	r.observations = append(r.observations, RecorderObservation[T]{
+		At: observedAt, Object: typed, UID: accessor.GetUID(),
+		ResourceVersion: accessor.GetResourceVersion(), EventType: eventType,
+	})
 }
 
 // recordWatchErr notes an interruption and backs off before the caller retries. A cancelled context

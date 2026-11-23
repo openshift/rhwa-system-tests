@@ -44,8 +44,8 @@ TESTCASE ?=
 check-testcase:
 	scripts/check-testcase.sh $(TESTCASE)
 
-# Checks each test case's Jira ticket is a Task titled "TEST: ..." and labelled
-# rhwa-test. Needs network; pass a ticket or document to check only that one.
+# Checks each test case's Jira ticket is a Task or Sub-task titled "TEST: ..."
+# and labelled rhwa-test. Needs network. Pass a ticket or document to check it.
 # e.g. make check-testcase-jira TESTCASE=RHWA-1834
 check-testcase-jira:
 	scripts/check-testcase-jira.sh $(TESTCASE)
@@ -136,6 +136,12 @@ run-tests: ginkgo
 	@echo "Executing test-runner script"
 	GINKGO=$(GINKGO) scripts/test-runner.sh
 
+.PHONY: setup-local-bastion
+export SSH_KEY
+setup-local-bastion: override SSH_KEY := $(value SSH_KEY)
+setup-local-bastion: ## Configure SSH access through the currently logged-in OpenShift cluster.
+	@bash scripts/setup-local-bastion.sh "$${SSH_KEY:-}"
+
 run-internal-pkg-unit-tests:
 	@echo "Executing internal package unit tests"
 	UNIT_TEST=true WORKLOAD_IMAGE=unused go test -v ./tests/internal/...
@@ -153,7 +159,7 @@ run-nhc-upgrade-unit-tests:
 
 .PHONY: run-sbr-upgrade-unit-tests
 run-sbr-upgrade-unit-tests:
-	UNIT_TEST=true WORKLOAD_IMAGE=unused go test ./tests/sbr-operator/internal/...
+	UNIT_TEST=true WORKLOAD_IMAGE=unused go test ./tests/sbr-operator/internal/... ./tests/sbr-operator/tests
 
 .PHONY: run-snr-upgrade-unit-tests
 run-snr-upgrade-unit-tests:

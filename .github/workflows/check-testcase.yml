@@ -39,8 +39,8 @@ jobs:
       - name: Check test case documents
         run: make check-testcase
 
-      # The ticket behind each document must be a Task, titled "TEST: ...", and
-      # labelled rhwa-test. Red Hat Jira serves these three fields anonymously,
+      # Each document's ticket must be a Task or Sub-task, titled "TEST: ...",
+      # and labelled rhwa-test. Red Hat Jira serves these fields anonymously,
       # so this needs no credentials and works on pull requests from forks. An
       # unreachable Jira warns rather than failing the run.
       - name: Check Jira tickets

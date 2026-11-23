@@ -12,6 +12,7 @@ import (
 	"time"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -386,12 +387,131 @@ func RunSSHCommand(
 	return runSSHWithOutput(ctx, nodeIP, timeout, cmd)
 }
 
+// PreparedNodeAccess retains SSH settings and serializes commands without further API requests.
+type PreparedNodeAccess struct {
+	NodeName string
+	NodeUID  types.UID
+	Address  string
+	sshArgs  []string
+	command  func(context.Context, string, time.Duration, []string) (string, error)
+	serial   chan struct{}
+	mu       sync.Mutex
+	closed   bool
+}
+
+// PrepareNodeAccess resolves API and SSH settings before a disruption. Run does not use the API.
+func PrepareNodeAccess(
+	ctx context.Context, k8sClient client.Client, nodeName string, expectedUID types.UID, timeout time.Duration,
+) (*PreparedNodeAccess, error) {
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	node := &corev1.Node{}
+	if err := k8sClient.Get(callCtx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		return nil, fmt.Errorf("prepare SSH for Node %s: %w", nodeName, err)
+	}
+	if node.UID == "" || (expectedUID != "" && node.UID != expectedUID) {
+		return nil, fmt.Errorf("node %s UID %q does not match expected UID %q", nodeName, node.UID, expectedUID)
+	}
+
+	var address string
+	for _, nodeAddress := range node.Status.Addresses {
+		if nodeAddress.Type == corev1.NodeInternalIP {
+			address = nodeAddress.Address
+
+			break
+		}
+	}
+	if address == "" {
+		return nil, fmt.Errorf("node %s has no InternalIP", nodeName)
+	}
+
+	type settings struct {
+		args []string
+		err  error
+	}
+
+	resolved := make(chan settings, 1)
+	go func() {
+		args, err := nodeSSHArgs(address)
+		resolved <- settings{args: args, err: err}
+	}()
+	var sshSettings settings
+	select {
+	case <-callCtx.Done():
+		return nil, callCtx.Err()
+	case sshSettings = <-resolved:
+		if sshSettings.err != nil {
+			return nil, sshSettings.err
+		}
+	}
+
+	return &PreparedNodeAccess{
+		NodeName: nodeName, NodeUID: node.UID, Address: address,
+		sshArgs: sshSettings.args, command: runSSHWithArgs, serial: make(chan struct{}, 1),
+	}, nil
+}
+
+// Run bounds both the command queue and SSH command with the given context and timeout.
+func (p *PreparedNodeAccess) Run(ctx context.Context, timeout time.Duration, command string) (string, error) {
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	select {
+	case p.serial <- struct{}{}:
+		defer func() { <-p.serial }()
+	case <-callCtx.Done():
+		return "", callCtx.Err()
+	}
+
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return "", fmt.Errorf("prepared SSH for Node %s is closed", p.NodeName)
+	}
+	if callCtx.Err() != nil {
+		return "", callCtx.Err()
+	}
+
+	args := append(append([]string(nil), p.sshArgs...), command)
+
+	return p.command(callCtx, p.Address, timeout, args)
+}
+
+// BootID reads the boot identifier from the host through prepared SSH access.
+func (p *PreparedNodeAccess) BootID(ctx context.Context, timeout time.Duration) (string, error) {
+	bootID, err := p.Run(ctx, timeout, "cat /proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return "", err
+	}
+	if bootID == "" {
+		return "", fmt.Errorf("node %s returned an empty host boot ID", p.NodeName)
+	}
+
+	return bootID, nil
+}
+
+// Close prevents subsequent commands through this prepared access.
+func (p *PreparedNodeAccess) Close() error {
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+
+	return nil
+}
+
 func runSSHWithOutput(
 	ctx context.Context, nodeIP string, timeout time.Duration, cmd string,
 ) (string, error) {
-	childCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	args, err := nodeSSHArgs(nodeIP)
+	if err != nil {
+		return "", err
+	}
+	args = append(args, cmd)
 
+	return runSSHWithArgs(ctx, nodeIP, timeout, args)
+}
+
+func nodeSSHArgs(nodeIP string) ([]string, error) {
 	args := []string{
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
@@ -403,7 +523,7 @@ func runSSHWithOutput(
 	}
 	keyPath, keyErr := findSSHKey()
 	if keyErr != nil {
-		return "", fmt.Errorf("runSSH: %w", keyErr)
+		return nil, fmt.Errorf("runSSH: %w", keyErr)
 	}
 
 	args = append(args, "-i", keyPath)
@@ -421,7 +541,16 @@ func runSSHWithOutput(
 		args = append(args, "-o", proxyCmd)
 	}
 
-	args = append(args, fmt.Sprintf("%s@%s", defaultNodeUser, nodeIP), cmd)
+	args = append(args, fmt.Sprintf("%s@%s", defaultNodeUser, nodeIP))
+
+	return args, nil
+}
+
+func runSSHWithArgs(
+	ctx context.Context, nodeIP string, timeout time.Duration, args []string,
+) (string, error) {
+	childCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	var stdout, stderr bytes.Buffer
 

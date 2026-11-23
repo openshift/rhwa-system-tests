@@ -7,7 +7,7 @@
 # With no arguments it checks the ticket of every docs/TESTCASES/rhwa-*.md.
 #
 # A test case ticket must be:
-#   - issue type Task
+#   - issue type Task or Sub-task
 #   - titled "TEST: <what the test proves>"
 #   - labelled rhwa-test
 #
@@ -30,7 +30,6 @@ JIRA_BASE_URL="${JIRA_BASE_URL:-https://redhat.atlassian.net}"
 JIRA_TOKEN="${JIRA_TOKEN:-}"
 JIRA_USER="${JIRA_USER:-}"
 
-REQUIRED_TYPE="Task"
 REQUIRED_PREFIX="TEST:"
 REQUIRED_LABEL="rhwa-test"
 
@@ -109,9 +108,12 @@ check_ticket() {
     summary=$(printf '%s' "${body}" | jq -r '.fields.summary // ""')
     labels=$(printf '%s' "${body}" | jq -r '(.fields.labels // []) | join(", ")')
 
-    if [ "${issue_type}" != "${REQUIRED_TYPE}" ]; then
-        err "${file}" "Jira ${key} is a '${issue_type}'; a test case ticket must be a ${REQUIRED_TYPE}"
-    fi
+    case "${issue_type}" in
+    Task | Sub-task) ;;
+    *)
+        err "${file}" "Jira ${key} has type '${issue_type}'. A test case ticket must be a Task or Sub-task"
+        ;;
+    esac
 
     case "${summary}" in
     "${REQUIRED_PREFIX}"*) ;;
@@ -188,8 +190,8 @@ done
 printf '\nchecked %d Jira ticket(s): %d error(s), %d warning(s)\n' "${checked}" "${errors}" "${warnings}"
 
 if [ "${errors}" -gt 0 ]; then
-    printf 'a test case ticket must be a %s, titled "%s ...", and labelled %s\n' \
-        "${REQUIRED_TYPE}" "${REQUIRED_PREFIX}" "${REQUIRED_LABEL}"
+    printf 'a test case ticket must be a Task or Sub-task, titled "%s ...", and labelled %s\n' \
+        "${REQUIRED_PREFIX}" "${REQUIRED_LABEL}"
     printf 'requirements: docs/TESTCASES/AGENTS.md\n'
 
     exit 1

@@ -32,8 +32,8 @@ agents alike. This file explains the directory and the workflow.
 
 ## Workflow
 
-1. **File the Jira ticket.** It must be a `Task`, titled `TEST: <what the test
-   proves>`, and labelled `rhwa-test`. CI checks all three with
+1. **File the Jira ticket.** It must be a `Task` or `Sub-task`, titled
+   `TEST: <what the test proves>`, and labelled `rhwa-test`. CI checks all three with
    `make check-testcase-jira` and fails the PR when one is missing. You can
    check a ticket before opening the PR with
    `make check-testcase-jira TESTCASE=RHWA-1834`.

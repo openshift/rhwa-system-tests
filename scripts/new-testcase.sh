@@ -59,7 +59,7 @@ next steps:
      identical to the step table
   4. add the suite catalog entry in tests/<operator>/README.md
 
-${JIRA_UPPER} must be a Task, titled "TEST: ...", and labelled rhwa-test;
+${JIRA_UPPER} must be a Task or Sub-task, titled "TEST: ...", and labelled rhwa-test.
 CI checks this. Verify with: make check-testcase-jira TESTCASE=${JIRA_UPPER}
 
 requirements and review checklist: docs/TESTCASES/AGENTS.md
