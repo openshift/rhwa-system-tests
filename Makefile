@@ -44,8 +44,8 @@ TESTCASE ?=
 check-testcase:
 	scripts/check-testcase.sh $(TESTCASE)
 
-# Checks each test case's Jira ticket is a Task titled "TEST: ..." and labelled
-# rhwa-test. Needs network; pass a ticket or document to check only that one.
+# Checks each test case's Jira ticket is a Task or Sub-task titled "TEST: ..."
+# and labelled rhwa-test. Needs network. Pass a ticket or document to check it.
 # e.g. make check-testcase-jira TESTCASE=RHWA-1834
 check-testcase-jira:
 	scripts/check-testcase-jira.sh $(TESTCASE)

@@ -30,10 +30,10 @@
 | Author                       | `<your-kerberos>`                                       |
 | Status                       | draft                                                   |
 
-> The Jira ticket must be an issue of type **`Task`**, with a title starting
-> **`TEST:`**, carrying the label **`rhwa-test`**. CI reads the ticket and fails
-> the "Check Test Case" workflow when any of the three is missing — fix the
-> ticket, not the check.
+> The Jira ticket must have type **`Task`** or **`Sub-task`**.
+> Its title must start with **`TEST:`**. It must carry the label **`rhwa-test`**.
+> CI reads the ticket and fails the "Check Test Case" workflow when any
+> requirement is unmet. Correct the ticket if a requirement is unmet.
 >
 > `<operator>` is the suite directory name — `nhc-operator`, not `nhc`.
 > `reportxml.ID` is the numeric part of the Jira key and must match the

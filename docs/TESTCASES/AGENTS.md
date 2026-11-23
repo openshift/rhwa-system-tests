@@ -17,7 +17,7 @@ Every test case is tracked by a Jira ticket in the
 
 | Requirement | Value                                                          |
 | ----------- | ---------------------------------------------------------------- |
-| Issue type  | `Task` — not a Bug, Story, Epic, or sub-task                    |
+| Issue type  | `Task` or `Sub-task`                                            |
 | Title       | starts with `TEST:`, e.g. `TEST: Ceph RBD persistent fencing state` |
 | Label       | `rhwa-test`                                                     |
 
@@ -69,7 +69,7 @@ reviewers can tell "not applicable" from "not considered".
 
 | # | Section                   | Must contain                                                                   |
 | - | ------------------------- | ------------------------------------------------------------------------------ |
-| 1 | Metadata                  | Jira link (a `Task` titled `TEST: …`, labelled `rhwa-test`), `reportxml.ID`, legacy Polarion link (OPTIONAL — `None` for anything not ported), operator versions, suite, spec file, status |
+| 1 | Metadata                  | Jira link (a `Task` or `Sub-task` titled `TEST: …`, labelled `rhwa-test`), `reportxml.ID`, legacy Polarion link (OPTIONAL — `None` for anything not ported), operator versions, suite, spec file, status |
 | 2 | Summary                   | One or two sentences in plain language                                         |
 | 3 | Scope                     | In scope **and** an explicit out-of-scope list                                 |
 | 4 | Environment               | Topology, platform, storage, namespace, destructive flag, every env var read   |
@@ -178,7 +178,7 @@ the work item is gone or you cannot find it, write `None` and move on.
 ## Review checklist
 
 - [ ] Document and spec in the same PR; all thirteen sections present
-- [ ] Jira ticket is a `Task`, titled `TEST: …`, labelled `rhwa-test`
+- [ ] Jira ticket is a `Task` or `Sub-task`, titled `TEST: …`, labelled `rhwa-test`
 - [ ] Jira and `reportxml.ID` agree with the spec
 - [ ] Out-of-scope list is explicit
 - [ ] Step table matches the `By("…")` strings one to one
