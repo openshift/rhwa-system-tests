@@ -98,7 +98,7 @@ func newBPNFixture(caseID string) *bpnFixture {
 	test := &bpnFixture{
 		ctx: context.Background(), caseID: caseID, recoveryPeriod: sbrparams.BPNRecoveryPeriod,
 		nhcUnhealthyDuration: sbrparams.BPNNHCUnhealthyDuration,
-		name:                 "sbr-bpn-" + strings.ToLower(strings.TrimPrefix(caseID, "RHWA-1839-")),
+		name:                 "sbr-bpn-" + strings.ToLower(strings.TrimPrefix(caseID, "RHWA-2092-")),
 	}
 	DeferCleanup(test.cleanup)
 

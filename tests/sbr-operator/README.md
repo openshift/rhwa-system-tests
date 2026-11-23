@@ -689,10 +689,10 @@ Live validation passed on 2026-10-22 against SBR v5.8.0 with CephFS, including
 same-volume recreation, zero agent restarts during the stability window, and
 complete test cleanup. A before/after comparison still requires a pre-fix build.
 
-### 25. BlockPerNode external behavior — draft (RHWA-1839)
+### 25. BlockPerNode external behavior — draft (RHWA-2092)
 
 The twenty-two draft cases check externally observable BlockPerNode behavior.
-The complete steps and expected results are in [rhwa-1839.md](../../docs/TESTCASES/rhwa-1839.md).
+The complete steps and expected results are in [rhwa-2092.md](../../docs/TESTCASES/rhwa-2092.md).
 The specs are in [block_per_node_specs.go](tests/block_per_node_specs.go) and the associated BlockPerNode spec files.
 All cases retain `feature:block-per-node`, `tier:preview`, and `tier:resiliency`.
 
@@ -700,7 +700,7 @@ All cases retain `feature:block-per-node`, `tier:preview`, and `tier:resiliency`
 |---|---|
 | 02 | API loss on one worker, then all workers - No reboot or remediation |
 | 03 | Broad storage failure - NHC remediates only the original target |
-| 04 | Combined outage with OnTimeout - Reboot and OOS at grace expiry |
+| 04 | Combined outage with OnTimeout - Reboot, OOS at grace expiry, and bounded kubelet startup |
 | 05 | Single-worker network isolation - Healthy storage prevents reboot |
 | 06 | Target storage failure - NHC remediation and workload evacuation |
 | 07 | SysRq kernel panic - Unhealthy reporting, NHC remediation, and recovery |
@@ -725,7 +725,6 @@ Use every detected worker. Require at least two Ready, schedulable Linux workers
 Sort workers by Node name. Index zero is the target. Every other worker is a peer.
 Case 03 selects all workers with NHC `minHealthy: N-1`. Target-only policies allow other cases to keep peer faults active.
 Every positive remediation request must originate from NHC. Only case 19 creates remediation CRs directly.
-Singleton numeric groups have no alphabet suffix. Groups 15, 16, and 17 retain their distinct suffixes.
 
 Ordinary workload Pods must disappear after OOS, including OnTimeout cases. Replacement workload readiness is outside scope.
 Cases 15A and 15B deliberately retain a finalizer-held Pod to check cleanup and restriction ownership.
@@ -749,13 +748,10 @@ A scheduler-managed Pod checks exclusion while the target remains cordoned. Exis
 The tests do not install the service manually or infer successful installation from accepted configuration fields.
 
 Case 17F configures three-minute autonomous recovery. Other autonomous cases configure one minute.
-Probe deadline boundaries and exact post-decision recovery ordering belong in component tests when the proposed feature exists.
-The test document records that pending coverage. It does not claim completed component tests or live validation.
-Jira Task mapping remains deferred under the existing user instruction.
 
 ```bash
-export KUBECONFIG="$HOME/.kube/ocpctl-cluster"
-ginkgo -v --procs=1 --timeout=2h --focus='RHWA-1839-06([[:space:]]|$)' ./tests/sbr-operator
+export KUBECONFIG=/path/to/kubeconfig
+ginkgo -v --procs=1 --timeout=2h --focus='RHWA-2092-06([[:space:]]|$)' ./tests/sbr-operator
 tools/watch/sbr-watch.sh --loop -n 5
 ```
 

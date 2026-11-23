@@ -15,9 +15,9 @@ import (
 var _ = Describe("SBR BlockPerNode boot unit", Serial,
 	Label(labels.OperatorSBR, labels.TierResiliency, labels.TierPreview, labels.FeatureBlockPerNode,
 		labels.ComponentRemediation, labels.DisruptionDestructive, labels.PlatformAny, labels.FrequencyWeekly), func() {
-		It("RHWA-1839-21 Autonomous reboot without a CR - The local agent releases the rejoin cordon",
-			reportxml.ID("RHWA-1839-21"), FlakeAttempts(1), func() {
-				test := newBPNFixture("RHWA-1839-21")
+		It("RHWA-2092-21 Autonomous reboot without a CR - The local agent releases the rejoin cordon",
+			reportxml.ID("RHWA-2092-21"), FlakeAttempts(1), func() {
+				test := newBPNFixture("RHWA-2092-21")
 				test.enableBootUnit()
 
 				By("Enable the boot service. Pause NHC and check the worker baseline.")
@@ -75,9 +75,9 @@ var _ = Describe("SBR BlockPerNode boot unit", Serial,
 				Expect(test.checkRecordedBootIDsUnchanged(outageAt, test.peerIndices()...)).To(Succeed())
 			})
 
-		It("RHWA-1839-22 NHC claims a rejoin cordon - The peer releases it while storage remains failed",
-			reportxml.ID("RHWA-1839-22"), FlakeAttempts(1), func() {
-				test := newBPNFixture("RHWA-1839-22")
+		It("RHWA-2092-22 NHC claims a rejoin cordon - The peer releases it while storage remains failed",
+			reportxml.ID("RHWA-2092-22"), FlakeAttempts(1), func() {
+				test := newBPNFixture("RHWA-2092-22")
 				test.enableBootUnit()
 
 				By("Enable the boot service. Pause NHC and confirm the original Pod runs on the target.")

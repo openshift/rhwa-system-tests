@@ -1,4 +1,4 @@
-//nolint:godox,lll // Keep the approved TODO assertions and step strings unchanged.
+//nolint:lll // Keep the step strings unchanged.
 package tests
 
 import (
@@ -21,9 +21,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 	Label(labels.OperatorSBR, labels.TierResiliency, labels.TierPreview, labels.FeatureBlockPerNode,
 		labels.ComponentRemediation,
 		labels.DisruptionDestructive, labels.PlatformAny, labels.FrequencyWeekly), func() {
-		// TODO(RHWA-1839-02): Repeat during an actual API server outage. This needs an independent control-plane recovery procedure and independent API-event evidence.
-		It("RHWA-1839-02 API loss with healthy storage - No worker reboots", reportxml.ID("RHWA-1839-02"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-02")
+		It("RHWA-2092-02 API loss with healthy storage - No worker reboots", reportxml.ID("RHWA-2092-02"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-02")
 
 			By("Complete the baseline and confirm that all observers are ready.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -59,10 +58,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			By("Observe POST_RESTORE before common cleanup.")
 			test.observeHealthyWithoutRequests(sbrparams.BPNPostRestore)
 		})
-
-		// TODO(RHWA-1839-03): Count every target boot before SSH returns. This needs a trusted host boot counter and does not affect the initial result.
-		It("RHWA-1839-03 Broad storage loss - NHC remediates only one worker", reportxml.ID("RHWA-1839-03"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-03")
+		It("RHWA-2092-03 Broad storage loss - NHC remediates only one worker", reportxml.ID("RHWA-2092-03"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-03")
 
 			By("Complete the baseline with active NHC, minHealthy=N-1, and a Pod on the target.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -162,10 +159,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.waitForCompleteAPIHistory(test.baseline, time.Now(), false)
 			Expect(check()).To(Succeed(), "Peer requests and further reboots must remain absent through restoration")
 		})
-
-		// TODO(RHWA-1839-04): Count every boot during the initial SSH blackout. This needs a trusted host boot counter and does not change this test's pass result.
-		It("RHWA-1839-04 Combined outage with OnTimeout - Autonomous reboot and OutOfService at expiry", reportxml.ID("RHWA-1839-04"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-04")
+		It("RHWA-2092-04 Combined outage with OnTimeout - Autonomous reboot and OutOfService at expiry", reportxml.ID("RHWA-2092-04"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-04")
 			test.watcherGroupSize = 1
 			test.enableBootUnit()
 
@@ -268,10 +263,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.waitForCompleteAPIHistory(test.baseline, time.Now(), false)
 			Expect(check()).To(Succeed(), "No peer may receive a request or restriction, and no further reboot may occur")
 		})
-
-		// TODO(RHWA-1839-05): Observe a VM during the same partition. This needs an existing VM fixture and an independent workload observer.
-		It("RHWA-1839-05 One worker loses cluster communication - No worker reboots", reportxml.ID("RHWA-1839-05"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-05")
+		It("RHWA-2092-05 One worker loses cluster communication - No worker reboots", reportxml.ID("RHWA-2092-05"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-05")
 
 			By("Complete the baseline and confirm all observers are ready.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -295,10 +288,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			By("Observe POST_RESTORE before common cleanup.")
 			test.observeHealthyWithoutRequests(sbrparams.BPNPostRestore)
 		})
-
-		// TODO(RHWA-1839-06): Check VMI removal or CSI attachment removal. These need suitable existing workload fixtures and are independent of this initial Pod result.
-		It("RHWA-1839-06 One worker loses storage - NHC requests reboot and SBR evicts the Pod", reportxml.ID("RHWA-1839-06"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-06")
+		It("RHWA-2092-06 One worker loses storage - NHC requests reboot and SBR evicts the Pod", reportxml.ID("RHWA-2092-06"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-06")
 
 			By("Complete the baseline. Start CR, Node, host, and workload observers before the fault.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -346,8 +337,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			By("Complete common cleanup.")
 		})
 
-		It("RHWA-1839-07 Kernel panic - A watcher reports storage failure and SBR evicts the Pod", reportxml.ID("RHWA-1839-07"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-07")
+		It("RHWA-2092-07 Kernel panic - A watcher reports storage failure and SBR evicts the Pod", reportxml.ID("RHWA-2092-07"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-07")
 			test.watcherGroupSize = 1
 
 			By("Complete the baseline with active NHC, one target per watcher group, and a Pod on the target.")
@@ -419,10 +410,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 
 			By("Complete common cleanup.")
 		})
-
-		// TODO(RHWA-1839-08): Retain a completed remediation CR during this restart and check for no repeated host reboot. This needs one preparatory remediation cycle.
-		It("RHWA-1839-08 Planned agent Pod replacement - The host does not reboot", reportxml.ID("RHWA-1839-08"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-08")
+		It("RHWA-2092-08 Planned agent Pod replacement - The host does not reboot", reportxml.ID("RHWA-2092-08"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-08")
 
 			By("Complete the baseline and confirm observers are ready.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -454,10 +443,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 
 			By("Complete common cleanup.")
 		})
-
-		// TODO(RHWA-1839-09): Check an existing application during the stopped-kubelet interval. This needs a workload health check independent of kubelet status.
-		It("RHWA-1839-09 Kubelet stops with healthy storage - The host does not reboot", reportxml.ID("RHWA-1839-09"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-09")
+		It("RHWA-2092-09 Kubelet stops with healthy storage - The host does not reboot", reportxml.ID("RHWA-2092-09"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-09")
 
 			By("Complete the baseline and confirm observers are ready.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -493,10 +480,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 
 			By("Complete common cleanup.")
 		})
-
-		// TODO(RHWA-1839-10): Restart one peer while another remains storage-unhealthy. This needs at least three workers and a controlled peer-restart case.
-		It("RHWA-1839-10 Peer storage timeouts - Peers still process the target request", reportxml.ID("RHWA-1839-10"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-10")
+		It("RHWA-2092-10 Peer storage timeouts - Peers still process the target request", reportxml.ID("RHWA-2092-10"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-10")
 
 			By("Complete the baseline with active target-only NHC and a Pod on the target.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -546,10 +531,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.waitForNHCToDeleteSBRAndRestoreBaselineRestrictions(request, time.Now())
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
-
-		// TODO(RHWA-1839-11): Check a pre-existing application's availability during the partition. This needs an application-specific observer and does not establish duplicate-writer protection.
-		It("RHWA-1839-11 Worker group partition with healthy storage - No worker reboots", reportxml.ID("RHWA-1839-11"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-11")
+		It("RHWA-2092-11 Worker group partition with healthy storage - No worker reboots", reportxml.ID("RHWA-2092-11"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-11")
 
 			By("Complete the baseline and confirm observers are ready.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -587,10 +570,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			By("Observe POST_RESTORE before common cleanup.")
 			test.observeHealthyWithoutRequests(sbrparams.BPNPostRestore)
 		})
-
-		// TODO(RHWA-1839-15A): Retain a VMI or attachment instead of a Pod. This needs an existing suitable fixture and a reversible retention method.
-		It("RHWA-1839-15A Held Pod during cleanup - CR deletion releases SBR restrictions", reportxml.ID("RHWA-1839-15A"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-15A")
+		It("RHWA-2092-15A Held Pod during cleanup - CR deletion releases SBR restrictions", reportxml.ID("RHWA-2092-15A"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-15A")
 
 			By("Complete the baseline with active NHC and a Pod on the target. Add the test finalizer.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -651,10 +632,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			Expect(test.removeWorkloadFinalizerAndWaitForPodDeletion()).To(Succeed())
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
-
-		// TODO(RHWA-1839-15B): Keep two completed CRs on the same Node and delete them separately. This needs two request cycles and checks retention of shared restrictions.
-		It("RHWA-1839-15B Held Pod at cleanup expiry - SBR preserves administrator restrictions", reportxml.ID("RHWA-1839-15B"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-15B")
+		It("RHWA-2092-15B Held Pod at cleanup expiry - SBR preserves administrator restrictions", reportxml.ID("RHWA-2092-15B"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-15B")
 
 			By("Complete the baseline with active NHC and a Pod on the target. Add the test finalizer.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -721,10 +700,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			Expect(test.removeWorkloadFinalizerAndWaitForPodDeletion()).To(Succeed())
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
-
-		// TODO(RHWA-1839-16A): Check the public degradation reason once its exact resource and field are fixed. This needs a stable API location, not log parsing.
-		It("RHWA-1839-16A Target journal writes fail - A valid NHC request still causes reboot", reportxml.ID("RHWA-1839-16A"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-16A")
+		It("RHWA-2092-16A Target journal writes fail - A valid NHC request still causes reboot", reportxml.ID("RHWA-2092-16A"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-16A")
 
 			By("Complete the baseline with active NHC and a Pod on the target.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -762,10 +739,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.waitForNHCToDeleteSBRAndRestoreBaselineRestrictions(request, time.Now())
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
-
-		// TODO(RHWA-1839-16C): Repeat with delayed host-filesystem writes. This needs a reversible host fault that does not affect the peer's API process.
-		It("RHWA-1839-16C Peer journal writes fail - Peers still process the target request", reportxml.ID("RHWA-1839-16C"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-16C")
+		It("RHWA-2092-16C Peer journal writes fail - Peers still process the target request", reportxml.ID("RHWA-2092-16C"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-16C")
 
 			By("Complete the baseline with active target-only NHC and a Pod on the target.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -812,10 +787,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.waitForNHCToDeleteSBRAndRestoreBaselineRestrictions(request, time.Now())
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
-
-		// TODO(RHWA-1839-17B): Repeat with more requested CRs during the same unresolved outage. This needs additional reboot cycles but no internal state assertions.
-		It("RHWA-1839-17B Continuous storage outage - Distinct requests reboot once and the autonomous limit persists", reportxml.ID("RHWA-1839-17B"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-17B")
+		It("RHWA-2092-17B Continuous storage outage - Distinct requests reboot once and the autonomous limit persists", reportxml.ID("RHWA-2092-17B"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-17B")
 
 			By("Complete autonomous preparation with active target-only NHC and the first Pod on the target.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -903,8 +876,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
 
-		It("RHWA-1839-17E API loss interrupts recovery - Storage recovery still permits a later reboot", reportxml.ID("RHWA-1839-17E"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-17E")
+		It("RHWA-2092-17E API loss interrupts recovery - Storage recovery still permits a later reboot", reportxml.ID("RHWA-2092-17E"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-17E")
 
 			By("Complete autonomous preparation and confirm all observers are ready.")
 			test.prepareNodesAndCreateSBRConfig()
@@ -952,7 +925,7 @@ var _ = Describe("SBR BlockPerNode", Serial,
 				Fail("INCONCLUSIVE: the second possible healthy interval reached 60s")
 			}
 
-			By("Require the confirmed healthy intervals to total more than 60s. Apply the bounds in Section 4.5.")
+			By("Require the confirmed healthy intervals to total more than 60s.")
 			confirmedTotal := firstEnd.Sub(confirmedFirst) + secondEnd.Sub(confirmedSecond)
 			if confirmedTotal <= sbrparams.BPNRecoveryPeriod {
 				Fail("INCONCLUSIVE: confirmed healthy time did not exceed 60s in total")
@@ -979,8 +952,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
 
-		It("RHWA-1839-17F Storage loss interrupts recovery - No second autonomous reboot", reportxml.ID("RHWA-1839-17F"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-17F")
+		It("RHWA-2092-17F Storage loss interrupts recovery - No second autonomous reboot", reportxml.ID("RHWA-2092-17F"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-17F")
 			test.recoveryPeriod = sbrparams.BPNInterruptedRecoveryPeriod
 
 			By("Configure 180s recovery. Complete autonomous preparation and confirm observer readiness.")
@@ -1053,8 +1026,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.removeTrackedNetworkFaults()
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
-		It("RHWA-1839-18 Combined outage with OnReboot - OutOfService waits for matching boot evidence", reportxml.ID("RHWA-1839-18"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-18")
+		It("RHWA-2092-18 Combined outage with OnReboot - OutOfService waits for matching boot evidence", reportxml.ID("RHWA-2092-18"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-18")
 			test.watcherGroupSize = 1
 			test.oosTaintPolicy = sbrparams.BPNPolicyOnReboot
 
@@ -1112,8 +1085,8 @@ var _ = Describe("SBR BlockPerNode", Serial,
 			test.waitForWorkerRecovery(corev1.ConditionFalse)
 		})
 
-		It("RHWA-1839-19 Runner creates remediation CRs - SBR makes no offer and the host does not reboot", reportxml.ID("RHWA-1839-19"), FlakeAttempts(1), func() {
-			test := newBPNFixture("RHWA-1839-19")
+		It("RHWA-2092-19 Runner creates remediation CRs - SBR makes no offer and the host does not reboot", reportxml.ID("RHWA-2092-19"), FlakeAttempts(1), func() {
+			test := newBPNFixture("RHWA-2092-19")
 			test.nhcUnhealthyDuration = time.Hour
 
 			By("Complete the baseline with active target-only NHC and a one-hour unhealthy duration.")

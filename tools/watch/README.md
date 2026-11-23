@@ -17,7 +17,7 @@ for the person running the test, not for the test itself.
 | Script | Watches | Written for |
 | ------ | ------- | ----------- |
 | [`snr-watch.sh`](snr-watch.sh) | Nodes (`Ready`, cordon, boot ID, taint keys), `SelfNodeRemediation` and `NodeHealthCheck` CRs, the live `minPeersForRemediation`, and the agent pods with their ages | [`rhwa-1972`](../../docs/TESTCASES/rhwa-1972.md) — suits any destructive SNR spec |
-| [`sbr-watch.sh`](sbr-watch.sh) | Full Node UIDs and boot IDs, storage and rejoin conditions, cordons, rejoin ownership, exact taint values, SBR request conditions and cleanup times, and namespace Pods | [`rhwa-1839`](../../docs/TESTCASES/rhwa-1839.md) — draft BlockPerNode cases |
+| [`sbr-watch.sh`](sbr-watch.sh) | Full Node UIDs and boot IDs, storage and rejoin conditions, cordons, rejoin ownership, exact taint values, SBR request conditions and cleanup times, and namespace Pods | [RHWA-2092](../../docs/TESTCASES/rhwa-2092.md) |
 
 ## `snr-watch.sh`
 
@@ -78,6 +78,8 @@ Set `SBR_WATCH_NS` to select another namespace. The default is `openshift-worklo
 Record the initial boot IDs before the case. A no-reboot interval must preserve the relevant host boot IDs.
 A requested reboot changes the target boot ID. An agent replacement changes its Pod UID.
 The API boot ID can remain stale while kubelet cannot report. The display cannot replace the test's direct host observations.
+In cases 21 and 22, look for the rejoin ownership annotation, the target cordon, and `SBRRejoinPending=True` after API access returns.
+During release, the ownership annotation disappears and the pending condition clears.
 
 The script marks changed lines with `*`. Missing fields appear as `<unset>`, and failed API reads have explicit messages.
 The display provides diagnostics. It cannot establish that a transient CR or taint never existed between reads.

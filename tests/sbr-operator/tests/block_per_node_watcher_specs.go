@@ -19,9 +19,9 @@ import (
 var _ = Describe("SBR BlockPerNode", Serial,
 	Label(labels.OperatorSBR, labels.TierResiliency, labels.TierPreview, labels.FeatureBlockPerNode,
 		labels.ComponentRemediation, labels.DisruptionDestructive, labels.PlatformAny, labels.FrequencyWeekly), func() {
-		It("RHWA-1839-20 Watcher storage reads fail - Healthy workers remain available",
-			reportxml.ID("RHWA-1839-20"), FlakeAttempts(1), func() {
-				test := newBPNFixture("RHWA-1839-20")
+		It("RHWA-2092-20 Watcher storage reads fail - Healthy workers remain available",
+			reportxml.ID("RHWA-2092-20"), FlakeAttempts(1), func() {
+				test := newBPNFixture("RHWA-2092-20")
 				test.watcherGroupSize = 1
 
 				By("Configure one target per watcher group. Establish a healthy baseline with active NHC.")
