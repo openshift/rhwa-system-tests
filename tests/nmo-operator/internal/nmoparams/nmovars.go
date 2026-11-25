@@ -11,7 +11,8 @@ var (
 	// Labels represents the range of labels that can be used for test cases selection.
 	Labels = []string{medik8sparams.Label, Label}
 
-	operatorNs = medik8sparams.OperatorNs
+	// leaseNs is the namespace NMO and NHC create their node leases in.
+	leaseNs = LeaseNamespace
 
 	// WorkloadTestImage is the container image used for test workload pods.
 	WorkloadTestImage = medik8sparams.WorkloadImage
@@ -31,7 +32,9 @@ var (
 	// ReporterCRDsToDump tells the reporter what CRs to dump.
 	ReporterCRDsToDump = []k8sreporter.CRData{
 		{Cr: &corev1.PodList{}},
-		{Cr: &coordinationv1.LeaseList{}, Namespace: &operatorNs},
+		{Cr: &coordinationv1.LeaseList{}, Namespace: &leaseNs},
 		{Cr: medik8sparams.NewUnstructuredList("nodemaintenance.medik8s.io", "v1beta1", "NodeMaintenanceList")},
+		{Cr: medik8sparams.NewUnstructuredList("remediation.medik8s.io", "v1alpha1", "NodeHealthCheckList")},
+		{Cr: medik8sparams.NewUnstructuredList("test.medik8s.io", "v1alpha1", "TestRemediationList")},
 	}
 )
