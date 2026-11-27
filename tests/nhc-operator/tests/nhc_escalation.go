@@ -114,13 +114,6 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 
 			sweepStaleTestNHCs(ctx, "Leftover test NHC CRs would own remediation CRs for the escalation target node")
 
-			By("Selecting target worker node")
-
-			targetNode, nodeErr := helpers.SelectWorkerNode(ctx, APIClient)
-			Expect(nodeErr).ToNot(HaveOccurred(), "Failed to select worker node")
-			targetWorkerName = targetNode.Name
-			GinkgoWriter.Printf("Target worker node for escalation E2E: %s\n", targetWorkerName)
-
 			By("Setting up TestRemediation CRDs and RBAC")
 
 			setupTestRemediationResources(ctx)
@@ -135,12 +128,40 @@ var _ = Describe("NHC Escalation -- Functional E2E",
 
 			verifyNHCDeploymentReady()
 
+			By("Selecting a Ready worker, preferring one distinct from the previous escalation target")
+
+			previousTarget := targetWorkerName
+			targetNode, nodeErr := helpers.SelectWorkerNode(ctx, APIClient, previousTarget)
+			if nodeErr != nil {
+				// Only one Ready worker may remain (e.g. previous target still recovering).
+				targetNode, nodeErr = helpers.SelectWorkerNode(ctx, APIClient)
+			}
+			Expect(nodeErr).ToNot(HaveOccurred(), "Failed to select worker node")
+			targetWorkerName = targetNode.Name
+			GinkgoWriter.Printf("Target worker node for escalation E2E: %s\n", targetWorkerName)
+
 			By("Verifying target worker is Ready before test")
 
 			Expect(helpers.WaitForNodeReady(ctx, APIClient, targetWorkerName,
 				nhcparams.DefaultPollInterval, nhcparams.NodeReadyTimeout,
 				GinkgoWriter.Printf)).To(Succeed(),
 				"Target worker %s should be Ready before test", targetWorkerName)
+
+			By("Verifying SNR node agents are Ready")
+
+			Expect(waitForSNRNodeAgents(ctx)).To(Succeed(),
+				"SNR DaemonSet agents should be Ready before remediation")
+
+			By("Verifying SSH access to target worker")
+
+			Eventually(func() error {
+				_, sshErr := helpers.RunSSHCommand(
+					ctx, APIClient, targetWorkerName, nhcparams.SSHTimeout, "true")
+
+				return sshErr
+			}).WithPolling(nhcparams.DefaultPollInterval).
+				WithTimeout(nhcparams.NodeReadyTimeout).Should(Succeed(),
+				"SSH to %s should work before stopping kubelet", targetWorkerName)
 		})
 
 		JustAfterEach(func() {
