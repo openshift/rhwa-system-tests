@@ -45,7 +45,7 @@ func getNodeBootID(nodeName string) (string, error) {
 }
 
 // nsenterCmd is the nsenter binary name used to enter host namespaces.
-// nsenterMountFlag is the --mount flag passed to nsenter to enter the host mount namespace.
+// nsenterMountFlag is the --mount flag passed to nsenter to enter the host mount namespace (pid 1).
 const (
 	nsenterCmd       = "nsenter"
 	nsenterMountFlag = "--mount"
