@@ -26,6 +26,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8slabels "k8s.io/apimachinery/pkg/labels"
@@ -973,11 +974,10 @@ func snrCRsForNodes(ctx context.Context, nodeNames []string) ([]string, error) {
 // selector matches any of the given nodes. Such an NHC could legitimately
 // create a SelfNodeRemediation during the observation window, which would
 // fail the no-remediation assertion for a reason unrelated to this fix.
+//
+// When the NodeHealthCheck CRD is not installed (missing-CRD error), returns
+// (nil, nil). Other list errors are propagated to the caller.
 func nhcNamesSelectingNodes(ctx context.Context, nodes []corev1.Node) ([]string, error) {
-	if !isNHCCRDInstalled() {
-		return nil, nil
-	}
-
 	nhcList := &unstructured.UnstructuredList{}
 	nhcList.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   snrparams.NHCAPIGroup,
@@ -986,12 +986,23 @@ func nhcNamesSelectingNodes(ctx context.Context, nodes []corev1.Node) ([]string,
 	})
 
 	if err := APIClient.List(ctx, nhcList); err != nil {
+		if meta.IsNoMatchError(err) || k8serrors.IsNotFound(err) {
+			return nil, nil
+		}
+
 		return nil, fmt.Errorf("failed to list NodeHealthCheck CRs: %w", err)
 	}
 
+	return nhcNamesMatchingNodes(nhcList.Items, nodes)
+}
+
+// nhcNamesMatchingNodes filters nhcItems for those whose spec.selector matches
+// any node in nodes. It is the selector-matching core of nhcNamesSelectingNodes,
+// separated so callers with an already-fetched list avoid a second API round-trip.
+func nhcNamesMatchingNodes(nhcItems []unstructured.Unstructured, nodes []corev1.Node) ([]string, error) {
 	matched := make([]string, 0)
 
-	for _, nhc := range nhcList.Items {
+	for _, nhc := range nhcItems {
 		rawSelector, found, err := unstructured.NestedMap(nhc.Object, "spec", "selector")
 		if err != nil {
 			return nil, fmt.Errorf("failed to read spec.selector of NHC %q: %w", nhc.GetName(), err)
